@@ -1,0 +1,17 @@
+{
+  "name": "pardes",
+  "description": "A calm-coding marketplace of Claude Code plugins and skills.",
+  "owner": {
+    "name": "ShivaeDev"
+  },
+  "allowCrossMarketplaceDependenciesOn": [
+    "claude-plugins-official"
+  ],
+  "plugins": [
+    {
+      "name": "base",
+      "source": "./plugins/base",
+      "description": "Foundational plugin — shared hooks and core skills."
+    }
+  ]
+}

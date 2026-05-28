@@ -1,0 +1,59 @@
+name: version-bump
+
+# SECURITY POSTURE (see scripts/bump.ts for the rest):
+# - Triggers on push to main ONLY. No pull_request / workflow_dispatch — the job
+#   never runs in an untrusted context, so there is no supply-chain surface to
+#   hijack (a fork PR can't trigger it; nothing untrusted runs with the token).
+# - Least-privilege permissions. Actions pinned to full commit SHAs.
+# - The bump opens an auto-merge PR with GITHUB_TOKEN (no bypass actor, no standing
+#   secret; GITHUB_TOKEN pushes don't re-trigger workflows, so no recursion).
+# - Untrusted strings (commit messages/diffs) are passed to tools as argv DATA,
+#   never interpolated into a shell. opencode runs read-only (classify only).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write        # push the bump branch
+  pull-requests: write   # open + enable auto-merge on the bump PR
+
+concurrency:
+  group: version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    # Belt-and-suspenders: the GITHUB_TOKEN auto-merge doesn't trigger a run, but
+    # if a human merges the bump PR manually, skip re-processing the bot's commit.
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0   # need history for the github.event.before..after diff
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.3.13'
+
+      - name: Install opencode (version-pinned)
+        env:
+          OPENCODE_VERSION: '1.15.10'
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+        # HARDENING TODO: curl|bash is pinned by version but still a remote script.
+        # Consider a checksum-verified release-binary download as a follow-up.
+
+      - name: Classify, bump, and open auto-merge PR
+        env:
+          # ONLY GitHub-controlled SHAs here (safe). bump.ts gathers commit
+          # messages/diffs itself via git as DATA — nothing attacker-controlled is
+          # interpolated into a shell command anywhere.
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}   # set this repo VARIABLE to your zen/go model id (provider/model)
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun scripts/bump.ts

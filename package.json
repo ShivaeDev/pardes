@@ -5,6 +5,7 @@
   "description": "A calm-coding marketplace of Claude Code plugins and skills.",
   "type": "module",
   "scripts": {
+    "ci": "biome ci .",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome check --error-on-warnings .",

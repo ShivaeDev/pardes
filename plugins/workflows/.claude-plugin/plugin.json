@@ -3,8 +3,14 @@
     "name": "ShivaeDev"
   },
   "description": "A starter library of reusable Workflow-tool orchestration scripts — adversarial writer→reviewer, read-only fan-out investigation, and parallel-edit-then-serialized-verify — each callable as workflows:<name>.",
-  "keywords": ["workflows", "orchestration", "subagents", "review", "investigation"],
+  "keywords": [
+    "workflows",
+    "orchestration",
+    "subagents",
+    "review",
+    "investigation"
+  ],
   "license": "MIT",
   "name": "workflows",
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

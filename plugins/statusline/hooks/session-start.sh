@@ -48,6 +48,9 @@ launcher_body="#!/usr/bin/env bash
 # statusline@pardes launcher — managed by the statusline plugin's SessionStart
 # hook. Safe to delete; it is recreated on the next session start. Do not edit:
 # changes are overwritten. The plugin path below is refreshed on every update.
+# If bun is unavailable, exit cleanly with an empty line rather than letting the
+# status line crash to a 127 blank.
+command -v bun >/dev/null 2>&1 || { echo ''; exit 0; }
 exec bun \"$cli\" \"\$@\"
 "
 # Only rewrite when the contents actually changed, to avoid needless disk churn.

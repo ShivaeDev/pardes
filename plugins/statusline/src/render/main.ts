@@ -128,7 +128,11 @@ export function renderMain(s: StatusInput): string {
 
   // ---- Model + effort + session economics ---------------------------------
   const tag = modelTag(s.model?.id, s.model?.display_name, ctx.context_window_size);
-  const modelSeg = `${fg(C.model, tag.short)}${tag.is1M ? ` ${fg(C.ctx1m, '1M')}` : ''}`;
+  // Omit the model segment entirely when there's no model info (empty tag),
+  // rather than rendering a bare "?".
+  const modelSeg = tag.short
+    ? `${fg(C.model, tag.short)}${tag.is1M ? ` ${fg(C.ctx1m, '1M')}` : ''}`
+    : undefined;
 
   const eff = s.effort?.level ? EFFORT[s.effort.level] : undefined;
   const effortSeg = eff ? fg(eff.color, `✦ ${eff.label}`) : undefined;

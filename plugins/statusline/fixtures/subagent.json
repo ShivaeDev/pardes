@@ -1,10 +1,10 @@
 {
   "columns": 120,
   "cwd": "/home/dev/projects/widget",
-  "session_id": "5d12512a",
+  "session_id": "00000000",
   "tasks": [
     {
-      "description": "locate the encode/decode round-trip tests across the source tree",
+      "description": "search the source tree for the relevant modules",
       "id": "task-1",
       "name": "Explore",
       "startTime": 1779999400000,
@@ -17,7 +17,7 @@
       "type": "Explore"
     },
     {
-      "description": "review the diff for correctness regressions",
+      "description": "review the diff for correctness bugs",
       "id": "task-2",
       "name": "code-reviewer",
       "startTime": 1779999100000,
@@ -27,7 +27,7 @@
       "type": "general-purpose"
     },
     {
-      "description": "apply the shared builder to the next module",
+      "description": "add input validation to the next module",
       "id": "task-3",
       "name": "migrate-module",
       "startTime": 1779999300000,
@@ -37,7 +37,7 @@
       "type": "general-purpose"
     },
     {
-      "description": "poll the release PR checks until green",
+      "description": "poll the pull request checks until green",
       "id": "task-4",
       "name": "wait-ci",
       "startTime": 0,

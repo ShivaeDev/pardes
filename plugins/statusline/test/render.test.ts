@@ -93,6 +93,42 @@ describe('renderSubagent', () => {
     expect(first?.content).not.toContain('░');
   });
 
+  it('clamps the numerator to the window so a 1M-session agent never reads used > total', () => {
+    // Wall is 400k − 35k = 365k usable. A subagent that ran in a 1M parent can
+    // legitimately blow past that; the label must clamp, not show "500k/365k".
+    const [first] = rows({
+      columns: 120,
+      tasks: [{ id: 'big', status: 'running', tokenCount: 500_000, tokenSamples: [500_000] }],
+    });
+    expect(first?.content).toContain('365k/365k');
+    expect(first?.content).toContain('100%');
+    expect(first?.content).not.toContain('500k/');
+  });
+
+  it('scales the bar to CLAUDE_STATUSLINE_SUBAGENT_WINDOW when a parent window is threaded through', () => {
+    // The threaded window is a *full* window, so the auto-compact buffer is
+    // still subtracted: 1M − 35k = 965k usable; 500k / 965k ≈ 52%. Clear the
+    // ambient auto-compact wall (set in beforeEach) so the threaded full window
+    // is what gets buffered — the wall would otherwise take precedence.
+    const savedSub = process.env.CLAUDE_STATUSLINE_SUBAGENT_WINDOW;
+    const savedWall = process.env[WINDOW_KEY];
+    process.env.CLAUDE_STATUSLINE_SUBAGENT_WINDOW = '1000000';
+    delete process.env[WINDOW_KEY];
+    try {
+      const [first] = rows({
+        columns: 120,
+        tasks: [{ id: 'big', status: 'running', tokenCount: 500_000, tokenSamples: [500_000] }],
+      });
+      expect(first?.content).toContain('500k/965k');
+      expect(first?.content).toContain('52%');
+    } finally {
+      if (savedSub === undefined) delete process.env.CLAUDE_STATUSLINE_SUBAGENT_WINDOW;
+      else process.env.CLAUDE_STATUSLINE_SUBAGENT_WINDOW = savedSub;
+      if (savedWall === undefined) delete process.env[WINDOW_KEY];
+      else process.env[WINDOW_KEY] = savedWall;
+    }
+  });
+
   it('renders the sparkline at a fixed width regardless of sample count', () => {
     // The spark is the only segment wrapped in C.tokens; isolate that exact
     // wrapper so the context bar's block glyphs don't pollute the count.

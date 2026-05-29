@@ -26,4 +26,8 @@ describe('modelTag', () => {
   it('pulls the version from the display name when the id lacks it', () => {
     expect(modelTag('some-model', 'Sonnet 4.6', 200000).short).toBe('S4.6');
   });
+  it('returns an empty short tag when there is no model info (caller omits the segment)', () => {
+    expect(modelTag(undefined, undefined, undefined).short).toBe('');
+    expect(modelTag('', '', undefined).short).toBe('');
+  });
 });

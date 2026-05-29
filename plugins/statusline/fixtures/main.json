@@ -25,15 +25,15 @@
   "model": { "display_name": "Opus 4.8 (1M context)", "id": "claude-opus-4-8[1m]" },
   "output_style": { "name": "default" },
   "pr": {
-    "number": 1211,
+    "number": 42,
     "review_state": "pending",
-    "url": "https://github.com/example-org/widget/pull/1211"
+    "url": "https://github.com/example-org/widget/pull/42"
   },
   "rate_limits": {
     "five_hour": { "resets_at": 1779999446, "used_percentage": 38.4 },
     "seven_day": { "resets_at": 1780400000, "used_percentage": 12.1 }
   },
-  "session_id": "5d12512a-73ec-4011-a7c4-9b395d475236",
+  "session_id": "00000000-0000-4000-8000-000000000000",
   "thinking": { "enabled": true },
   "transcript_path": "/home/dev/.claude/projects/x/y.jsonl",
   "version": "2.1.154",

@@ -20,6 +20,12 @@ export function modelTag(
   const rawId = (id ?? '').toLowerCase();
   const is1M = rawId.includes('[1m]') || (contextWindowSize ?? 0) >= 1_000_000;
 
+  // No model info at all -> empty tag. The caller omits the segment rather than
+  // rendering a bare "?" that reads like a glyph error.
+  if (!rawId && !(displayName ?? '').trim()) {
+    return { is1M, short: '' };
+  }
+
   // Family letter.
   let letter = '';
   for (const [name, l] of Object.entries(FAMILY_LETTER)) {

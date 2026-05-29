@@ -58,13 +58,25 @@ function gaugeTier(columns: number): { spark: number; barW: number } {
 }
 
 /**
+ * The usable token budget the subagent context bar scales to. The subagent
+ * contract carries no per-task window, so we derive one from the env:
+ *   - CLAUDE_STATUSLINE_SUBAGENT_WINDOW: the parent session's full window, when
+ *     a wrapper threads it through (lets a 1M parent scale its agents' bars to
+ *     1M instead of the 200k default). Passed as the model's full window, so the
+ *     auto-compact buffer is still subtracted.
+ *   - else: effectiveWindow's default (200k − buffer = 165k), as before.
+ * Either way the numerator is clamped to this budget at the call site, so the
+ * label can never read numerator > denominator (e.g. "500k/165k").
+ */
+function subagentWindow(): number {
+  const env = Number(process.env.CLAUDE_STATUSLINE_SUBAGENT_WINDOW);
+  return effectiveWindow(Number.isFinite(env) && env > 0 ? env : undefined);
+}
+
+/**
  * One agent-panel row. Fixed-width gauges live on the LEFT in the order
  * sparkline → context bar → elapsed; the variable-width name (then a dimmed,
  * truncated description) trails on the RIGHT so columns line up across rows.
- *
- * The subagent contract carries no per-task window size, so token usage is
- * scaled to the shared compaction wall (CLAUDE_CODE_AUTO_COMPACT_WINDOW) minus
- * the auto-compact buffer — an approximation, but consistent with the main line.
  */
 function renderRow(task: SubagentTask, columns: number, now: number): string {
   const st = statusStyle(task.status);
@@ -87,11 +99,15 @@ function renderRow(task: SubagentTask, columns: number, now: number): string {
 
   // Context bar (fill vs the compaction wall) + numbers + percent.
   if (hasTokens) {
-    const eff = effectiveWindow(undefined);
-    const fraction = eff > 0 ? count / eff : 0;
+    const eff = subagentWindow();
+    // Clamp the displayed numerator to the window: a subagent in a 1M parent can
+    // legitimately exceed the 200k default, and an unclamped label would read a
+    // nonsensical numerator > denominator (e.g. "500k/165k", "300%").
+    const shownCount = eff > 0 ? Math.min(count, eff) : count;
+    const fraction = eff > 0 ? shownCount / eff : 0;
     const pct = Math.min(100, fraction * 100);
     const color = pressureColor(pct);
-    const nums = fg(color, `${fmt.tokens(count)}/${fmt.tokens(eff)}`);
+    const nums = fg(color, `${fmt.tokens(shownCount)}/${fmt.tokens(eff)}`);
     const pctStr = fg(color, `${pct.toFixed(0)}%`);
     left.push(
       tier.barW > 0

@@ -45,6 +45,11 @@
       "description": "A rich, multi-line status line for Claude Code — model, context-pressure bar, cost, git, PR, and rate limits on the main line, plus per-subagent gauges in the agent panel.",
       "name": "statusline",
       "source": "./plugins/statusline"
+    },
+    {
+      "description": "A starter library of reusable Workflow-tool orchestration scripts — adversarial writer→reviewer, read-only fan-out investigation, and parallel-edit-then-serialized-verify — each callable as workflows:<name>.",
+      "name": "workflows",
+      "source": "./plugins/workflows"
     }
   ]
 }

@@ -13,7 +13,7 @@ plugin, so installing it pulls the whole marketplace in at once.
 
 Installing `pardes-all` auto-installs and enables every other pardes plugin
 (`base`, `onboarding`, `orchestrate`, `pr-description`, `shell-helpers`,
-`shift-leader`, `statusline`) as dependencies.
+`shift-leader`, `statusline`, `workflows`) as dependencies.
 
 > **Requires Claude Code v2.1.143+** for plugin dependencies to auto-install and
 > auto-enable. On older versions, install the plugins individually (see the root

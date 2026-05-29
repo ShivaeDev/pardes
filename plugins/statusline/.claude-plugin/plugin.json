@@ -4,14 +4,7 @@
   },
   "description": "A rich, multi-line status line for Claude Code — model, context-pressure bar, cost, git, PR, and rate limits on the main line, plus per-subagent gauges in the agent panel.",
   "hooks": "./hooks/hooks.json",
-  "keywords": [
-    "statusline",
-    "status-bar",
-    "context-window",
-    "subagent",
-    "git",
-    "tokens"
-  ],
+  "keywords": ["statusline", "status-bar", "context-window", "subagent", "git", "tokens"],
   "license": "MIT",
   "name": "statusline",
   "version": "0.1.1"

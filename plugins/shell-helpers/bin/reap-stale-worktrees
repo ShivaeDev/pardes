@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# reap-stale-worktrees — remove worktrees whose tip commit is older than a
+# threshold, scoped to a managed directory.
+#
+# Usage: reap-stale-worktrees [managed_dir] [age_days]
+#   managed_dir defaults to $SH_WORKTREE_DIR (no-op if unset).
+#   age_days    defaults to $SH_WORKTREE_MAX_AGE_DAYS, else 7.
+#
+# Safety contract: only worktrees under the managed directory are considered;
+# never removes the current worktree; refuses to remove a worktree with
+# uncommitted changes.
+set -eu
+
+SH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../shell/helpers.sh
+. "$SH_DIR/shell/helpers.sh"
+
+sh_reap_stale_worktrees "$@"

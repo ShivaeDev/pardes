@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# freshen — bring the current checkout to a clean, current baseline, run the
+# configured setup command, prune merged branches, and reap stale worktrees.
+#
+# Never performs a destructive reset: a dirty tree or a diverged worktree aborts
+# the update and reports, rather than discarding uncommitted work.
+#
+# Configuration (env vars, all with safe defaults):
+#   SH_DEFAULT_BRANCH, SH_SETUP_CMD, SH_WORKTREE_DIR, SH_WORKTREE_MAX_AGE_DAYS
+set -eu
+
+# Locate the sourceable library next to this executable.
+SH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../shell/helpers.sh
+. "$SH_DIR/shell/helpers.sh"
+
+sh_freshen "$@"

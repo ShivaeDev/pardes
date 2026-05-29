@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# prune-merged-branches — delete local branches whose upstream remote ref is
+# gone (merged-and-cleaned PRs).
+#
+# Safety contract: only touches branches whose upstream reports "[gone]"; never
+# touches a no-upstream branch, the current branch, or a branch checked out in
+# any worktree.
+set -eu
+
+SH_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../shell/helpers.sh
+. "$SH_DIR/shell/helpers.sh"
+
+sh_prune_merged_branches "$@"

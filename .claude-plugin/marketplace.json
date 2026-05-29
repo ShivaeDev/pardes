@@ -24,6 +24,11 @@
       "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler."
     },
     {
+      "name": "shell-helpers",
+      "source": "./plugins/shell-helpers",
+      "description": "Reusable, dependency-free orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, reap stale worktrees, and a thin branch/commit/push/PR DSL. Available as PATH commands and sourceable shell functions."
+    },
+    {
       "name": "shift-leader",
       "source": "./plugins/shift-leader",
       "description": "Run as the autonomous shift leader of a multi-PR / multi-agent effort — maximize progress, reach the away user only via AskUserQuestion, gate phases on PR merges (never merge yourself), and dispatch file-disjoint parallel worktree agents at high velocity."

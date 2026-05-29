@@ -4,7 +4,8 @@
  *
  * Flow: figure out which plugin(s) the pushed range touched -> ask opencode to
  * classify the semver bump + draft changelog bullets (JSON out) -> apply the
- * version bump + changelog edits HERE -> open an auto-merge PR.
+ * version bump + changelog edits HERE -> open a PR, merge it synchronously, and
+ * tag the merged commit `<plugin>--v<version>` — all in this one run.
  *
  * SECURITY
  * - Every external command uses execFileSync (NO shell). Commit messages/diffs
@@ -13,7 +14,13 @@
  * - opencode runs as the `bump` agent: read-only (can read repo files for
  *   context, but cannot write/edit/exec). This script performs every file write,
  *   so the model can't mutate the repo or exfiltrate.
- * - PR is opened + auto-merged with GITHUB_TOKEN -> no recursion, no bypass actor.
+ * - Everything uses GITHUB_TOKEN (no bypass actor, no standing secret). The merge
+ *   is SYNCHRONOUS, not auto-merge: a GITHUB_TOKEN merge doesn't re-trigger any
+ *   workflow, so an async "tag on merge" step would never fire — we merge + tag
+ *   inline instead. The GITHUB_TOKEN merge-push also can't re-trigger this job,
+ *   so there is no recursion.
+ * - Version tags (`<plugin>--v<version>`) are create-only. A repo ruleset on
+ *   `*--v*` blocks tag update + delete; we never force/move them (supply-chain).
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -365,22 +372,75 @@ const body = [
 git(['commit', '-m', title]);
 git(['push', '-u', 'origin', branch]);
 
-try {
-  execFileSync(
-    'gh',
-    ['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body],
-    {
-      stdio: 'inherit',
-    },
-  );
-} catch (e) {
-  die(`gh pr create failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+// Thin wrapper around gh with a clean one-line failure (mirrors git()).
+function gh(args: string[]): void {
+  try {
+    execFileSync('gh', args, { stdio: 'inherit' });
+  } catch (e) {
+    die(
+      `gh ${args.slice(0, 2).join(' ')} failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`,
+    );
+  }
 }
-try {
-  execFileSync('gh', ['pr', 'merge', branch, '--auto', '--squash'], { stdio: 'inherit' });
-  console.log('opened auto-merge PR');
-} catch {
-  console.log(
-    'opened PR but could not enable auto-merge (is "Allow auto-merge" on?); leaving it open',
-  );
+
+gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body]);
+
+// SYNCHRONOUS merge — NOT `--auto`. Auto-merge happens asynchronously after this
+// job exits, and a GITHUB_TOKEN merge does not re-trigger any workflow (the
+// recursion guard). Both mean a later "tag on merge" step could never fire. So we
+// merge inline here and tag the resulting commit in this same run.
+//
+// `gh pr merge` (no --auto) merges synchronously, but GitHub may not have finished
+// computing the PR's mergeability the instant after `pr create` — gh then fails
+// with a transient "still computing"/"not mergeable yet" error. Retry with a short
+// backoff so an unattended run isn't flaky, and if a prior attempt actually merged
+// (only the branch-delete hiccuped), detect that and stop rather than retrying a
+// PR that's already gone.
+function bumpPrMerged(): boolean {
+  const r = spawnSync('gh', ['pr', 'view', branch, '--json', 'state', '--jq', '.state'], {
+    encoding: 'utf8',
+  });
+  return r.status === 0 && r.stdout.trim() === 'MERGED';
+}
+
+function mergeBumpPr(): void {
+  const args = ['pr', 'merge', branch, '--squash', '--delete-branch'];
+  const maxAttempts = 6;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const r = spawnSync('gh', args, { encoding: 'utf8' });
+    if (r.status === 0) {
+      console.log('merged bump PR');
+      return;
+    }
+    if (bumpPrMerged()) {
+      console.log('bump PR already merged');
+      return;
+    }
+    const msg = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim().split('\n')[0] || `exit ${r.status}`;
+    if (attempt === maxAttempts) {
+      die(`gh pr merge failed after ${maxAttempts} attempts: ${msg}`);
+    }
+    console.log(`merge not ready (attempt ${attempt}/${maxAttempts}: ${msg}); retrying in 5s…`);
+    spawnSync('sleep', ['5']);
+  }
+}
+
+mergeBumpPr();
+
+// The squash merge created one new commit on main. Fetch it and tag each bumped
+// plugin's version on it: `<plugin>--v<version>`. A repo ruleset on `*--v*` blocks
+// tag update + delete, so these tags are immutable once created — never force.
+git(['fetch', 'origin', 'main']);
+const mergeSha = git(['rev-parse', 'origin/main']);
+for (const b of bumped) {
+  const tag = `${b.name}--v${b.to}`;
+  // Idempotent: if a re-run finds the tag already on the remote, leave it. We
+  // never delete/move a `*--v*` tag — the ruleset forbids it and so do we.
+  if (spawnSync('git', ['ls-remote', '--exit-code', 'origin', `refs/tags/${tag}`]).status === 0) {
+    console.log(`tag ${tag} already exists — leaving it`);
+    continue;
+  }
+  git(['tag', tag, mergeSha]);
+  git(['push', 'origin', `refs/tags/${tag}`]);
+  console.log(`✓ tagged ${tag} → ${mergeSha.slice(0, 12)}`);
 }

@@ -5,8 +5,13 @@ name: version-bump
 #   never runs in an untrusted context, so there is no supply-chain surface to
 #   hijack (a fork PR can't trigger it; nothing untrusted runs with the token).
 # - Least-privilege permissions. Actions pinned to full commit SHAs.
-# - The bump opens an auto-merge PR with GITHUB_TOKEN (no bypass actor, no standing
-#   secret; GITHUB_TOKEN pushes don't re-trigger workflows, so no recursion).
+# - The bump opens a PR with GITHUB_TOKEN, merges it SYNCHRONOUSLY in the same run,
+#   then tags the merged commit (no bypass actor, no standing secret). A
+#   GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so there is no
+#   recursion — and that same fact is why the tag must be created inline (an async
+#   "tag on merge" step would never fire).
+# - Version tags (`<plugin>--v<version>`) are create-only; a repo ruleset on
+#   `*--v*` blocks tag update + delete (supply-chain protection).
 # - Untrusted strings (commit messages/diffs) are passed to tools as argv DATA,
 #   never interpolated into a shell. opencode runs read-only (classify only).
 
@@ -15,8 +20,8 @@ on:
     branches: [main]
 
 permissions:
-  contents: write        # push the bump branch
-  pull-requests: write   # open + enable auto-merge on the bump PR
+  contents: write        # push the bump branch + the version tags
+  pull-requests: write   # open + merge the bump PR
 
 concurrency:
   group: version-bump
@@ -42,7 +47,7 @@ jobs:
           bun add -g opencode-ai@1.15.12
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
-      - name: Classify, bump, and open auto-merge PR
+      - name: Classify, bump, merge, and tag
         env:
           # ONLY GitHub-controlled SHAs here (safe). bump.ts gathers commit
           # messages/diffs itself via git as DATA — nothing attacker-controlled is

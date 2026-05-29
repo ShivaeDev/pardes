@@ -21,6 +21,8 @@ Pardes is a small marketplace of focused Claude Code plugins. Each plugin ships 
 
 The composition story to convey: **shift-leader** is the conductor, **orchestrate** plans+ships each big PR under it, **shell-helpers** keeps the worktrees and branches clean, **pr-description** writes the PRs, and **statusline** lets the user see it all happening. A user new to the marketplace usually wants `base` + whichever of those match their workflow.
 
+If a user simply wants the whole set, mention **pardes-all** — a meta plugin with no skill of its own that just depends on every other plugin, so a single install pulls in the entire marketplace at once. It's the "give me everything" option for someone who doesn't want to pick à la carte. (The human-facing README has the exact install command; point them there rather than reciting it.)
+
 When you mention any sibling skill, treat it as **optional and possibly-installed**: if the skill is available in this session, suggest invoking it directly; if it isn't, describe what it does and point the user at installing that plugin from the marketplace (the human-facing README has the exact install commands — don't paste install commands into your own reasoning here).
 
 Tailor the orientation to what the user actually asked. If they just said "what is this / help me get started," give the short tour above and then move to the doctor. If they asked about a specific plugin, lead with that one and how it composes with the rest.

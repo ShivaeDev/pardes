@@ -16,6 +16,11 @@ that make coding calmer and more deliberate.
 /plugin
 ```
 
+**New to pardes?** Install the `onboarding` plugin and run its skill — it gives
+you a guided tour of what each plugin does and how they compose, then an
+advisory check of your Claude Code settings (it never changes anything without
+your explicit yes).
+
 ## Plugins
 
 | Plugin | What it does |

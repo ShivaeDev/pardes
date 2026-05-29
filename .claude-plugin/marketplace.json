@@ -22,6 +22,11 @@
       "name": "pr-description",
       "source": "./plugins/pr-description",
       "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler."
+    },
+    {
+      "name": "shift-leader",
+      "source": "./plugins/shift-leader",
+      "description": "Run as the autonomous shift leader of a multi-PR / multi-agent effort — maximize progress, reach the away user only via AskUserQuestion, gate phases on PR merges (never merge yourself), and dispatch file-disjoint parallel worktree agents at high velocity."
     }
   ]
 }

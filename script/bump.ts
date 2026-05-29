@@ -388,10 +388,44 @@ gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--bod
 // SYNCHRONOUS merge — NOT `--auto`. Auto-merge happens asynchronously after this
 // job exits, and a GITHUB_TOKEN merge does not re-trigger any workflow (the
 // recursion guard). Both mean a later "tag on merge" step could never fire. So we
-// merge inline here and tag the resulting commit in this same run. `gh pr merge`
-// (no --auto) blocks until the squash merge lands, then deletes the bump branch.
-gh(['pr', 'merge', branch, '--squash', '--delete-branch']);
-console.log('merged bump PR');
+// merge inline here and tag the resulting commit in this same run.
+//
+// `gh pr merge` (no --auto) merges synchronously, but GitHub may not have finished
+// computing the PR's mergeability the instant after `pr create` — gh then fails
+// with a transient "still computing"/"not mergeable yet" error. Retry with a short
+// backoff so an unattended run isn't flaky, and if a prior attempt actually merged
+// (only the branch-delete hiccuped), detect that and stop rather than retrying a
+// PR that's already gone.
+function bumpPrMerged(): boolean {
+  const r = spawnSync('gh', ['pr', 'view', branch, '--json', 'state', '--jq', '.state'], {
+    encoding: 'utf8',
+  });
+  return r.status === 0 && r.stdout.trim() === 'MERGED';
+}
+
+function mergeBumpPr(): void {
+  const args = ['pr', 'merge', branch, '--squash', '--delete-branch'];
+  const maxAttempts = 6;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const r = spawnSync('gh', args, { encoding: 'utf8' });
+    if (r.status === 0) {
+      console.log('merged bump PR');
+      return;
+    }
+    if (bumpPrMerged()) {
+      console.log('bump PR already merged');
+      return;
+    }
+    const msg = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim().split('\n')[0] || `exit ${r.status}`;
+    if (attempt === maxAttempts) {
+      die(`gh pr merge failed after ${maxAttempts} attempts: ${msg}`);
+    }
+    console.log(`merge not ready (attempt ${attempt}/${maxAttempts}: ${msg}); retrying in 5s…`);
+    spawnSync('sleep', ['5']);
+  }
+}
+
+mergeBumpPr();
 
 // The squash merge created one new commit on main. Fetch it and tag each bumped
 // plugin's version on it: `<plugin>--v<version>`. A repo ruleset on `*--v*` blocks

@@ -12,6 +12,11 @@
       "name": "base",
       "source": "./plugins/base",
       "description": "Foundational plugin — shared hooks and core skills."
+    },
+    {
+      "name": "orchestrate",
+      "source": "./plugins/orchestrate",
+      "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time."
     }
   ]
 }

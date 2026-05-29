@@ -17,6 +17,11 @@
       "name": "orchestrate",
       "source": "./plugins/orchestrate",
       "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time."
+    },
+    {
+      "name": "pr-description",
+      "source": "./plugins/pr-description",
+      "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler."
     }
   ]
 }

@@ -1,0 +1,10 @@
+{
+  "name": "pr-description",
+  "version": "0.1.0",
+  "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler.",
+  "author": {
+    "name": "ShivaeDev"
+  },
+  "keywords": ["pr", "pull-request", "description", "writing", "review"],
+  "license": "MIT"
+}

@@ -2,13 +2,10 @@
   <img src="assets/pardes-card.png" alt="Pardes — a calm-coding marketplace of Claude Code plugins and skills" width="820">
 </p>
 
-# Pardes
-
-A calm-coding marketplace of [Claude Code](https://code.claude.com) plugins and skills.
-
 *Pardes* (פרדס) means "orchard" or "walled garden" — the ancient root the word
-*paradise* itself grows from. The idea: a tended garden of small, sharp tools
-that make coding calmer and more deliberate.
+*paradise* itself grows from. It's a calm-coding marketplace of [Claude Code](https://code.claude.com)
+plugins and skills: a tended garden of small, sharp tools that make coding calmer
+and more deliberate.
 
 ## Using the marketplace
 

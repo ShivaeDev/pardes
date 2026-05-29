@@ -31,8 +31,11 @@ Every script bakes in the same posture:
 
 - **Writers run worktree-isolated** (`isolation: 'worktree'`); read-only agents do
   not, because a file-editing agent in a non-isolated orchestrator stalls.
-- **Never merge, never open a PR.** The workflows hand back a diff location and a
-  verdict; a human opens the PR and decides whether to merge.
+- **Never merge, never open a PR.** The workflows hand back a branch (or results)
+  and a verdict; a human opens the PR and decides whether to merge.
+- **Continuity flows through git branches.** Each isolated agent gets a *fresh*
+  worktree, so work is passed between agents by branch ref (diff it, or branch off
+  it) — not by sharing a working tree.
 - **Lean context.** Long artifacts are written to files; only a tight briefing and
   the path come back to the caller.
 - **Structured output** (`schema`) is used for any result the workflow branches on.
@@ -45,8 +48,7 @@ Implement a change in a worktree-isolated agent, then have a *second, adversaria
 agent review the resulting diff — catching the class of defects a self-reviewing
 author misses. Optionally loops: blocking findings go back to a fixer and get
 re-reviewed, bounded by `maxRounds`. **Never merges and never opens a PR** — it
-returns the diff location plus the final structured verdict so a human makes the
-call.
+returns the final branch plus the structured verdict so a human makes the call.
 
 ```js
 // string form — just the task
@@ -63,7 +65,7 @@ Workflow({
 });
 ```
 
-`args`: a task string, or `{ task, maxRounds?, setupCommand? }`.
+`args`: a task string, or `{ task, base?, maxRounds?, setupCommand? }`.
 
 ### `workflows:investigate`
 
@@ -93,12 +95,15 @@ Workflow({
 
 ### `workflows:parallel-verify`
 
-Fan out one worktree-isolated writer per **disjoint** work partition, then run a
-**single serialized** heavy verification at the end. Writers run in parallel
-(isolated in their own worktrees), but the heavy build/test runs exactly once,
-alone — running several heavy verifications at once can exhaust memory. The caller
-supplies the partition cut (the workflow never invents one); if `partitions` is
-missing or empty, it logs and returns early. **Never merges and never opens PRs.**
+Fan out one worktree-isolated writer per **disjoint** work partition, then
+**integrate the partition branches** (merge their refs into one fresh worktree) and
+run a **single serialized** heavy verification on the combined result. Writers run
+in parallel (isolated in their own worktrees), but the heavy build/test runs exactly
+once, alone — running several heavy verifications at once can exhaust memory. The
+caller supplies the partition cut (the workflow never invents one); if `partitions`
+is missing or empty, it logs and returns early. A real merge conflict at integration
+means the partitions weren't disjoint. **Never merges to the base branch and never
+opens PRs.**
 
 ```js
 Workflow({
@@ -114,6 +119,6 @@ Workflow({
 });
 ```
 
-`args`: `{ partitions: [{ label, files, task }], verifyCommand?, setupCommand? }`.
+`args`: `{ partitions: [{ label, files, task }], base?, verifyCommand?, setupCommand? }`.
 Partitions **must** touch disjoint files — that disjointness is the only thing
 preventing parallel writers from clobbering each other.

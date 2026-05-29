@@ -13,10 +13,8 @@
 #   SH_SETUP_CMD        post-update setup command (install/codegen/migrate); default no-op
 #   SH_WORKTREE_DIR     managed worktree directory reaping is scoped to; default no reaping
 #   SH_WORKTREE_MAX_AGE_DAYS  stale-worktree threshold in days; default 7
-#   SH_BRANCH_PREFIX    namespace prepended to new branch names; default none
 #
-# These helpers depend only on POSIX sh, git, awk, sed, and date. `gh` is
-# optional and used solely by the PR step, which degrades with a clear message.
+# These helpers depend only on POSIX sh, git, awk, sed, and date.
 
 # ----------------------------------------------------------------------------
 # Primitives
@@ -232,70 +230,4 @@ sh_freshen() {
 sh_pull_and_setup() {
   git pull --ff-only || return 1
   sh_run_setup
-}
-
-# ----------------------------------------------------------------------------
-# branch -> commit -> push -> PR DSL  (namespaced sh_*; gh optional)
-# ----------------------------------------------------------------------------
-
-# Start a new branch, namespaced under SH_BRANCH_PREFIX if set.
-#   sh_start <branch-name>
-sh_start() {
-  if [ -z "${1:-}" ]; then
-    printf 'usage: sh_start <branch-name>\n' >&2
-    return 2
-  fi
-  git switch -c "${SH_BRANCH_PREFIX:+$SH_BRANCH_PREFIX/}$1"
-}
-
-# Commit staged changes.
-#   sh_commit <subject> [body]
-sh_commit() {
-  if [ -z "${1:-}" ]; then
-    printf 'usage: sh_commit <subject> [body]\n' >&2
-    return 2
-  fi
-  if [ -n "${2:-}" ]; then
-    git commit -m "$1" -m "$2"
-  else
-    git commit -m "$1"
-  fi
-}
-
-# Stage everything, then commit.
-#   sh_commit_all <subject> [body]
-sh_commit_all() {
-  git add -A || return 1
-  sh_commit "$@"
-}
-
-# Push the current branch and set upstream.
-sh_push() { git push -u origin HEAD; }
-
-# Open a PR for the current branch. Requires `gh`; degrades with a clear message.
-#   sh_pr [extra gh pr create args...]
-sh_pr() {
-  if ! command -v gh >/dev/null 2>&1; then
-    printf 'shell-helpers: gh not found — push is done; open the PR manually in your browser.\n' >&2
-    return 127
-  fi
-  gh pr create --fill "$@"
-}
-
-# Commit-all + push + open PR in one step.
-#   sh_ship <subject> [body]
-sh_ship() {
-  sh_commit_all "$@" && sh_push && sh_pr
-}
-
-# Branch + commit-all + push + open PR in one step.
-#   sh_start_ship <branch-name> <subject> [body]
-sh_start_ship() {
-  local name="${1:-}"
-  if [ -z "$name" ]; then
-    printf 'usage: sh_start_ship <branch-name> <subject> [body]\n' >&2
-    return 2
-  fi
-  shift
-  sh_start "$name" && sh_ship "$@"
 }

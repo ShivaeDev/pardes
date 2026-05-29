@@ -26,7 +26,7 @@
     {
       "name": "shell-helpers",
       "source": "./plugins/shell-helpers",
-      "description": "Reusable, dependency-free orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, reap stale worktrees, and a thin branch/commit/push/PR DSL. Available as PATH commands and sourceable shell functions."
+      "description": "Reusable, dependency-free orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, and reap stale worktrees. Available as PATH commands and sourceable shell functions."
     },
     {
       "name": "shift-leader",

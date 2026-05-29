@@ -145,8 +145,11 @@ function parseClassification(raw: string): Classification {
   };
   const text = raw.trim();
   const candidates: string[] = [text];
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) candidates.push(fence[1].trim());
+  // The agent reasons first and emits the verdict as the FINAL fenced block, so
+  // try fenced blocks last-first — an example block inside the reasoning must not
+  // win over the real answer at the end.
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((m) => m[1].trim());
+  for (const f of fences.reverse()) candidates.push(f);
   const lazyBraces = text.match(/\{[\s\S]*?\}/); // first complete object (JSON followed by trailing prose)
   if (lazyBraces) candidates.push(lazyBraces[0]);
   const greedyBraces = text.match(/\{[\s\S]*\}/); // outermost span (prose-wrapped object)
@@ -208,6 +211,12 @@ function parseProse(full: string): Classification | null {
   return normalize({ bump: kind.toLowerCase(), ...sections });
 }
 
+// Strip ANSI escape sequences so the audited transcript is plain text in the CI
+// log. The escape byte is built from its code point to avoid a control char in
+// the regex source (which biome's noControlCharactersInRegex would reject).
+const ANSI_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]`, 'g');
+const stripAnsi = (s: string): string => s.replace(ANSI_ESCAPE, '');
+
 function classify(name: string, version: string, subjects: string[], diff: string): Classification {
   const prompt = [
     `Plugin: ${name}`,
@@ -222,19 +231,32 @@ function classify(name: string, version: string, subjects: string[], diff: strin
   ].join('\n');
 
   // No shell: the prompt (which embeds untrusted diff/commit text) is a single
-  // argv. We capture stderr instead of inheriting it (and drop --print-logs) so
-  // opencode's internal logs never pollute CI output — only a short tail is
-  // surfaced, and only if the run fails. The model's answer arrives on stdout.
-  const res = spawnSync('opencode', ['run', '--agent', 'bump', '-m', model, prompt], {
+  // argv. Default format + --thinking renders the model's reasoning AND its answer
+  // as human-readable text on stdout (vs --format json, which is raw events).
+  // opencode buffers when piped, so the whole transcript lands at once on exit —
+  // fine, we echo it as one block. --print-logs stays OFF: that flag is opencode's
+  // internal debug spew, not the model's work.
+  const res = spawnSync('opencode', ['run', '--agent', 'bump', '--thinking', '-m', model, prompt], {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
   });
   if (res.error) throw new Error(`could not launch opencode: ${res.error.message}`);
+
+  // Audit trail: echo opencode's full reasoning + output into a collapsed group
+  // in the Actions log (expand to review every step the model took). This is the
+  // whole point — the bump is mechanical, but the classification should be
+  // reviewable after the fact.
+  const transcript = stripAnsi(res.stdout ?? '');
+  console.log(`::group::opencode classification — ${name}`);
+  console.log(transcript.trim() || '(opencode produced no stdout)');
+  const err = stripAnsi(res.stderr ?? '').trim();
+  if (err) console.log(`--- stderr (last 8 lines) ---\n${err.split('\n').slice(-8).join('\n')}`);
+  console.log('::endgroup::');
+
   if (res.status !== 0) {
-    const tail = (res.stderr ?? '').trim().split('\n').slice(-6).join('\n');
-    throw new Error(`opencode exited ${res.status}${tail ? `:\n${tail}` : ' with no output'}`);
+    throw new Error(`opencode exited ${res.status} (see the "opencode classification — ${name}" group above)`);
   }
-  return parseClassification(res.stdout ?? '');
+  return parseClassification(transcript);
 }
 
 function bumpVersion(v: string, kind: Classification['bump']): string {
@@ -244,7 +266,7 @@ function bumpVersion(v: string, kind: Classification['bump']): string {
   return `${maj}.${min}.${pat + 1}`;
 }
 
-function writeChangelog(name: string, version: string, c: Classification): void {
+function writeChangelog(name: string, version: string, c: Classification, subjects: string[]): void {
   const file = join('changelog', `${name}.md`);
   const date = new Date().toISOString().slice(0, 10);
   const sections: string[] = [];
@@ -254,7 +276,15 @@ function writeChangelog(name: string, version: string, c: Classification): void 
       sections.push(`### ${key[0].toUpperCase()}${key.slice(1)}`, ...items.map((i) => `- ${i}`));
     }
   }
-  if (sections.length === 0) sections.push('### Changed', '- Maintenance.');
+  // The prompt requires at least one real bullet, so this is a genuine last
+  // resort. Don't emit a meaningless "Maintenance." line — fall back to the
+  // actual commit subjects, which at least name what landed.
+  if (sections.length === 0) {
+    const lines = (subjects.length ? subjects.slice(0, 3) : ['Internal changes']).map(
+      (s) => `- ${s.charAt(0).toUpperCase()}${s.slice(1)}`,
+    );
+    sections.push('### Changed', ...lines);
+  }
   const entry = `## [${version}] - ${date}\n${sections.join('\n')}\n`;
 
   if (existsSync(file)) {
@@ -289,7 +319,7 @@ for (const p of toBump) {
     const next = bumpVersion(current, c.bump);
     manifest.version = next;
     writeFileSync(vpath, `${JSON.stringify(manifest, null, 2)}\n`);
-    writeChangelog(p.name, next, c);
+    writeChangelog(p.name, next, c, subjects);
     bumped.push({ name: p.name, from: current, to: next, kind: c.bump });
     console.log(`✓ ${p.name}: ${current} → ${next} (${c.bump})`);
   } catch (e) {

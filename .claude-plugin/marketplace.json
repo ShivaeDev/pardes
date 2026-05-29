@@ -22,6 +22,11 @@
       "source": "./plugins/orchestrate"
     },
     {
+      "description": "Install the whole marketplace at once — a meta plugin with no skills of its own that depends on every other pardes plugin, so a single install pulls them all in (auto-install + auto-enable requires Claude Code v2.1.143+).",
+      "name": "pardes-all",
+      "source": "./plugins/pardes-all"
+    },
+    {
       "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler.",
       "name": "pr-description",
       "source": "./plugins/pr-description"

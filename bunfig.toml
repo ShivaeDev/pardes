@@ -3,5 +3,7 @@
 [install]
 # Don't pull a freshly-published version until it has been public for 7 days
 # (604800s). A buffer against a compromised release being grabbed minutes after
-# a maintainer account is popped. Matches the renovate.json cooldown.
+# a maintainer account is popped. Matches renovate.json's routine 7-day cooldown;
+# note renovate.json deliberately shortens this to 3 days for security-alert PRs
+# (vulnerabilityAlerts), so the security path does NOT match this value.
 minimumReleaseAge = 604800

@@ -21,7 +21,7 @@ Claude will give you a short tour of the plugins and how they fit together, then
 
 ## The config doctor
 
-The doctor compares your `~/.claude/settings.json` against a manifest of **recommended** (never required) settings tuned for this marketplace's orchestration-heavy workflow — things like enabling tool search, a slightly smaller auto-compaction window, the 1M-context Opus model, an `auto` permission default, a higher effort level, and thinking summaries.
+The doctor compares your `~/.claude/settings.json` against a manifest of **recommended** (never required) settings tuned for this marketplace's orchestration-heavy workflow: enabling tool search, a slightly smaller auto-compaction window, the 1M-context Opus model, an `auto` permission default, a higher effort level, thinking summaries, the latest auto-update channel, the full-screen TUI, and skipping the startup auto-permission prompt. That last one pairs with the `auto` permission default — together they let autonomous workflows begin and keep momentum without an extra confirmation, so enable it only if you want that autonomy/safety tradeoff.
 
 **Advisory report (read-only — changes nothing):**
 

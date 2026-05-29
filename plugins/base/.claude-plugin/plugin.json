@@ -2,7 +2,7 @@
   "author": {
     "name": "ShivaeDev"
   },
-  "description": "Foundational plugin — shared hooks and core skills for the Pardes marketplace.",
+  "description": "Foundational scaffold for the Pardes marketplace — shared hooks and core skills land here as the marketplace grows.",
   "keywords": ["pardes", "base"],
   "license": "MIT",
   "name": "base",

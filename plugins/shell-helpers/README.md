@@ -37,6 +37,8 @@ Set these once for your repo. Defaults in parentheses:
 | `SH_WORKTREE_DIR` | Managed worktree directory reaping is scoped to | unset → no reaping |
 | `SH_WORKTREE_MAX_AGE_DAYS` | Stale-worktree age threshold (days) | `7` |
 
+`SH_SETUP_CMD` is `eval`'d as-is during `freshen`, so only set it to a command you trust.
+
 Example, in your shell profile:
 
 ```bash

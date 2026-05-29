@@ -276,18 +276,23 @@ function parseProse(full: string): Classification | null {
   const kind = proseBumpKind(text);
   if (!kind) return null;
 
+  // Only salvage bullets that carry an explicit Keep-a-Changelog section label
+  // ("- **Fixed:** ..."). UNLABELED bullets are almost always the model's own
+  // reasoning — it tends to think in bulleted lists — and scraping those once
+  // dumped dozens of deliberation lines straight into the changelog. If nothing
+  // is labeled we leave every section empty; writeChangelog then falls back to the
+  // commit subjects, which are clean and factual.
   const sections: Record<string, string[]> = { added: [], changed: [], fixed: [], removed: [] };
   for (const line of text.split('\n')) {
     const bullet = line.match(/^\s*[-*]\s+(.+?)\s*$/);
     if (!bullet) continue;
-    let body = bullet[1];
-    const label = body.match(/^\*{0,2}(added|changed|fixed|removed)\*{0,2}\s*:\s*\*{0,2}\s*/i);
-    let section = 'changed';
-    if (label) {
-      section = label[1].toLowerCase();
-      body = body.slice(label[0].length);
-    }
-    body = body.replace(/^\*+\s*|\s*\*+$/g, '').trim();
+    const label = bullet[1].match(/^\*{0,2}(added|changed|fixed|removed)\*{0,2}\s*:\s*\*{0,2}\s*/i);
+    if (!label) continue; // unlabeled bullet → reasoning, not a changelog entry
+    const section = label[1].toLowerCase();
+    const body = bullet[1]
+      .slice(label[0].length)
+      .replace(/^\*+\s*|\s*\*+$/g, '')
+      .trim();
     const arr = sections[section];
     if (body && arr) arr.push(body);
   }
@@ -423,8 +428,8 @@ const bumped: { name: string; from: string; to: string; kind: string }[] = [];
 for (const p of toBump) {
   try {
     const vpath = versionPath(p.path);
-    const manifest = JSON.parse(readFileSync(vpath, 'utf8'));
-    const current: string = manifest.version;
+    const rawManifest = readFileSync(vpath, 'utf8');
+    const current: string = JSON.parse(rawManifest).version;
 
     // Re-entrancy short-circuit: if main's manifest version already differs from
     // the working-tree base, a previous run of this workflow already bumped + merged
@@ -444,8 +449,15 @@ for (const p of toBump) {
 
     const c = classify(p.name, current, subjects, diff);
     const next = bumpVersion(current, c.bump);
-    manifest.version = next;
-    writeFileSync(vpath, `${JSON.stringify(manifest, null, 2)}\n`);
+    // Surgically replace only the version value so the rest of the manifest keeps
+    // its exact (biome-formatted) bytes. A full JSON.stringify reflows arrays such
+    // as `keywords` onto multiple lines, which biome then rejects in CI — and the
+    // bump merges before that check, so the breakage lands on main.
+    const updated = rawManifest.replace(/("version"\s*:\s*")[^"]*"/, `$1${next}"`);
+    if (updated === rawManifest) {
+      throw new Error(`could not locate a "version" field to bump in ${vpath}`);
+    }
+    writeFileSync(vpath, updated);
     writeChangelog(p.name, next, c, subjects);
     bumped.push({ from: current, kind: c.bump, name: p.name, to: next });
     console.log(`✓ ${p.name}: ${current} → ${next} (${c.bump})`);

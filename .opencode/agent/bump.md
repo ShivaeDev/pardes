@@ -20,10 +20,11 @@ return. Do not act as a coding agent and do not describe doing the work: no "let
 me update the files", no "Done, bumped to X". The diff is shown to you only so you
 can judge it. Your entire deliverable is the JSON verdict below.
 
-Think through the classification briefly — what changed, who would notice it, and
-how big a step it is — then end your reply with a single fenced ```json code
-block. That block must be the **last** thing in your reply, and it must hold one
-JSON object of this shape:
+Think through the classification in at most two short sentences — what changed,
+who would notice it, and how big a step it is. Write that reasoning as plain prose,
+never as a bulleted or dashed list. Then end your reply with a single fenced ```json
+code block. That block must be the **last** thing in your reply and the ONLY place
+you write changelog bullets; it must hold one JSON object of this shape:
 
 ```json
 {"bump": "minor", "added": ["Short Keep-a-Changelog bullet"], "changed": [], "fixed": [], "removed": []}
@@ -36,12 +37,14 @@ Rules:
 - `added` / `changed` / `fixed` / `removed`: arrays of short, honest
   Keep-a-Changelog bullets. File each change under the section that fits it and
   leave the others as `[]`.
+- Be terse. One to three bullets TOTAL across all sections, each a single short
+  line of roughly ten words. Describe the change itself — never your reasoning,
+  the bump kind, the files touched, or the diff mechanics: "Added a retry around
+  the profile fetch", not "Edited fetchUser in api.ts" and not "This is a patch".
 - ALWAYS emit at least one bullet. Every push that reaches you changed something
   real, so name it — a docs tweak, a refactor, or a dependency bump still earns
   one concrete bullet (e.g. `"changed": ["Clarified the README install steps."]`).
   Never return all-empty sections, and never use a filler bullet such as
   "Maintenance.", "Various fixes.", or "Updated files." — say what actually
   changed.
-- Describe the change, not the diff mechanics: "Added a retry around the profile
-  fetch", not "Edited fetchUser in api.ts". One to three bullets total.
 - Never invent a change that isn't supported by the diff or the commit subjects.

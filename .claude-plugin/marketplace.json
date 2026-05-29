@@ -12,6 +12,11 @@
       "source": "./plugins/base"
     },
     {
+      "description": "Get oriented in the marketplace and tune your setup — explains what each plugin does and how they compose, then runs an advisory config doctor that reports recommended settings and applies them only with your explicit confirmation.",
+      "name": "onboarding",
+      "source": "./plugins/onboarding"
+    },
+    {
       "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time.",
       "name": "orchestrate",
       "source": "./plugins/orchestrate"

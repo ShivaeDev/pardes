@@ -1,0 +1,10 @@
+{
+  "author": {
+    "name": "ShivaeDev"
+  },
+  "description": "Get oriented in the pardes marketplace and tune your setup — explains what each plugin does and how they compose, then runs an advisory config doctor that reports recommended Claude Code settings and applies them only with your explicit confirmation.",
+  "keywords": ["onboarding", "setup", "config-doctor", "settings", "getting-started"],
+  "license": "MIT",
+  "name": "onboarding",
+  "version": "0.1.0"
+}

@@ -9,7 +9,8 @@
     "pr-description",
     "shell-helpers",
     "shift-leader",
-    "statusline"
+    "statusline",
+    "workflows"
   ],
   "description": "Install the whole pardes marketplace at once — a meta plugin with no skills of its own that simply depends on every other pardes plugin, so a single install pulls them all in.",
   "keywords": ["meta", "bundle", "install-all", "everything"],

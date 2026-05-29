@@ -33,6 +33,7 @@ your explicit yes).
 | `shell-helpers` | Reusable orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, and reap stale worktrees. |
 | `shift-leader` | Run as the autonomous shift leader of a multi-PR / multi-agent effort — maximize progress, reach the away user only via AskUserQuestion, gate phases on PR merges (never merge yourself), and dispatch file-disjoint parallel worktree agents at high velocity. |
 | `statusline` | A rich, multi-line status line for Claude Code — model, context-pressure bar, cost, git, PR, and rate limits on the main line, plus per-subagent gauges in the agent panel. |
+| `workflows` | A starter library of reusable Workflow-tool orchestration scripts — adversarial writer→reviewer, read-only fan-out investigation, and parallel-edit-then-serialized-verify. |
 
 ## Install everything
 
@@ -59,6 +60,7 @@ To pick and choose, install plugins one at a time instead:
 /plugin install shell-helpers@pardes
 /plugin install shift-leader@pardes
 /plugin install statusline@pardes
+/plugin install workflows@pardes
 ```
 
 Or run `/plugin` to browse and install them interactively.

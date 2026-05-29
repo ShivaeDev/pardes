@@ -16,7 +16,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!**/dist", "!**/node_modules"]
+    "includes": ["**", "!**/dist", "!**/node_modules", "!plugins/*/workflows/**/*.js"]
   },
   "formatter": {
     "enabled": true,

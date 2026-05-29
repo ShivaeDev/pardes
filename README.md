@@ -23,6 +23,7 @@ that make coding calmer and more deliberate.
 | `base` | Foundational plugin — shared hooks and core skills. |
 | `orchestrate` | Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time. |
 | `pr-description` | Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler. |
+| `shell-helpers` | Reusable orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, and reap stale worktrees. |
 
 ## Layout
 

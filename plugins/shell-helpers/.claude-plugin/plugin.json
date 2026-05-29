@@ -1,0 +1,10 @@
+{
+  "name": "shell-helpers",
+  "version": "0.1.0",
+  "description": "Reusable, dependency-free orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, and reap stale worktrees. Available as PATH commands for agents and as sourceable functions for your shell.",
+  "author": {
+    "name": "ShivaeDev"
+  },
+  "keywords": ["git", "worktrees", "shell", "orchestration", "automation"],
+  "license": "MIT"
+}

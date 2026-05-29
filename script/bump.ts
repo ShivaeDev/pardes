@@ -34,7 +34,8 @@ if (!process.env.OPENCODE_API_KEY) die('OPENCODE_API_KEY secret not set');
 // First push / new branch: no usable "before". Use afterSha's parent, or git's
 // empty-tree hash when afterSha is the root commit (so diffs treat all as new).
 if (!beforeSha || beforeSha === ZERO) {
-  const hasParent = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${afterSha}^`]).status === 0;
+  const hasParent =
+    spawnSync('git', ['rev-parse', '--verify', '--quiet', `${afterSha}^`]).status === 0;
   beforeSha = hasParent ? `${afterSha}~1` : '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 }
 
@@ -48,7 +49,9 @@ function git(args: string[]): string {
     return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
   } catch (e) {
     // Fail with a clean one-liner rather than a child_process stacktrace.
-    return die(`git ${args.slice(0, 3).join(' ')} failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+    return die(
+      `git ${args.slice(0, 3).join(' ')} failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`,
+    );
   }
 }
 
@@ -112,7 +115,9 @@ type RawClassification = {
 
 function asBullets(v: unknown): string[] | undefined {
   if (Array.isArray(v)) {
-    const out = v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim());
+    const out = v
+      .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+      .map((x) => x.trim());
     return out.length ? out : undefined;
   }
   if (typeof v === 'string' && v.trim() !== '') return [v.trim()];
@@ -125,8 +130,8 @@ function normalize(o: RawClassification): Classification {
     throw new Error(`opencode returned an invalid bump kind: ${JSON.stringify(o.bump)}`);
   }
   return {
-    bump,
     added: asBullets(o.added),
+    bump,
     changed: asBullets(o.changed),
     fixed: asBullets(o.fixed),
     removed: asBullets(o.removed),
@@ -181,7 +186,9 @@ function parseClassification(raw: string): Classification {
 // wrong bump (e.g. "not a major change" → major) is worse than failing cleanly.
 // All patterns use bounded quantifiers so adversarial model output can't ReDoS.
 function proseBumpKind(text: string): string | null {
-  const cued = text.match(/(?:classification|verdict|semver|bump)\b[^\n]{0,40}?[`*"']{0,3}(major|minor|patch)\b/i);
+  const cued = text.match(
+    /(?:classification|verdict|semver|bump)\b[^\n]{0,40}?[`*"']{0,3}(major|minor|patch)\b/i,
+  );
   if (cued) return cued[1].toLowerCase();
   const wrapped = [...text.matchAll(/[`*]{1,3}(major|minor|patch)[`*]{1,3}/gi)];
   if (wrapped.length) return wrapped[wrapped.length - 1][1].toLowerCase();
@@ -254,7 +261,9 @@ function classify(name: string, version: string, subjects: string[], diff: strin
   console.log('::endgroup::');
 
   if (res.status !== 0) {
-    throw new Error(`opencode exited ${res.status} (see the "opencode classification — ${name}" group above)`);
+    throw new Error(
+      `opencode exited ${res.status} (see the "opencode classification — ${name}" group above)`,
+    );
   }
   return parseClassification(transcript);
 }
@@ -266,7 +275,12 @@ function bumpVersion(v: string, kind: Classification['bump']): string {
   return `${maj}.${min}.${pat + 1}`;
 }
 
-function writeChangelog(name: string, version: string, c: Classification, subjects: string[]): void {
+function writeChangelog(
+  name: string,
+  version: string,
+  c: Classification,
+  subjects: string[],
+): void {
   const file = join('changelog', `${name}.md`);
   const date = new Date().toISOString().slice(0, 10);
   const sections: string[] = [];
@@ -291,7 +305,10 @@ function writeChangelog(name: string, version: string, c: Classification, subjec
     const body = readFileSync(file, 'utf8');
     const firstEntry = body.indexOf('\n## ');
     if (firstEntry >= 0) {
-      writeFileSync(file, `${body.slice(0, firstEntry + 1)}${entry}\n${body.slice(firstEntry + 1)}`);
+      writeFileSync(
+        file,
+        `${body.slice(0, firstEntry + 1)}${entry}\n${body.slice(firstEntry + 1)}`,
+      );
     } else {
       writeFileSync(file, `${body.replace(/\s*$/, '')}\n\n${entry}`);
     }
@@ -320,7 +337,7 @@ for (const p of toBump) {
     manifest.version = next;
     writeFileSync(vpath, `${JSON.stringify(manifest, null, 2)}\n`);
     writeChangelog(p.name, next, c, subjects);
-    bumped.push({ name: p.name, from: current, to: next, kind: c.bump });
+    bumped.push({ from: current, kind: c.bump, name: p.name, to: next });
     console.log(`✓ ${p.name}: ${current} → ${next} (${c.bump})`);
   } catch (e) {
     die(`Failed to classify/bump ${p.name}: ${e instanceof Error ? e.message : String(e)}`);
@@ -349,9 +366,13 @@ git(['commit', '-m', title]);
 git(['push', '-u', 'origin', branch]);
 
 try {
-  execFileSync('gh', ['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body], {
-    stdio: 'inherit',
-  });
+  execFileSync(
+    'gh',
+    ['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body],
+    {
+      stdio: 'inherit',
+    },
+  );
 } catch (e) {
   die(`gh pr create failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
 }
@@ -359,5 +380,7 @@ try {
   execFileSync('gh', ['pr', 'merge', branch, '--auto', '--squash'], { stdio: 'inherit' });
   console.log('opened auto-merge PR');
 } catch {
-  console.log('opened PR but could not enable auto-merge (is "Allow auto-merge" on?); leaving it open');
+  console.log(
+    'opened PR but could not enable auto-merge (is "Allow auto-merge" on?); leaving it open',
+  );
 }

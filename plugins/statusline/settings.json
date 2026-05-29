@@ -1,0 +1,6 @@
+{
+  "subagentStatusLine": {
+    "command": "~/.claude/statusline-pardes.sh subagent",
+    "type": "command"
+  }
+}

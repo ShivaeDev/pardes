@@ -1,10 +1,10 @@
 {
-  "name": "orchestrate",
-  "version": "0.1.0",
-  "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused Opus sub-agents one chunk at a time.",
   "author": {
     "name": "ShivaeDev"
   },
+  "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused Opus sub-agents one chunk at a time.",
   "keywords": ["orchestration", "subagents", "workflow", "pr", "planning"],
-  "license": "MIT"
+  "license": "MIT",
+  "name": "orchestrate",
+  "version": "0.1.0"
 }

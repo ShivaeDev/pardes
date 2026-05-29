@@ -12,9 +12,19 @@
       "source": "./plugins/base"
     },
     {
+      "description": "Get oriented in the marketplace and tune your setup — explains what each plugin does and how they compose, then runs an advisory config doctor that reports recommended settings and applies them only with your explicit confirmation.",
+      "name": "onboarding",
+      "source": "./plugins/onboarding"
+    },
+    {
       "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time.",
       "name": "orchestrate",
       "source": "./plugins/orchestrate"
+    },
+    {
+      "description": "Install the whole marketplace at once — a meta plugin with no skills of its own that depends on every other pardes plugin, so a single install pulls them all in (auto-install + auto-enable requires Claude Code v2.1.143+).",
+      "name": "pardes-all",
+      "source": "./plugins/pardes-all"
     },
     {
       "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler.",

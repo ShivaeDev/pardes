@@ -10,16 +10,17 @@ You are helping a user get oriented in the **pardes** marketplace and tune their
 
 ## Half 1 — Orient the user
 
-Pardes is a small marketplace of focused Claude Code plugins. Each plugin ships exactly one skill (the deliberate exception is `base`, which carries shared infrastructure). Explain the pieces in plain terms and, importantly, **how they compose** — the value is in the combination:
+Pardes is a small marketplace of focused Claude Code plugins. Most ship one skill; a few ship other artifacts instead (shared infrastructure, a status line, workflow scripts). Explain the pieces in plain terms and, importantly, **how they compose** — the value is in the combination:
 
-- **base** — foundational plugin with shared hooks and core skills. The other plugins assume it's present; install it first.
+- **base** — a foundational scaffold; shared hooks and core skills land here as the marketplace grows. Nothing else depends on it yet, so install it only if you want the scaffold present.
 - **orchestrate** — plans one large multi-chunk PR through a short interview, then ships it by dispatching focused sub-agents one chunk at a time. Reach for it when a single PR is too big for one context but is sequenceable into discrete commits.
 - **shift-leader** — the standing autonomous orchestrator *above* a single PR: it runs a multi-PR / multi-agent effort, dispatches file-disjoint work to parallel worktrees, gates dependent work on merges (never merging itself), opens and monitors each PR, and survives compaction via a durable state file. It uses `orchestrate` (if present) to plan+ship each individual large PR.
 - **shell-helpers** — dependency-free shell helpers that the orchestration skills lean on: freshen a checkout to a clean baseline, prune merged branches, reap stale worktrees. Available both as PATH commands and as sourceable shell functions.
 - **pr-description** — writes a tight PR description (Why / How / Decisions / Callouts, no filler). Pairs naturally with `orchestrate` and `shift-leader` when a PR is ready to open.
 - **statusline** — a rich multi-line status line: model, context-pressure bar, cost, git, PR, and rate limits on the main line, plus per-subagent gauges in the agent panel. Most useful precisely when `shift-leader` has several sub-agents running — you can watch each one's context pressure.
+- **workflows** — a starter library of Workflow-tool scripts — writer→reviewer, read-only investigation, parallel-edit-then-serialized-verify — each callable as `workflows:<name>`. They're the concrete orchestration moves the higher-level skills lean on, ready to run or fork.
 
-The composition story to convey: **shift-leader** is the conductor, **orchestrate** plans+ships each big PR under it, **shell-helpers** keeps the worktrees and branches clean, **pr-description** writes the PRs, and **statusline** lets the user see it all happening. A user new to the marketplace usually wants `base` + whichever of those match their workflow.
+The composition story to convey: **shift-leader** is the conductor, **orchestrate** plans+ships each big PR under it, **workflows** supplies the reusable orchestration moves they run (writer→reviewer, investigation, parallel-verify), **shell-helpers** keeps the worktrees and branches clean, **pr-description** writes the PRs, and **statusline** lets the user see it all happening. A user new to the marketplace usually wants whichever of those match their workflow.
 
 If a user simply wants the whole set, mention **pardes-all** — a meta plugin with no skill of its own that just depends on every other plugin, so a single install pulls in the entire marketplace at once. It's the "give me everything" option for someone who doesn't want to pick à la carte. (The human-facing README has the exact install command; point them there rather than reciting it.)
 

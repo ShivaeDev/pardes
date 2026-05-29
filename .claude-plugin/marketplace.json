@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "description": "Foundational plugin — shared hooks and core skills.",
+      "description": "Foundational scaffold — shared hooks and core skills land here as the marketplace grows.",
       "name": "base",
       "source": "./plugins/base"
     },

@@ -21,7 +21,7 @@
 //
 // Zero runtime dependencies: node:* and Bun built-ins only.
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -249,8 +249,13 @@ function apply(settingsPath: string, settings: Settings, findings: Finding[]): v
     else skipped.push(f.rec.path);
   }
 
+  // Write atomically: stage to a sibling .tmp, then rename over the target so a
+  // crash mid-write can't leave a truncated settings.json. (A timestamped backup
+  // was already written above.)
   try {
-    writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+    const tmp = `${settingsPath}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`);
+    renameSync(tmp, settingsPath);
   } catch (e) {
     console.error(`Failed to write ${settingsPath}: ${String(e)}`);
     process.exit(1);

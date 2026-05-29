@@ -21,6 +21,7 @@ that make coding calmer and more deliberate.
 | Plugin | What it does |
 | --- | --- |
 | `base` | Foundational plugin — shared hooks and core skills. |
+| `orchestrate` | Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time. |
 
 ## Layout
 

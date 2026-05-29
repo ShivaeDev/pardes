@@ -1,48 +1,48 @@
 # shift-leader gotchas
 
-Shared, durable lessons that hold for any shift-leader run. This is general reference material — read it at the start of a shift. Contributions are welcome: when you discover a new *universal* lesson (one that holds regardless of stack, repo, or habit), add it here so every shift leader benefits.
+Durable, universal lessons for any shift-leader run — read at the start of a shift. Contributions welcome: add a lesson when it holds regardless of stack, repo, or habit.
 
-## A green build can be a false green on shared-type changes
-An incremental build cache can skip rechecking files and report success while a real type error hides — the opposite failure mode from a flaky red. A change that widens or narrows a shared type (an annotation helper, a generic, a widely-imported type) can compile against a warm cache yet fail from a clean build, depending only on cache state. For any change touching a shared type or inference surface, do not trust a single incremental build: verify from a clean build (or force a full recheck) and confirm the type's dependents still compile. Bake "verify from a clean build, not just incremental" into the dispatch prompt for such changes.
+## A green build can be a false green
+Incremental build caches skip rechecking and can report success while a real type error hides. After any change to a shared type, generic, or widely-imported surface, verify from a *clean* build and confirm dependents still compile — don't trust one incremental pass.
 
-## A compile-with-emit can drop stray artifacts beside sources
-Running a compiler *with* emit (rather than no-emit) can drop generated files (e.g. `.js`) next to the sources they came from, and those output files may not be gitignored — so they show up as untracked and a blanket `git add -A` would commit build output. Before committing in any checkout, run `git status` and do not stage stray emit. Bake "verify no stray build artifacts are staged" into dispatch prompts for type-touching changes. (Deleting the strays is safe — they are just compiled output of tracked sources.)
+## Compile-with-emit drops stray artifacts
+A compiler run *with* emit can leave generated files (e.g. `.js`) beside their sources, often un-gitignored — so a blanket `git add -A` commits build output. Check `git status` before staging; never stage stray emit. (Deleting strays is safe.)
 
-## Writing sub-agents need real isolation, or they deadlock
-A background orchestrator session that is not itself isolated cannot let a sub-agent write to the shared checkout: the agent's write is rejected, and its own attempt to enter a worktree also refuses — a deadlock the agent cannot resolve from inside, so it stalls with a fully-specified change and zero writes. Pass the harness's worktree-isolation flag in the dispatch options for every file-editing agent. An in-prompt "create your worktree" instruction is NOT enough. Read-only agents (investigations, design spikes) don't need it.
+## Verify the full surface, not a convenient subset
+A change to a shared schema or contract can regress an adjacent surface the agent never tested. Require the full suite across *every* affected side — "X tests passing" only counts if it's the whole suite.
 
-## Partition parallel writers by disjoint files — it's a correctness requirement, not tidiness
-Two parallel agents that touch the same file clobber each other. The disjoint file partition is the only thing preventing it. Choose the cut before dispatching and verify it actually holds; never let two simultaneous writers share a file.
+## Writing sub-agents need real isolation
+A non-isolated orchestrator can't let a sub-agent write to the shared checkout: the write is rejected, the agent can't self-isolate, and it stalls. Pass the harness's worktree-isolation flag for every file-editing agent — an in-prompt "make your own worktree" is not enough. Read-only agents don't need it.
 
-## When a brief and the code disagree, the agent must STOP
-If a briefing asserts a domain fact and the code shows otherwise, the agent must not silently follow either one — it reports both halves (quote the brief, quote the code, name the disagreement) and the orchestrator owns the resolution, escalating to the user on a genuine fork. Scan every agent report for "I followed the brief over the code" / "the brief said X but the code does Y" and surface those before treating the work as canonical. The failure this prevents: a wrong assumption in a brief gets dutifully baked in, ships, and costs a revert plus trust.
+## Partition parallel writers by disjoint files
+Two parallel agents on the same file clobber each other; disjoint partitioning is the only thing preventing it — a correctness requirement, not tidiness. Choose the cut before dispatching and confirm it holds.
 
-## Verify dispatch parameters actually arrive before fanning out
-If per-agent arguments silently fail to reach the dispatched agents, every agent runs with no mission and freelances — voiding the whole wave at full cost. Before launching a parameterized fan-out, confirm the per-agent spec actually lands (or inline each agent's mission directly into its prompt). Lock each agent to its specific deliverable and name what is out of scope, or agents drift.
+## Verify dispatch parameters actually arrive
+If per-agent args silently fail to reach the agents, the whole wave runs mission-less and freelances at full cost. Confirm the per-agent spec lands (or inline each mission into its prompt), and name what's out of scope.
 
-## Verify the full relevant surface, not a convenient subset
-A change to a shared schema or contract can regress an adjacent surface the agent never thought to test — a passing run on a hand-picked subset means nothing. Dispatch prompts for any shared-schema or contract change must require running the full suite across every affected surface, on every side a shared change can reach (not just the side that was edited). "X tests passing" in a report is only trustworthy if it is the whole suite.
+## When brief and code disagree, STOP
+If a briefing asserts a fact the code contradicts, the agent reports both halves (quote each, name the conflict) instead of silently picking one; the orchestrator resolves it, escalating on a genuine fork. Watch agent reports for "the brief said X but the code does Y" before trusting the work.
 
 ## Re-review a fix-forward that CHANGED the approach
-When a fix-forward implements a *different* approach than the original diff (e.g. a structural rewrite the first reviewer recommended), CI-green plus "the reviewer recommended this" is not the same as "the new implementation was verified." Before green-lighting it, run a second targeted read-only review scoped to exactly the risk the new approach introduces (e.g. does a client-side reimplementation reproduce identical results to the server path it replaces?). It is cheap and runs fine alongside a builder under the serialize-heavy-verification rule.
+When a fix-forward takes a *different* approach than the original (e.g. a structural rewrite), CI-green plus "the reviewer suggested it" is not the same as verified. Run a second read-only review scoped to the new approach's specific risk before green-lighting.
 
-## Re-check PR state before assuming it's still open
-The user reviews fast and may merge (or enable auto-merge) before you notice. Always re-check the PR's state before assuming it is still open and before advancing or dispatching dependent work.
+## In-worktree checks are authoritative
+A type/lint/test failure in an agent's own worktree is REAL — fix the root cause. Don't dismiss it as an infra false-positive or tell agents to "re-confirm against the main checkout / CI"; once isolation is set up correctly, that re-confirmation is a stale workaround that makes agents circle instead of fixing the error.
 
-## The worktree bootstrap is repo-specific — confirm it, don't assume
-The fresh-worktree setup (install deps, run codegen, copy gitignored local config, apply migrations) differs per repo. Before baking a bootstrap command into dispatch prompts, confirm what the repo actually uses — read its contributor docs and its package/build manifest scripts. A fresh isolated worktree also lacks gitignored local config (a `.env`-style file), so any agent that type-checks/builds/tests must copy or seed that config as part of bootstrap.
-
-## In-worktree checks are authoritative — fix the failure, don't blame infra
-A type-check / lint / test failure inside an agent's own worktree is a REAL failure — fix the root cause. Do NOT treat it as a worktree/infra false-positive, and do NOT tell agents to "confirm against the main checkout / CI" before believing it. Once worktree isolation is configured correctly, that re-confirmation is a stale workaround that only makes agents circle on genuine compile/lint errors instead of fixing them. If the hook or check reports something, it's real.
+## Re-check PR state before relying on it
+The user reviews fast and may merge (or auto-merge) before you notice. Re-check a PR's state before assuming it's still open and before advancing dependent work.
 
 ## The orchestrator may commit/push/open PRs — only merging is off-limits
-Committing, pushing, and opening a PR are all fine for the orchestrator (e.g. to land an agent's commit if it stalls mid-way); the one off-limits action is merging — the user does that. Agents commit in their own worktree and let the pre-commit hook run clean there; do not manufacture a "the worktree hook is unreliable, let me commit in the primary checkout instead" rationale. If the hook reports something, it's real.
+Committing, pushing, and opening PRs are fine (e.g. to land a stalled agent's commit); merging is the user's call. Let the pre-commit hook run clean in the agent's own worktree — don't invent a "the worktree hook is unreliable" excuse to commit in the primary checkout.
 
 ## Amending/force-pushing your OWN unmerged branch is fine
-A no-force-push rule targets shared or already-merged history (such as the default branch). For a solo, not-yet-merged feature branch you alone own, amending or force-pushing to tidy it up is fine and beats noisier close-and-recreate churn. (Some repos still adopt an absolute no-force policy — honor the repo's own rule when it's stricter.)
+The no-force rule targets shared or already-merged history (e.g. the default branch). On a solo, unmerged branch you alone own, amend/force-push beats noisier close-and-recreate. (Honor a repo's stricter absolute-no-force rule where it has one.)
+
+## The worktree bootstrap is repo-specific — confirm it
+Fresh-worktree setup (deps, codegen, gitignored local config, migrations) differs per repo; read the repo's contributor docs and manifest scripts before baking a bootstrap into prompts. A fresh worktree also lacks gitignored local config (a `.env`-style file) — agents that build or test must seed it.
 
 ## Workflow ideas (build a library over time)
-- **writer → reviewer:** agent A implements a PR in a worktree; agent B adversarially reviews the diff (or posts inline review comments) before the PR opens.
-- **read-only investigation:** fan out readers → synthesis → a completeness critic that catches fabricated citations and unread surfaces. Investigate-and-interview a distrusted system *before* dispatching any mutation work.
-- **parallel worktree edits + serialized heavy verification:** run only one heavy verification (full test/build) at a time to avoid memory exhaustion; each agent verifies fully in its own worktree, so no re-run in the primary checkout is needed.
+- **writer → reviewer:** agent A implements a PR in a worktree; agent B adversarially reviews the diff before it opens.
+- **read-only investigation:** fan out readers → synthesis → a completeness critic that catches fabricated citations and unread surfaces.
+- **parallel edits + serialized heavy verification:** run only one heavy build/test at a time (memory); each agent verifies in its own worktree, so no primary-checkout re-run.
 - (add more as they prove out)

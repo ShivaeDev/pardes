@@ -4,13 +4,20 @@
  *
  * Flow: figure out which plugin(s) the pushed range touched -> ask opencode to
  * classify the semver bump + draft changelog bullets (JSON out) -> apply the
- * version bump + changelog edits HERE -> open a PR, merge it synchronously, and
- * tag the merged commit `<plugin>--v<version>` — all in this one run.
+ * version bump + changelog edits HERE -> open a PR, merge it synchronously, then
+ * tag the PR's exact merge commit `<plugin>--v<version>` — all in this one run.
+ *
+ * Re-entrant: the only thing that ever bumps a plugin version is this workflow,
+ * so a "Re-run failed jobs" detects a prior partial landing from main's manifest
+ * version (skip its bump, just ensure its tag), reuses an existing bump PR, and
+ * pushes the bump branch as create-or-update. The post-merge tag push has its own
+ * bounded retry; if a tag still won't land it fails LOUD with the manual recovery
+ * command, since a released-but-untagged version has nothing to re-trigger it.
  *
  * SECURITY
- * - Every external command uses execFileSync (NO shell). Commit messages/diffs
- *   (semi-untrusted, authored in PRs) are passed as argv data — never built into
- *   a shell string — so there is no command-injection surface.
+ * - Every external command uses execFileSync/spawnSync (NO shell). Commit
+ *   messages/diffs (semi-untrusted, authored in PRs) are passed as argv data —
+ *   never built into a shell string — so there is no command-injection surface.
  * - opencode runs as the `bump` agent: read-only (can read repo files for
  *   context, but cannot write/edit/exec). This script performs every file write,
  *   so the model can't mutate the repo or exfiltrate.
@@ -20,7 +27,11 @@
  *   inline instead. The GITHUB_TOKEN merge-push also can't re-trigger this job,
  *   so there is no recursion.
  * - Version tags (`<plugin>--v<version>`) are create-only. A repo ruleset on
- *   `*--v*` blocks tag update + delete; we never force/move them (supply-chain).
+ *   `*--v*` blocks tag update + delete; we never force/move them. The tag retry
+ *   only ever pushes the same tag→same commit (create or no-op), and `git tag -f`
+ *   is local-only — the remote ref is never force-updated (supply-chain).
+ * - The bump branch (`bump/<sha>`) is bot-owned + disposable (deleted on merge);
+ *   only IT may be force-with-leased to re-push a re-run. No `*--v*` tag is.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -51,6 +62,14 @@ function die(msg: string): never {
   process.exit(1);
 }
 
+// Block the event loop for `ms` (used in retry backoffs). Reaches Bun's native
+// sleepSync via globalThis so this file type-checks both under @types/bun and
+// under a bare node-only typecheck — without shelling out to an external `sleep`
+// (which would be a silent no-op if it failed to spawn).
+function sleepSync(ms: number): void {
+  (globalThis as unknown as { Bun: { sleepSync(ms: number): void } }).Bun.sleepSync(ms);
+}
+
 function git(args: string[]): string {
   try {
     return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
@@ -62,10 +81,24 @@ function git(args: string[]): string {
   }
 }
 
+// spawnSync that surfaces a failure-to-launch. A bare spawnSync returns
+// status:null + error set when the binary can't be spawned at all; callers that
+// only test `status === 0` would silently read that as a normal "no" (e.g. "tag
+// doesn't exist", "PR not merged"). Die loudly instead — a spawn failure is an
+// environment problem, never a real answer.
+function run(
+  cmd: string,
+  args: string[],
+): { status: number | null; stdout: string; stderr: string } {
+  const r = spawnSync(cmd, args, { encoding: 'utf8' });
+  if (r.error) die(`could not launch ${cmd}: ${r.error.message}`);
+  return { status: r.status, stderr: r.stderr ?? '', stdout: r.stdout ?? '' };
+}
+
 // True if `path` existed at `sha`, so a brand-new plugin can be told apart from
 // an edit to an existing one — we never auto-bump a plugin's initial release.
 function existedAt(sha: string, path: string): boolean {
-  return spawnSync('git', ['cat-file', '-e', `${sha}:${path}`]).status === 0;
+  return run('git', ['cat-file', '-e', `${sha}:${path}`]).status === 0;
 }
 
 const changed = git(['diff', '--name-only', beforeSha, afterSha]).split('\n').filter(Boolean);
@@ -145,8 +178,47 @@ function normalize(o: RawClassification): Classification {
   };
 }
 
+// Scan for every top-level brace-balanced `{...}` object in `text`, in the order
+// they appear. A depth counter (ignoring braces inside double-quoted strings,
+// honoring backslash escapes) means we capture each complete object span rather
+// than a single regex match — so a late real verdict isn't shadowed by an early
+// prompt-echo. Returned front-to-back; callers reverse for "last answer wins".
+function topLevelObjects(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i); // charAt returns '' past the end, never undefined
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+    } else if (ch === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}' && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return out;
+}
+
 // Permissive: opencode may return the JSON bare, fenced in ```json, prefixed with
 // prose, or even double-encoded (a JSON string whose value is the JSON). Try hard.
+// "Last answer wins": the agent reasons first and emits its real verdict last, so
+// later candidates take priority over earlier ones (prompt-echo examples appear
+// early in the transcript). Candidate order is therefore:
+//   full text, then fenced blocks last-first, then every top-level object last-first.
 function parseClassification(raw: string): Classification {
   const tryJSON = (s: string): unknown => {
     try {
@@ -157,15 +229,12 @@ function parseClassification(raw: string): Classification {
   };
   const text = raw.trim();
   const candidates: string[] = [text];
-  // The agent reasons first and emits the verdict as the FINAL fenced block, so
-  // try fenced blocks last-first — an example block inside the reasoning must not
-  // win over the real answer at the end.
   const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((m) => m[1].trim());
   for (const f of fences.reverse()) candidates.push(f);
-  const lazyBraces = text.match(/\{[\s\S]*?\}/); // first complete object (JSON followed by trailing prose)
-  if (lazyBraces) candidates.push(lazyBraces[0]);
-  const greedyBraces = text.match(/\{[\s\S]*\}/); // outermost span (prose-wrapped object)
-  if (greedyBraces) candidates.push(greedyBraces[0]);
+  // Every brace-balanced object, reversed so the LAST one in the transcript is
+  // tried first. Replaces the old first-match lazy/greedy single-regex heuristics,
+  // which let an early unfenced example beat a late unfenced verdict.
+  for (const obj of topLevelObjects(text).reverse()) candidates.push(obj);
 
   for (const cand of candidates) {
     let val = tryJSON(cand);
@@ -326,6 +395,29 @@ function writeChangelog(
   }
 }
 
+// Read a plugin's manifest version as it exists at a git ref (e.g. `origin/main`),
+// or null if the manifest doesn't exist there. Used to make the run re-entrant:
+// the only thing that ever bumps a version is THIS workflow, so if main already
+// carries a higher version than the working-tree base, a prior (partial) run landed.
+function versionAtRef(ref: string, path: string): string | null {
+  const r = run('git', ['cat-file', '-p', `${ref}:${versionPath(path)}`]);
+  if (r.status !== 0) return null;
+  try {
+    const v = (JSON.parse(r.stdout) as { version?: unknown }).version;
+    return typeof v === 'string' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fetch main up front so the bump loop can see whether a prior run already landed
+// a version for any plugin (re-entrancy on a "Re-run failed jobs").
+git(['fetch', 'origin', 'main']);
+
+// `released`: a bump for this plugin already exists on main (prior run) — only its
+// tag may still need to land. `bumped`: a fresh bump computed in this run that we
+// still need to commit/merge. The tag step covers both.
+const released: { name: string; to: string }[] = [];
 const bumped: { name: string; from: string; to: string; kind: string }[] = [];
 
 for (const p of toBump) {
@@ -333,6 +425,17 @@ for (const p of toBump) {
     const vpath = versionPath(p.path);
     const manifest = JSON.parse(readFileSync(vpath, 'utf8'));
     const current: string = manifest.version;
+
+    // Re-entrancy short-circuit: if main's manifest version already differs from
+    // the working-tree base, a previous run of this workflow already bumped + merged
+    // this plugin. Don't re-classify or re-commit — just make sure its tag exists.
+    const mainVersion = versionAtRef('origin/main', p.path);
+    if (mainVersion && mainVersion !== current) {
+      released.push({ name: p.name, to: mainVersion });
+      console.log(`${p.name}: already at ${mainVersion} on main — skipping bump, will verify tag`);
+      continue;
+    }
+
     const subjects = git(['log', `${beforeSha}..${afterSha}`, '--format=%s', '--', p.path])
       .split('\n')
       .filter(Boolean);
@@ -351,27 +454,6 @@ for (const p of toBump) {
   }
 }
 
-// Commit on a bump branch and open an auto-merge PR (GITHUB_TOKEN identity).
-const short = afterSha.slice(0, 12);
-const branch = `bump/${short}`;
-git(['config', 'user.name', 'github-actions[bot]']);
-git(['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
-git(['checkout', '-b', branch]);
-git(['add', 'plugins', 'changelog']);
-
-const title =
-  bumped.length === 1
-    ? `chore: bump ${bumped[0].name} to ${bumped[0].to}`
-    : `chore: bump ${bumped.length} plugins`;
-const body = [
-  `Automated version bump for the plugins changed in ${short}.`,
-  '',
-  ...bumped.map((b) => `- \`${b.name}\` ${b.from} → ${b.to} (${b.kind})`),
-].join('\n');
-
-git(['commit', '-m', title]);
-git(['push', '-u', 'origin', branch]);
-
 // Thin wrapper around gh with a clean one-line failure (mirrors git()).
 function gh(args: string[]): void {
   try {
@@ -383,7 +465,66 @@ function gh(args: string[]): void {
   }
 }
 
-gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body]);
+const short = afterSha.slice(0, 12);
+const branch = `bump/${short}`;
+
+// If a prior run already merged every plugin's bump (re-run after a tag-only
+// failure), there's nothing to commit/merge — jump straight to the tag step.
+if (bumped.length > 0) {
+  // Commit on a deterministic bump branch and open a PR (GITHUB_TOKEN identity).
+  // The branch name is derived from afterSha, so a "Re-run failed jobs" recomputes
+  // the SAME branch — every step below is therefore made create-or-update so the
+  // re-run can get past a branch/PR that a partial prior attempt already created.
+  git(['config', 'user.name', 'github-actions[bot]']);
+  git(['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com']);
+  git(['checkout', '-b', branch]);
+  git(['add', 'plugins', 'changelog']);
+
+  const title =
+    bumped.length === 1
+      ? `chore: bump ${bumped[0].name} to ${bumped[0].to}`
+      : `chore: bump ${bumped.length} plugins`;
+  const body = [
+    `Automated version bump for the plugins changed in ${short}.`,
+    '',
+    ...bumped.map((b) => `- \`${b.name}\` ${b.from} → ${b.to} (${b.kind})`),
+  ].join('\n');
+
+  git(['commit', '-m', title]);
+
+  // Create-or-update push: a re-run rebuilds the same branch but with a fresh
+  // commit (commit date differs → SHA differs), so a plain push would be rejected
+  // as non-fast-forward. Force-with-lease ONLY the bot-owned, disposable bump
+  // branch (deleted on merge). This never touches a `*--v*` tag — those stay
+  // create-only per the ruleset.
+  const branchOnRemote =
+    run('git', ['ls-remote', '--exit-code', 'origin', `refs/heads/${branch}`]).status === 0;
+  if (branchOnRemote) {
+    console.log(`bump branch ${branch} already on remote — updating it`);
+    git(['push', '--force-with-lease', '-u', 'origin', branch]);
+  } else {
+    git(['push', '-u', 'origin', branch]);
+  }
+
+  // Reuse an existing PR for this head if a prior run already opened one.
+  const existingPr = run('gh', [
+    'pr',
+    'list',
+    '--head',
+    branch,
+    '--state',
+    'open',
+    '--json',
+    'number',
+    '--jq',
+    '.[0].number // empty',
+  ]);
+  if (existingPr.status === 0 && existingPr.stdout.trim()) {
+    console.log(`reusing existing bump PR #${existingPr.stdout.trim()} for ${branch}`);
+  } else {
+    gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body]);
+  }
+}
 
 // SYNCHRONOUS merge — NOT `--auto`. Auto-merge happens asynchronously after this
 // job exits, and a GITHUB_TOKEN merge does not re-trigger any workflow (the
@@ -397,9 +538,7 @@ gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--bod
 // (only the branch-delete hiccuped), detect that and stop rather than retrying a
 // PR that's already gone.
 function bumpPrMerged(): boolean {
-  const r = spawnSync('gh', ['pr', 'view', branch, '--json', 'state', '--jq', '.state'], {
-    encoding: 'utf8',
-  });
+  const r = run('gh', ['pr', 'view', branch, '--json', 'state', '--jq', '.state']);
   return r.status === 0 && r.stdout.trim() === 'MERGED';
 }
 
@@ -407,7 +546,7 @@ function mergeBumpPr(): void {
   const args = ['pr', 'merge', branch, '--squash', '--delete-branch'];
   const maxAttempts = 6;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const r = spawnSync('gh', args, { encoding: 'utf8' });
+    const r = run('gh', args);
     if (r.status === 0) {
       console.log('merged bump PR');
       return;
@@ -416,31 +555,102 @@ function mergeBumpPr(): void {
       console.log('bump PR already merged');
       return;
     }
-    const msg = `${r.stderr ?? ''}${r.stdout ?? ''}`.trim().split('\n')[0] || `exit ${r.status}`;
+    const msg = `${r.stderr}${r.stdout}`.trim().split('\n')[0] || `exit ${r.status}`;
     if (attempt === maxAttempts) {
       die(`gh pr merge failed after ${maxAttempts} attempts: ${msg}`);
     }
     console.log(`merge not ready (attempt ${attempt}/${maxAttempts}: ${msg}); retrying in 5s…`);
-    spawnSync('sleep', ['5']);
+    sleepSync(5000);
   }
 }
 
-mergeBumpPr();
+if (bumped.length > 0) mergeBumpPr();
 
-// The squash merge created one new commit on main. Fetch it and tag each bumped
-// plugin's version on it: `<plugin>--v<version>`. A repo ruleset on `*--v*` blocks
-// tag update + delete, so these tags are immutable once created — never force.
-git(['fetch', 'origin', 'main']);
-const mergeSha = git(['rev-parse', 'origin/main']);
-for (const b of bumped) {
-  const tag = `${b.name}--v${b.to}`;
+// Resolve the EXACT commit a plugin's version landed on, so tags never get
+// mis-pointed by an unrelated merge that races onto main between our merge and
+// our fetch (the `*--v*` ruleset makes a mis-tag permanent). Freshly-bumped
+// plugins resolve via the bump PR's recorded mergeCommit; already-released
+// plugins (prior run) resolve via the commit on main that last touched the
+// manifest. Both are independent of whatever else `main` HEAD currently points at.
+function mergeCommitForBranch(): string {
+  const r = run('gh', ['pr', 'view', branch, '--json', 'mergeCommit', '--jq', '.mergeCommit.oid']);
+  const oid = r.status === 0 ? r.stdout.trim() : '';
+  if (!oid) die(`could not resolve merge commit for ${branch} via gh pr view`);
+  git(['fetch', 'origin', oid]);
+  return oid;
+}
+
+function manifestCommitOnMain(name: string): string {
+  const plugin = plugins.find((p) => p.name === name);
+  if (!plugin) die(`unknown plugin ${name}`);
+  const sha = git(['log', '-1', '--format=%H', 'origin/main', '--', versionPath(plugin.path)]);
+  if (!sha) die(`could not resolve the commit that bumped ${name} on main`);
+  return sha;
+}
+
+// Create + push one `*--v*` tag with a bounded retry mirroring mergeBumpPr(): the
+// merge is already done, so a transient push failure must not silently lose the
+// tag. Returns false (not die) after exhausting attempts so the caller can collect
+// every failure and print all manual recovery commands at once.
+function pushTag(tag: string, sha: string): boolean {
+  const maxAttempts = 6;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // Re-make the local tag each attempt (idempotent locally) before pushing.
+    run('git', ['tag', '-f', tag, sha]);
+    const r = run('git', ['push', 'origin', `refs/tags/${tag}`]);
+    if (r.status === 0) return true;
+    // A concurrent run may have created the same tag remotely in between — that's
+    // a success, not a failure (the tag exists on the right commit by construction).
+    if (run('git', ['ls-remote', '--exit-code', 'origin', `refs/tags/${tag}`]).status === 0) {
+      console.log(`tag ${tag} appeared on the remote — treating as created`);
+      return true;
+    }
+    const msg = `${r.stderr}${r.stdout}`.trim().split('\n')[0] || `exit ${r.status}`;
+    if (attempt === maxAttempts) {
+      console.error(`tag ${tag} failed after ${maxAttempts} attempts: ${msg}`);
+      return false;
+    }
+    console.log(`tag push not ready (attempt ${attempt}/${maxAttempts}: ${msg}); retrying in 5s…`);
+    sleepSync(5000);
+  }
+  return false;
+}
+
+const freshMergeSha = bumped.length > 0 ? mergeCommitForBranch() : '';
+const tagTargets: { name: string; to: string; sha: string }[] = [
+  ...bumped.map((b) => ({ name: b.name, sha: freshMergeSha, to: b.to })),
+  ...released.map((rel) => ({ name: rel.name, sha: manifestCommitOnMain(rel.name), to: rel.to })),
+];
+
+// Tag each released plugin version `<plugin>--v<version>` on its exact commit. A
+// repo ruleset on `*--v*` blocks tag update + delete, so these are immutable once
+// created — never force. The merge above already ran (irreversible), so a tag that
+// fails to land would leave a released-but-untagged version with nothing to
+// re-trigger the workflow: retry with a bounded backoff, and if it STILL won't
+// land, fail loudly with the exact manual recovery command.
+const tagFailures: string[] = [];
+for (const t of tagTargets) {
+  const tag = `${t.name}--v${t.to}`;
   // Idempotent: if a re-run finds the tag already on the remote, leave it. We
   // never delete/move a `*--v*` tag — the ruleset forbids it and so do we.
-  if (spawnSync('git', ['ls-remote', '--exit-code', 'origin', `refs/tags/${tag}`]).status === 0) {
+  if (run('git', ['ls-remote', '--exit-code', 'origin', `refs/tags/${tag}`]).status === 0) {
     console.log(`tag ${tag} already exists — leaving it`);
     continue;
   }
-  git(['tag', tag, mergeSha]);
-  git(['push', 'origin', `refs/tags/${tag}`]);
-  console.log(`✓ tagged ${tag} → ${mergeSha.slice(0, 12)}`);
+  if (pushTag(tag, t.sha)) {
+    console.log(`✓ tagged ${tag} → ${t.sha.slice(0, 12)}`);
+  } else {
+    tagFailures.push(`git tag ${tag} ${t.sha} && git push origin refs/tags/${tag}`);
+  }
+}
+
+if (tagFailures.length > 0) {
+  console.error(
+    `\nRELEASED BUT UNTAGGED — ${tagFailures.length} tag(s) failed to land after retries.\n` +
+      `The version bump(s) are already merged on main; only the immutable tag is missing.\n` +
+      `Nothing re-triggers this workflow, so create the tag(s) MANUALLY:\n\n` +
+      tagFailures.map((cmd) => `  ${cmd}`).join('\n') +
+      '\n',
+  );
+  process.exit(1);
 }

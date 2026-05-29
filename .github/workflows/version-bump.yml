@@ -6,12 +6,16 @@ name: version-bump
 #   hijack (a fork PR can't trigger it; nothing untrusted runs with the token).
 # - Least-privilege permissions. Actions pinned to full commit SHAs.
 # - The bump opens a PR with GITHUB_TOKEN, merges it SYNCHRONOUSLY in the same run,
-#   then tags the merged commit (no bypass actor, no standing secret). A
-#   GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so there is no
-#   recursion — and that same fact is why the tag must be created inline (an async
-#   "tag on merge" step would never fire).
+#   then tags the PR's EXACT merge commit — resolved from the PR, not main HEAD, so
+#   an unrelated merge racing onto main can't mis-point the tag (no bypass actor, no
+#   standing secret). A GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so
+#   there is no recursion — and that same fact is why the tag must be created inline
+#   (an async "tag on merge" step would never fire). The run is re-entrant: a re-run
+#   detects an already-landed bump from main's manifest and only ensures the tag.
 # - Version tags (`<plugin>--v<version>`) are create-only; a repo ruleset on
-#   `*--v*` blocks tag update + delete (supply-chain protection).
+#   `*--v*` blocks tag update + delete (supply-chain protection). The script never
+#   force/moves them — only the disposable bot-owned `bump/<sha>` branch may be
+#   force-with-leased on a re-run.
 # - Untrusted strings (commit messages/diffs) are passed to tools as argv DATA,
 #   never interpolated into a shell. opencode runs read-only (classify only).
 

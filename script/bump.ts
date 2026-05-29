@@ -3,16 +3,16 @@
  * version-bump engine. Runs in CI from `push: main` (trusted, post-merge).
  *
  * Flow: figure out which plugin(s) the pushed range touched -> ask opencode to
- * classify the semver bump + draft changelog bullets (READ-ONLY, JSON out) ->
- * apply the version bump + changelog edits HERE -> open an auto-merge PR.
+ * classify the semver bump + draft changelog bullets (JSON out) -> apply the
+ * version bump + changelog edits HERE -> open an auto-merge PR.
  *
  * SECURITY
  * - Every external command uses execFileSync (NO shell). Commit messages/diffs
  *   (semi-untrusted, authored in PRs) are passed as argv data — never built into
  *   a shell string — so there is no command-injection surface.
- * - opencode runs as the `bump` agent with tools disabled: it only reads the text
- *   we hand it and returns JSON. This script performs every file write, so the
- *   model can't touch the repo or exfiltrate anything.
+ * - opencode runs as the `bump` agent: read-only (can read repo files for
+ *   context, but cannot write/edit/exec). This script performs every file write,
+ *   so the model can't mutate the repo or exfiltrate.
  * - PR is opened + auto-merged with GITHUB_TOKEN -> no recursion, no bypass actor.
  */
 
@@ -80,6 +80,67 @@ type Classification = {
   removed?: string[];
 };
 
+type RawClassification = {
+  bump?: unknown;
+  added?: unknown;
+  changed?: unknown;
+  fixed?: unknown;
+  removed?: unknown;
+};
+
+function asBullets(v: unknown): string[] | undefined {
+  if (Array.isArray(v)) {
+    const out = v.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim());
+    return out.length ? out : undefined;
+  }
+  if (typeof v === 'string' && v.trim() !== '') return [v.trim()];
+  return undefined;
+}
+
+function normalize(o: RawClassification): Classification {
+  const bump = String(o.bump ?? '').toLowerCase();
+  if (bump !== 'patch' && bump !== 'minor' && bump !== 'major') {
+    throw new Error(`opencode returned an invalid bump kind: ${JSON.stringify(o.bump)}`);
+  }
+  return {
+    bump,
+    added: asBullets(o.added),
+    changed: asBullets(o.changed),
+    fixed: asBullets(o.fixed),
+    removed: asBullets(o.removed),
+  };
+}
+
+// Permissive: opencode may return the JSON bare, fenced in ```json, prefixed with
+// prose, or even double-encoded (a JSON string whose value is the JSON). Try hard.
+function parseClassification(raw: string): Classification {
+  const tryJSON = (s: string): unknown => {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return undefined;
+    }
+  };
+  const text = raw.trim();
+  const candidates: string[] = [text];
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) candidates.push(fence[1].trim());
+  const braces = text.match(/\{[\s\S]*\}/);
+  if (braces) candidates.push(braces[0]);
+
+  for (const cand of candidates) {
+    let val = tryJSON(cand);
+    if (typeof val === 'string') {
+      // double-encoded: a JSON string that itself contains the JSON object
+      val = tryJSON(val) ?? tryJSON(val.match(/\{[\s\S]*\}/)?.[0] ?? '') ?? val;
+    }
+    if (val && typeof val === 'object' && 'bump' in (val as Record<string, unknown>)) {
+      return normalize(val as RawClassification);
+    }
+  }
+  throw new Error(`could not parse classification from opencode output:\n${raw.slice(0, 2000)}`);
+}
+
 function classify(name: string, version: string, subjects: string[], diff: string): Classification {
   const prompt = [
     `Plugin: ${name}`,
@@ -87,7 +148,7 @@ function classify(name: string, version: string, subjects: string[], diff: strin
     `Commit subjects since last release:`,
     ...subjects.map((s) => `- ${s}`),
     ``,
-    `Unified diff (may be truncated):`,
+    `Unified diff (may be truncated; you may also read files in the repo for context):`,
     '```diff',
     diff,
     '```',
@@ -97,12 +158,9 @@ function classify(name: string, version: string, subjects: string[], diff: strin
   const out = execFileSync('opencode', ['run', '--agent', 'bump', '-m', model, '--print-logs', prompt], {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'inherit'], // logs -> stderr, JSON answer -> stdout
+    stdio: ['ignore', 'pipe', 'inherit'], // logs -> stderr, model's answer -> stdout
   });
-
-  const match = out.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`opencode returned no JSON for ${name}:\n${out}`);
-  return JSON.parse(match[0]) as Classification;
+  return parseClassification(out);
 }
 
 function bumpVersion(v: string, kind: Classification['bump']): string {

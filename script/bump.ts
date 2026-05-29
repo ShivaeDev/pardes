@@ -16,7 +16,7 @@
  * - PR is opened + auto-merged with GITHUB_TOKEN -> no recursion, no bypass actor.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -31,8 +31,12 @@ if (!afterSha) die('AFTER_SHA missing');
 if (!model) die('OPENCODE_MODEL repo variable not set (provider/model)');
 if (!process.env.OPENCODE_API_KEY) die('OPENCODE_API_KEY secret not set');
 
-// First push / new branch: no usable "before" — analyze just the after commit.
-if (!beforeSha || beforeSha === ZERO) beforeSha = `${afterSha}~1`;
+// First push / new branch: no usable "before". Use afterSha's parent, or git's
+// empty-tree hash when afterSha is the root commit (so diffs treat all as new).
+if (!beforeSha || beforeSha === ZERO) {
+  const hasParent = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${afterSha}^`]).status === 0;
+  beforeSha = hasParent ? `${afterSha}~1` : '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+}
 
 function die(msg: string): never {
   console.error(msg);
@@ -40,7 +44,18 @@ function die(msg: string): never {
 }
 
 function git(args: string[]): string {
-  return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
+  try {
+    return execFileSync('git', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).trim();
+  } catch (e) {
+    // Fail with a clean one-liner rather than a child_process stacktrace.
+    return die(`git ${args.slice(0, 3).join(' ')} failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+  }
+}
+
+// True if `path` existed at `sha`, so a brand-new plugin can be told apart from
+// an edit to an existing one — we never auto-bump a plugin's initial release.
+function existedAt(sha: string, path: string): boolean {
+  return spawnSync('git', ['cat-file', '-e', `${sha}:${path}`]).status === 0;
 }
 
 const changed = git(['diff', '--name-only', beforeSha, afterSha]).split('\n').filter(Boolean);
@@ -66,11 +81,18 @@ const touched = plugins.filter((p) =>
   changed.some((f) => f.startsWith(`${p.path}/`) && f !== versionPath(p.path)),
 );
 
-if (touched.length === 0) {
-  console.log('no plugin code touched; nothing to bump');
+// A plugin whose manifest didn't exist before this push is a brand-new plugin:
+// its initial version is intentional, so don't auto-bump it on the add commit.
+const toBump = touched.filter((p) => existedAt(beforeSha, versionPath(p.path)));
+for (const p of touched) {
+  if (!toBump.includes(p)) console.log(`${p.name}: new plugin — leaving its initial version alone`);
+}
+
+if (toBump.length === 0) {
+  console.log('Nothing to bump.');
   process.exit(0);
 }
-console.log(`touched plugins: ${touched.map((p) => p.name).join(', ')}`);
+console.log(`Bumping: ${toBump.map((p) => p.name).join(', ')}`);
 
 type Classification = {
   bump: 'patch' | 'minor' | 'major';
@@ -125,8 +147,10 @@ function parseClassification(raw: string): Classification {
   const candidates: string[] = [text];
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) candidates.push(fence[1].trim());
-  const braces = text.match(/\{[\s\S]*\}/);
-  if (braces) candidates.push(braces[0]);
+  const lazyBraces = text.match(/\{[\s\S]*?\}/); // first complete object (JSON followed by trailing prose)
+  if (lazyBraces) candidates.push(lazyBraces[0]);
+  const greedyBraces = text.match(/\{[\s\S]*\}/); // outermost span (prose-wrapped object)
+  if (greedyBraces) candidates.push(greedyBraces[0]);
 
   for (const cand of candidates) {
     let val = tryJSON(cand);
@@ -138,7 +162,50 @@ function parseClassification(raw: string): Classification {
       return normalize(val as RawClassification);
     }
   }
+
+  // Fallback: the model ignored the JSON request and answered in prose (some
+  // models emit "**Classification:** `minor`" with "- **Added:** ..." bullets).
+  // Salvage a bump kind + Keep-a-Changelog bullets from that shape.
+  const prose = parseProse(text);
+  if (prose) return prose;
+
   throw new Error(`could not parse classification from opencode output:\n${raw.slice(0, 2000)}`);
+}
+
+// Pull the bump kind out of a verdict: first a keyword right after a verdict cue
+// ("Classification: `minor`"), else the LAST emphasis-wrapped keyword (prose
+// concludes with the verdict). We never guess from a bare token in prose — a
+// wrong bump (e.g. "not a major change" → major) is worse than failing cleanly.
+// All patterns use bounded quantifiers so adversarial model output can't ReDoS.
+function proseBumpKind(text: string): string | null {
+  const cued = text.match(/(?:classification|verdict|semver|bump)\b[^\n]{0,40}?[`*"']{0,3}(major|minor|patch)\b/i);
+  if (cued) return cued[1].toLowerCase();
+  const wrapped = [...text.matchAll(/[`*]{1,3}(major|minor|patch)[`*]{1,3}/gi)];
+  if (wrapped.length) return wrapped[wrapped.length - 1][1].toLowerCase();
+  return null;
+}
+
+function parseProse(full: string): Classification | null {
+  const text = full.slice(0, 100_000); // bound the scan on untrusted-influenced model output
+  const kind = proseBumpKind(text);
+  if (!kind) return null;
+
+  const sections: Record<string, string[]> = { added: [], changed: [], fixed: [], removed: [] };
+  for (const line of text.split('\n')) {
+    const bullet = line.match(/^\s*[-*]\s+(.+?)\s*$/);
+    if (!bullet) continue;
+    let body = bullet[1];
+    const label = body.match(/^\*{0,2}(added|changed|fixed|removed)\*{0,2}\s*:\s*\*{0,2}\s*/i);
+    let section = 'changed';
+    if (label) {
+      section = label[1].toLowerCase();
+      body = body.slice(label[0].length);
+    }
+    body = body.replace(/^\*+\s*|\s*\*+$/g, '').trim();
+    const arr = sections[section];
+    if (body && arr) arr.push(body);
+  }
+  return normalize({ bump: kind.toLowerCase(), ...sections });
 }
 
 function classify(name: string, version: string, subjects: string[], diff: string): Classification {
@@ -154,13 +221,20 @@ function classify(name: string, version: string, subjects: string[], diff: strin
     '```',
   ].join('\n');
 
-  // No shell: prompt (which embeds untrusted diff/commit text) is a single argv.
-  const out = execFileSync('opencode', ['run', '--agent', 'bump', '-m', model, '--print-logs', prompt], {
+  // No shell: the prompt (which embeds untrusted diff/commit text) is a single
+  // argv. We capture stderr instead of inheriting it (and drop --print-logs) so
+  // opencode's internal logs never pollute CI output — only a short tail is
+  // surfaced, and only if the run fails. The model's answer arrives on stdout.
+  const res = spawnSync('opencode', ['run', '--agent', 'bump', '-m', model, prompt], {
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'inherit'], // logs -> stderr, model's answer -> stdout
   });
-  return parseClassification(out);
+  if (res.error) throw new Error(`could not launch opencode: ${res.error.message}`);
+  if (res.status !== 0) {
+    const tail = (res.stderr ?? '').trim().split('\n').slice(-6).join('\n');
+    throw new Error(`opencode exited ${res.status}${tail ? `:\n${tail}` : ' with no output'}`);
+  }
+  return parseClassification(res.stdout ?? '');
 }
 
 function bumpVersion(v: string, kind: Classification['bump']): string {
@@ -200,23 +274,27 @@ function writeChangelog(name: string, version: string, c: Classification): void 
 
 const bumped: { name: string; from: string; to: string; kind: string }[] = [];
 
-for (const p of touched) {
-  const vpath = versionPath(p.path);
-  const manifest = JSON.parse(readFileSync(vpath, 'utf8'));
-  const current: string = manifest.version;
-  const subjects = git(['log', `${beforeSha}..${afterSha}`, '--format=%s', '--', p.path])
-    .split('\n')
-    .filter(Boolean);
-  let diff = git(['diff', `${beforeSha}..${afterSha}`, '--', p.path]);
-  if (diff.length > DIFF_BUDGET) diff = `${diff.slice(0, DIFF_BUDGET)}\n…(diff truncated)`;
+for (const p of toBump) {
+  try {
+    const vpath = versionPath(p.path);
+    const manifest = JSON.parse(readFileSync(vpath, 'utf8'));
+    const current: string = manifest.version;
+    const subjects = git(['log', `${beforeSha}..${afterSha}`, '--format=%s', '--', p.path])
+      .split('\n')
+      .filter(Boolean);
+    let diff = git(['diff', `${beforeSha}..${afterSha}`, '--', p.path]);
+    if (diff.length > DIFF_BUDGET) diff = `${diff.slice(0, DIFF_BUDGET)}\n…(diff truncated)`;
 
-  const c = classify(p.name, current, subjects, diff);
-  const next = bumpVersion(current, c.bump);
-  manifest.version = next;
-  writeFileSync(vpath, `${JSON.stringify(manifest, null, 2)}\n`);
-  writeChangelog(p.name, next, c);
-  bumped.push({ name: p.name, from: current, to: next, kind: c.bump });
-  console.log(`${p.name}: ${current} -> ${next} (${c.bump})`);
+    const c = classify(p.name, current, subjects, diff);
+    const next = bumpVersion(current, c.bump);
+    manifest.version = next;
+    writeFileSync(vpath, `${JSON.stringify(manifest, null, 2)}\n`);
+    writeChangelog(p.name, next, c);
+    bumped.push({ name: p.name, from: current, to: next, kind: c.bump });
+    console.log(`✓ ${p.name}: ${current} → ${next} (${c.bump})`);
+  } catch (e) {
+    die(`Failed to classify/bump ${p.name}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // Commit on a bump branch and open an auto-merge PR (GITHUB_TOKEN identity).
@@ -240,9 +318,13 @@ const body = [
 git(['commit', '-m', title]);
 git(['push', '-u', 'origin', branch]);
 
-execFileSync('gh', ['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body], {
-  stdio: 'inherit',
-});
+try {
+  execFileSync('gh', ['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body], {
+    stdio: 'inherit',
+  });
+} catch (e) {
+  die(`gh pr create failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`);
+}
 try {
   execFileSync('gh', ['pr', 'merge', branch, '--auto', '--squash'], { stdio: 'inherit' });
   console.log('opened auto-merge PR');

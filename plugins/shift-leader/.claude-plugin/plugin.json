@@ -1,0 +1,10 @@
+{
+  "name": "shift-leader",
+  "version": "0.1.0",
+  "description": "Run as the autonomous shift leader of a multi-PR / multi-agent effort — maximize progress, reach the away user only via AskUserQuestion, gate phases on PR merges (never merge yourself), and dispatch file-disjoint parallel worktree agents at high velocity.",
+  "author": {
+    "name": "ShivaeDev"
+  },
+  "keywords": ["orchestration", "multi-agent", "parallel-worktrees", "pr-gating", "autonomy"],
+  "license": "MIT"
+}

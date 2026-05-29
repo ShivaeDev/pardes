@@ -1,0 +1,49 @@
+{
+  "columns": 120,
+  "cwd": "/home/dev/projects/widget",
+  "session_id": "5d12512a",
+  "tasks": [
+    {
+      "description": "locate the encode/decode round-trip tests across the source tree",
+      "id": "task-1",
+      "name": "Explore",
+      "startTime": 1779999400000,
+      "status": "running",
+      "tokenCount": 142300,
+      "tokenSamples": [
+        200, 900, 1400, 3100, 4200, 6800, 9000, 11200, 13400, 18230, 24000, 31000, 44000, 61000,
+        83000, 99000, 112000, 121000, 130000, 138000, 142300
+      ],
+      "type": "Explore"
+    },
+    {
+      "description": "review the diff for correctness regressions",
+      "id": "task-2",
+      "name": "code-reviewer",
+      "startTime": 1779999100000,
+      "status": "completed",
+      "tokenCount": 64120,
+      "tokenSamples": [5000, 9000, 14000, 22000, 31000, 41000, 52000, 59000, 64120],
+      "type": "general-purpose"
+    },
+    {
+      "description": "apply the shared builder to the next module",
+      "id": "task-3",
+      "name": "migrate-module",
+      "startTime": 1779999300000,
+      "status": "failed",
+      "tokenCount": 9100,
+      "tokenSamples": [1000, 2500, 4000, 5000, 7000, 9100],
+      "type": "general-purpose"
+    },
+    {
+      "description": "poll the release PR checks until green",
+      "id": "task-4",
+      "name": "wait-ci",
+      "startTime": 0,
+      "status": "pending",
+      "tokenCount": 0,
+      "type": "general-purpose"
+    }
+  ]
+}

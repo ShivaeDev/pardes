@@ -1,37 +1,40 @@
 {
-  "name": "pardes",
+  "allowCrossMarketplaceDependenciesOn": ["claude-plugins-official"],
   "description": "A calm-coding marketplace of Claude Code plugins and skills.",
+  "name": "pardes",
   "owner": {
     "name": "ShivaeDev"
   },
-  "allowCrossMarketplaceDependenciesOn": [
-    "claude-plugins-official"
-  ],
   "plugins": [
     {
+      "description": "Foundational plugin — shared hooks and core skills.",
       "name": "base",
-      "source": "./plugins/base",
-      "description": "Foundational plugin — shared hooks and core skills."
+      "source": "./plugins/base"
     },
     {
+      "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time.",
       "name": "orchestrate",
-      "source": "./plugins/orchestrate",
-      "description": "Plan a large multi-chunk PR through a user interview, then ship it by dispatching focused sub-agents one chunk at a time."
+      "source": "./plugins/orchestrate"
     },
     {
+      "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler.",
       "name": "pr-description",
-      "source": "./plugins/pr-description",
-      "description": "Write a clear, useful PR description — a tight Why / How / Decisions / Callouts structure with no filler."
+      "source": "./plugins/pr-description"
     },
     {
+      "description": "Reusable, dependency-free orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, and reap stale worktrees. Available as PATH commands and sourceable shell functions.",
       "name": "shell-helpers",
-      "source": "./plugins/shell-helpers",
-      "description": "Reusable, dependency-free orchestration shell helpers — freshen a checkout to a clean baseline, prune merged branches, and reap stale worktrees. Available as PATH commands and sourceable shell functions."
+      "source": "./plugins/shell-helpers"
     },
     {
+      "description": "Run as the autonomous shift leader of a multi-PR / multi-agent effort — maximize progress, reach the away user only via AskUserQuestion, gate phases on PR merges (never merge yourself), and dispatch file-disjoint parallel worktree agents at high velocity.",
       "name": "shift-leader",
-      "source": "./plugins/shift-leader",
-      "description": "Run as the autonomous shift leader of a multi-PR / multi-agent effort — maximize progress, reach the away user only via AskUserQuestion, gate phases on PR merges (never merge yourself), and dispatch file-disjoint parallel worktree agents at high velocity."
+      "source": "./plugins/shift-leader"
+    },
+    {
+      "description": "A rich, multi-line status line for Claude Code — model, context-pressure bar, cost, git, PR, and rate limits on the main line, plus per-subagent gauges in the agent panel.",
+      "name": "statusline",
+      "source": "./plugins/statusline"
     }
   ]
 }

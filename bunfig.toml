@@ -1,0 +1,7 @@
+# Shared supply-chain policy for the whole repo. Plugins are self-contained but
+# inherit this when bun runs from the repo root.
+[install]
+# Don't pull a freshly-published version until it has been public for 7 days
+# (604800s). A buffer against a compromised release being grabbed minutes after
+# a maintainer account is popped. Matches the renovate.json cooldown.
+minimumReleaseAge = 604800

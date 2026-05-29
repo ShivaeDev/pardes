@@ -1,0 +1,46 @@
+{
+  "context_window": {
+    "context_window_size": 1000000,
+    "current_usage": {
+      "cache_creation_input_tokens": 12000,
+      "cache_read_input_tokens": 161431,
+      "input_tokens": 9000,
+      "output_tokens": 3120
+    },
+    "remaining_percentage": 82,
+    "total_input_tokens": 182431,
+    "total_output_tokens": 3120,
+    "used_percentage": 18
+  },
+  "cost": {
+    "total_api_duration_ms": 412000,
+    "total_cost_usd": 1.8423,
+    "total_duration_ms": 1284000,
+    "total_lines_added": 642,
+    "total_lines_removed": 88
+  },
+  "cwd": "/home/dev/projects/widget",
+  "effort": { "level": "high" },
+  "exceeds_200k_tokens": false,
+  "model": { "display_name": "Opus 4.8 (1M context)", "id": "claude-opus-4-8[1m]" },
+  "output_style": { "name": "default" },
+  "pr": {
+    "number": 1211,
+    "review_state": "pending",
+    "url": "https://github.com/example-org/widget/pull/1211"
+  },
+  "rate_limits": {
+    "five_hour": { "resets_at": 1779999446, "used_percentage": 38.4 },
+    "seven_day": { "resets_at": 1780400000, "used_percentage": 12.1 }
+  },
+  "session_id": "5d12512a-73ec-4011-a7c4-9b395d475236",
+  "thinking": { "enabled": true },
+  "transcript_path": "/home/dev/.claude/projects/x/y.jsonl",
+  "version": "2.1.154",
+  "workspace": {
+    "added_dirs": ["/home/dev/projects/widget-shared"],
+    "current_dir": "/home/dev/projects/widget",
+    "project_dir": "/home/dev/projects/widget",
+    "repo": { "host": "github.com", "name": "widget", "owner": "example-org" }
+  }
+}

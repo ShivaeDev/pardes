@@ -1,0 +1,26 @@
+{
+  "name": "pardes",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A calm-coding marketplace of Claude Code plugins and skills.",
+  "type": "module",
+  "scripts": {
+    "ci": "biome ci .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome check --error-on-warnings .",
+    "lint:fix": "biome check --error-on-warnings --write .",
+    "test": "vitest run",
+    "typecheck": "tsc -p plugins/statusline/tsconfig.json --noEmit",
+    "ready": "bun run typecheck && bun run lint && bun run format:check && bun run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "@types/bun": "latest",
+    "typescript": "^5",
+    "vitest": "4.1.7"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}

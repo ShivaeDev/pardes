@@ -3,8 +3,14 @@
 // critic that flags fabricated citations, unread surfaces, and missing angles.
 // Bounded one extra round if the critic finds real gaps.
 //
-// Every agent here is READ-ONLY, so this is safe to run anywhere — no isolation
-// needed and nothing is written except the final report file.
+// The readers and the critic are READ-ONLY. The one exception is the synthesis
+// agent, which WRITES a single report file. To keep this safe to run from a
+// non-isolated orchestrator (which cannot write inside the shared checkout), the
+// default `reportPath` is an ABSOLUTE path OUTSIDE any git checkout (/tmp). Do
+// NOT point `reportPath` inside a git checkout: a non-isolated synthesis agent
+// can't write there and will stall. Synthesis is intentionally NOT worktree-
+// isolated — an isolated report would land in a throwaway worktree the caller
+// can't read, defeating the deliverable.
 //
 // Lean-context discipline: readers distill, the synthesis writes the full report
 // to a file, and only a tight briefing + the file path come back. Big artifacts
@@ -15,7 +21,8 @@
 //   - angles     (optional) explicit angles to fan over; otherwise derived from
 //                the question.
 //   - roots      (optional) paths/areas to scope the readers to.
-//   - reportPath (optional) where to write the full report; default below.
+//   - reportPath (optional) ABSOLUTE path outside any git checkout to write the
+//                full report to; default below. Don't point it inside a checkout.
 
 export const meta = {
   description:
@@ -27,13 +34,17 @@ export const meta = {
     { detail: 'A completeness critic flags gaps and suspect citations.', title: 'Critique' },
   ],
   whenToUse:
-    'Use to answer a research or architecture question over a codebase or doc set without writing anything — and to get an honest read on how complete the answer is.',
+    'Use to answer a research or architecture question over a codebase or doc set without touching it (the only write is one report file, outside any checkout) — and to get an honest read on how complete the answer is.',
 };
 
 const question = typeof args === 'string' ? args : args?.question;
 const explicitAngles = (typeof args === 'object' && args?.angles) || null;
 const roots = (typeof args === 'object' && args?.roots) || [];
-const reportPath = (typeof args === 'object' && args?.reportPath) || 'investigation-report.md';
+// Absolute, outside any git checkout — a non-isolated synthesis agent can write
+// here safely (see the header note on isolation). Don't override with a path
+// inside a checkout.
+const reportPath =
+  (typeof args === 'object' && args?.reportPath) || '/tmp/investigation-report.md';
 
 if (!question) {
   log('No question provided. Pass a question string or { question, ... }.');
@@ -104,20 +115,29 @@ const completeness = await agent(
   { label: 'completeness-critic', phase: 'Critique', schema: completenessSchema },
 );
 
-// One bounded extra round if the critic found real, closeable gaps.
+// One bounded extra round if the critic found real, closeable gaps. Suspect
+// citations the critic flagged are folded in so the gap round verifies them
+// against the source and drops any it can't confirm.
+const suspect = completeness.suspectCitations || [];
 const gaps = [...(completeness.unreadSurfaces || []), ...(completeness.missingAngles || [])];
 if (gaps.length && completeness.confidence !== 'high') {
-  phase('Fan-out read (gap round)');
-  readings = await parallel(
+  phase('Fan-out read');
+  const verifyNote = suspect.length
+    ? `\n\nALSO verify these citations the critic flagged as suspect, and drop any you\n` +
+      `cannot confirm by opening the source:\n${JSON.stringify(suspect, null, 2)}`
+    : '';
+  const gapReadings = await parallel(
     gaps.slice(0, 4).map(
       (gap, i) => () =>
         agent(
           `READ-ONLY. Close this specific gap from a completeness review of the question.\n` +
-            `Cite exact paths/lines. Distill.\n\nQUESTION: ${question}\n\nGAP: ${gap}`,
+            `Cite exact paths/lines. Distill.\n\nQUESTION: ${question}\n\nGAP: ${gap}${verifyNote}`,
           { label: `gap-reader-${i + 1}`, phase: 'Fan-out read' },
         ),
     ),
   );
+  // Augment, never replace: the second synthesis must see first-pass + gap findings.
+  readings = [...readings, ...gapReadings];
   briefing = await synthesize(gaps);
 }
 

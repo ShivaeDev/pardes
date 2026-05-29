@@ -20,8 +20,12 @@
 //
 // args: a task description string, or { task, base?, maxRounds?, setupCommand? }.
 //   - task         (required) what to implement, in generic second person.
-//   - base         (optional) base ref to diff against; default below.
-//   - maxRounds    (optional) max fix→re-review cycles; default 2, capped at 4.
+//   - base         (optional) base ref to branch the work from and diff against;
+//                  default below. Reaches the writer, the fixer, and the reviewer.
+//   - maxRounds    (optional) max number of FIX attempts. There is always exactly
+//                  one review per fix (and one initial review), so the worst case
+//                  is 1 + maxRounds reviews. 0 disables fixing (review only).
+//                  Default 2, capped at 4.
 //   - setupCommand (optional) one-shot bootstrap to run in the fresh worktree
 //                  (deps/codegen/local config). Safe no-op when unset.
 
@@ -44,10 +48,11 @@ export const meta = {
 
 const task = typeof args === 'string' ? args : args?.task;
 const base = (typeof args === 'object' && args?.base) || 'the default branch';
-const maxRounds = Math.min(
-  Math.max(Number((typeof args === 'object' && args?.maxRounds) || 2), 1),
-  4,
-);
+// maxRounds = max number of FIX attempts (0 disables fixing → review only).
+// `?? 2` keeps an explicit 0 from defaulting to 2; clamped to [0, 4].
+const rawMaxRounds =
+  typeof args === 'object' && args?.maxRounds != null ? Number(args.maxRounds) : 2;
+const maxRounds = Math.min(Math.max(Number.isFinite(rawMaxRounds) ? rawMaxRounds : 2, 0), 4);
 const setupCommand = (typeof args === 'object' && args?.setupCommand) || '';
 
 if (!task) {
@@ -97,9 +102,14 @@ const setupNote = setupCommand
   ? `First bootstrap the worktree by running: ${setupCommand}`
   : 'If the repo needs a bootstrap step (deps/codegen/local config), read its contributor docs and run it.';
 
+// Diff/branch base, phrased as an instruction (not a literal ref) for the prose
+// default; an explicit ref interpolates the same way.
+const baseInstruction = `branch from ${base} and diff against ${base}`;
+
 phase('Implement');
 let work = await agent(
-  `Implement this task in your own isolated worktree, then commit it to your branch. ${setupNote}\n` +
+  `Implement this task in your own isolated worktree (${baseInstruction}), then commit it\n` +
+    `to your branch. ${setupNote}\n` +
     `Make the change cleanly — no shortcuts, no disabling checks. If the task's premise\n` +
     `conflicts with the code, STOP and report the conflict instead of guessing.\n` +
     `Do NOT open a PR and do NOT merge. Report your branch name, worktree path, and a\n` +
@@ -109,11 +119,14 @@ let work = await agent(
 let currentBranch = work.branch;
 
 let review;
-for (let round = 1; round <= maxRounds; round++) {
-  phase(round === 1 ? 'Review' : `Fix ⟲ Review (round ${round})`);
+let fixesDone = 0;
+// Always one initial review; then fix → re-review while there are blocking
+// findings and we have fix attempts left (fixesDone < maxRounds).
+while (true) {
+  phase(fixesDone === 0 ? 'Review' : 'Fix ⟲ Review');
   review = await agent(
     `Adversarially review the committed diff on branch "${currentBranch}", READ-ONLY —\n` +
-      `e.g. \`git fetch\` then \`git diff ${base}...${currentBranch}\`. Do NOT check the branch\n` +
+      `e.g. \`git fetch\`, then diff that branch against ${base}. Do NOT check the branch\n` +
       `out and do NOT edit anything. Be skeptical: correctness bugs, missed edge cases,\n` +
       `broken contracts, shortcuts. Verdict 'approve' only if you'd merge it as-is.\n\n` +
       `Writer summary:\n${work.summary}`,
@@ -124,20 +137,24 @@ for (let round = 1; round <= maxRounds; round++) {
     (f) => f.severity === 'blocker' || f.severity === 'major',
   );
   if (review.verdict === 'approve' || blocking.length === 0) break;
-  if (round === maxRounds) {
-    log(`Still ${blocking.length} blocking finding(s) after ${maxRounds} round(s); handing back.`);
+  if (fixesDone >= maxRounds) {
+    log(
+      `Still ${blocking.length} blocking finding(s) after ${fixesDone} fix attempt(s); handing back.`,
+    );
     break;
   }
 
-  phase(`Fix (round ${round})`);
+  fixesDone++;
+  phase('Fix ⟲ Review');
+  log(`Fix attempt ${fixesDone} of ${maxRounds}.`);
   work = await agent(
     `A reviewer raised these blocking findings. In your own isolated worktree, branch off\n` +
       `the prior work and fix them: \`git fetch\` then\n` +
-      `\`git checkout -b ${currentBranch}-fix${round} ${currentBranch}\` (you can't check out\n` +
+      `\`git checkout -b ${currentBranch}-fix${fixesDone} ${currentBranch}\` (you can't check out\n` +
       `${currentBranch} directly — it may still be checked out elsewhere — so branch off it).\n` +
       `Address each finding, commit, and report the NEW branch name. Do not open a PR or merge.\n\n` +
       `Findings:\n${JSON.stringify(blocking, null, 2)}`,
-    { isolation: 'worktree', label: 'fixer', phase: 'Fix', schema: workSchema },
+    { isolation: 'worktree', label: 'fixer', phase: 'Fix ⟲ Review', schema: workSchema },
   );
   currentBranch = work.branch;
 }

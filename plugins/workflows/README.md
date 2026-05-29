@@ -1,7 +1,7 @@
 # workflows
 
-A starter library of reusable [Workflow-tool](https://code.claude.com)
-orchestration scripts for the [pardes](../../README.md) marketplace. Each script
+A starter library of reusable Workflow-tool orchestration scripts for the
+[pardes](../../README.md) marketplace. Each script
 ships as a deterministic ES module under `workflows/` and is auto-discovered by
 Claude Code, registered as `workflows:<name>`.
 
@@ -30,7 +30,10 @@ Workflow({ name: 'workflows:writer-reviewer', args: '<task description>' });
 Every script bakes in the same posture:
 
 - **Writers run worktree-isolated** (`isolation: 'worktree'`); read-only agents do
-  not, because a file-editing agent in a non-isolated orchestrator stalls.
+  not, because a file-editing agent in a non-isolated orchestrator stalls. The one
+  deliberate exception is `investigate`'s synthesis, which writes a single report
+  to an **absolute path outside any checkout** so a non-isolated orchestrator can
+  run it and the caller can still read the deliverable.
 - **Never merge, never open a PR.** The workflows hand back a branch (or results)
   and a verdict; a human opens the PR and decides whether to merge.
 - **Continuity flows through git branches.** Each isolated agent gets a *fresh*
@@ -47,8 +50,10 @@ Every script bakes in the same posture:
 Implement a change in a worktree-isolated agent, then have a *second, adversarial*
 agent review the resulting diff — catching the class of defects a self-reviewing
 author misses. Optionally loops: blocking findings go back to a fixer and get
-re-reviewed, bounded by `maxRounds`. **Never merges and never opens a PR** — it
-returns the final branch plus the structured verdict so a human makes the call.
+re-reviewed. `maxRounds` is the **max number of fix attempts** (each followed by a
+re-review); there is always an initial review, and `maxRounds: 0` disables fixing
+(review only). **Never merges and never opens a PR** — it returns the final branch
+plus the structured verdict so a human makes the call.
 
 ```js
 // string form — just the task
@@ -59,7 +64,7 @@ Workflow({
   name: 'workflows:writer-reviewer',
   args: {
     task: 'Add retry-with-backoff to the upload client.',
-    maxRounds: 2, // fix⟲re-review cycles; default 2, capped at 4
+    maxRounds: 2, // max fix attempts, each re-reviewed; default 2, capped at 4 (0 = review only)
     setupCommand: './script/bootstrap', // optional one-shot worktree bootstrap; no-op if unset
   },
 });
@@ -86,12 +91,14 @@ Workflow({
     question: 'How does session resumption work after a crash?',
     angles: ['storage format', 'replay path', 'failure modes'], // optional; derived if omitted
     roots: ['src/session', 'docs/architecture'], // optional scope hints
-    reportPath: 'session-resume-report.md', // optional; default investigation-report.md
+    reportPath: '/tmp/session-resume-report.md', // optional; default /tmp/investigation-report.md
   },
 });
 ```
 
-`args`: a question string, or `{ question, angles?, roots?, reportPath? }`.
+`args`: a question string, or `{ question, angles?, roots?, reportPath? }`. `reportPath`
+must be an **absolute path outside any git checkout** — the synthesis agent is not
+worktree-isolated, so a path inside a checkout would stall a non-isolated orchestrator.
 
 ### `workflows:parallel-verify`
 

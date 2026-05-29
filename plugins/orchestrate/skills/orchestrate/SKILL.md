@@ -134,6 +134,8 @@ After the final chunk lands green:
 4. The PR's Callouts section flags reviewer eyes: migration discipline, accessor-rename surface, env-var dependencies, anywhere the PR is a one-way door.
 5. Verify CI with `gh pr checks <num>`.
 
+> For the PR description: if a **`pr-description`** skill is available, use it. If not, follow the repo's PR conventions.
+
 ## Memory hygiene
 
 Before starting, check memory for:

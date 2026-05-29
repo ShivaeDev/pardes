@@ -70,6 +70,21 @@ const RECOMMENDATIONS: Recommendation[] = [
     value: true,
     why: 'Surfaces a short summary of the reasoning so you can follow what the agent is doing.',
   },
+  {
+    path: 'autoUpdatesChannel',
+    value: 'latest',
+    why: 'Stays on the latest Claude Code release channel, so fixes and new capabilities arrive as soon as they ship.',
+  },
+  {
+    path: 'tui',
+    value: 'fullscreen',
+    why: 'Uses the full-screen terminal UI — more room for the conversation, status line, and agent view during long sessions.',
+  },
+  {
+    path: 'skipAutoPermissionPrompt',
+    value: true,
+    why: 'Skips the startup auto-permission prompt so auto-mode / autonomous workflows begin without an extra confirmation (pairs with permissions.defaultMode = auto).',
+  },
 ];
 
 // Advisory-only notes for intents whose exact setting key is not stable enough

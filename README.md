@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/pardes-card.png" alt="Pardes — a calm-coding marketplace of Claude Code plugins and skills" width="820">
+</p>
+
 # Pardes
 
 A calm-coding marketplace of [Claude Code](https://code.claude.com) plugins and skills.

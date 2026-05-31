@@ -1,0 +1,20 @@
+{
+  "interface": {
+    "displayName": "Pardes for Codex"
+  },
+  "name": "pardes-codex",
+  "plugins": [
+    {
+      "category": "Productivity",
+      "name": "codex-workstreams",
+      "policy": {
+        "authentication": "ON_INSTALL",
+        "installation": "AVAILABLE"
+      },
+      "source": {
+        "path": "./plugins/codex-workstreams",
+        "source": "local"
+      }
+    }
+  ]
+}

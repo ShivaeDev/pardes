@@ -1,0 +1,6 @@
+interface:
+  display_name: "Audit Workstream Run"
+  short_description: "Review a Codex workflow without transcript bloat"
+  default_prompt: "Use $audit-workstream-run to evaluate this Codex workstream and propose workflow improvements."
+policy:
+  allow_implicit_invocation: true

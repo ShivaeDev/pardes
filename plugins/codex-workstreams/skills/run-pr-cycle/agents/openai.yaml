@@ -1,0 +1,6 @@
+interface:
+  display_name: "Run PR Cycle"
+  short_description: "Publish a PR and block until action is needed"
+  default_prompt: "Use $run-pr-cycle to publish this verified branch and manage its PR lifecycle."
+policy:
+  allow_implicit_invocation: true

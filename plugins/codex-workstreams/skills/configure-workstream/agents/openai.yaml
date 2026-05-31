@@ -1,0 +1,6 @@
+interface:
+  display_name: "Configure Workstream"
+  short_description: "Set up the shared workstream artifact directory"
+  default_prompt: "Use $configure-workstream to check and configure Codex workstream permissions."
+policy:
+  allow_implicit_invocation: true

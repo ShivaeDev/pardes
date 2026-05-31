@@ -1,0 +1,6 @@
+interface:
+  display_name: "Drive Workstream"
+  short_description: "Coordinate a long-running coding objective"
+  default_prompt: "Use $drive-workstream to manage this objective through its PR sequence."
+policy:
+  allow_implicit_invocation: true

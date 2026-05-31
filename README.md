@@ -66,10 +66,33 @@ To pick and choose, install plugins one at a time instead:
 
 Or run `/plugin` to browse and install them interactively.
 
+## Using the Codex marketplace
+
+First, register the Codex marketplace once. The app install link below needs
+this marketplace to exist locally:
+
+```bash
+codex plugin marketplace add ShivaeDev/pardes --ref main
+```
+
+Then [install Codex Workstreams in the Codex app](codex://plugins/install/codex-workstreams?marketplace=pardes-codex),
+or install it from the CLI:
+
+```bash
+codex plugin add codex-workstreams@pardes-codex
+```
+
+After installation, [start a Codex configuration session](codex://new?prompt=Use%20%24configure-workstream%20to%20set%20up%20the%20shared%20artifact%20directory.)
+once to set up the narrow writable artifact directory used for checkpoints,
+reports, and temporary pull-request bodies.
+
 ## Layout
 
 ```
 .
+├── .agents/
+│   └── plugins/
+│       └── marketplace.json  # registers Codex plugins in this repo
 ├── .claude-plugin/
 │   └── marketplace.json      # registers every plugin in this repo
 ├── changelog/

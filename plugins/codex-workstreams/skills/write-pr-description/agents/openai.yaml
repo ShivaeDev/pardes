@@ -1,0 +1,6 @@
+interface:
+  display_name: "Write PR Description"
+  short_description: "Draft a concise reviewer-focused PR body"
+  default_prompt: "Use $write-pr-description to draft the pull request description."
+policy:
+  allow_implicit_invocation: true

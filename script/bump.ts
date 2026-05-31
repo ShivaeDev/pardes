@@ -37,6 +37,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { loadPlugins, touchedPlugins } from './bump-core';
 
 const ZERO = '0000000000000000000000000000000000000000';
 const DIFF_BUDGET = 60_000; // cap diff text handed to the model (argv size + token sanity)
@@ -107,26 +108,15 @@ if (changed.length === 0) {
   process.exit(0);
 }
 
-type MarketPlugin = { name: string; source: string };
-const marketplace = JSON.parse(readFileSync('.claude-plugin/marketplace.json', 'utf8')) as {
-  plugins: MarketPlugin[];
-};
-const plugins = marketplace.plugins.map((p) => ({
-  name: p.name,
-  path: p.source.replace(/^\.\//, '').replace(/\/$/, ''),
-}));
-
-const versionPath = (path: string) => join(path, '.claude-plugin', 'plugin.json');
+const plugins = loadPlugins();
 
 // "Touched" = a changed file under the plugin's path that ISN'T the bot-owned
 // version manifest — so the bot's own bump never counts as a change to bump again.
-const touched = plugins.filter((p) =>
-  changed.some((f) => f.startsWith(`${p.path}/`) && f !== versionPath(p.path)),
-);
+const touched = touchedPlugins(plugins, changed);
 
 // A plugin whose manifest didn't exist before this push is a brand-new plugin:
 // its initial version is intentional, so don't auto-bump it on the add commit.
-const toBump = touched.filter((p) => existedAt(beforeSha, versionPath(p.path)));
+const toBump = touched.filter((p) => existedAt(beforeSha, p.manifestPath));
 for (const p of touched) {
   if (!toBump.includes(p)) console.log(`${p.name}: new plugin — leaving its initial version alone`);
 }
@@ -404,8 +394,8 @@ function writeChangelog(
 // or null if the manifest doesn't exist there. Used to make the run re-entrant:
 // the only thing that ever bumps a version is THIS workflow, so if main already
 // carries a higher version than the working-tree base, a prior (partial) run landed.
-function versionAtRef(ref: string, path: string): string | null {
-  const r = run('git', ['cat-file', '-p', `${ref}:${versionPath(path)}`]);
+function versionAtRef(ref: string, manifestPath: string): string | null {
+  const r = run('git', ['cat-file', '-p', `${ref}:${manifestPath}`]);
   if (r.status !== 0) return null;
   try {
     const v = (JSON.parse(r.stdout) as { version?: unknown }).version;
@@ -425,16 +415,19 @@ git(['fetch', 'origin', 'main']);
 const released: { name: string; to: string }[] = [];
 const bumped: { name: string; from: string; to: string; kind: string }[] = [];
 
+// Classify, version, and changelog every touched plugin independently. One
+// source PR may therefore produce several release entries and immutable tags,
+// committed together in the single bot-owned bump PR below.
 for (const p of toBump) {
   try {
-    const vpath = versionPath(p.path);
+    const vpath = p.manifestPath;
     const rawManifest = readFileSync(vpath, 'utf8');
     const current: string = JSON.parse(rawManifest).version;
 
     // Re-entrancy short-circuit: if main's manifest version already differs from
     // the working-tree base, a previous run of this workflow already bumped + merged
     // this plugin. Don't re-classify or re-commit — just make sure its tag exists.
-    const mainVersion = versionAtRef('origin/main', p.path);
+    const mainVersion = versionAtRef('origin/main', p.manifestPath);
     if (mainVersion && mainVersion !== current) {
       released.push({ name: p.name, to: mainVersion });
       console.log(`${p.name}: already at ${mainVersion} on main — skipping bump, will verify tag`);
@@ -595,7 +588,7 @@ function mergeCommitForBranch(): string {
 function manifestCommitOnMain(name: string): string {
   const plugin = plugins.find((p) => p.name === name);
   if (!plugin) die(`unknown plugin ${name}`);
-  const sha = git(['log', '-1', '--format=%H', 'origin/main', '--', versionPath(plugin.path)]);
+  const sha = git(['log', '-1', '--format=%H', 'origin/main', '--', plugin.manifestPath]);
   if (!sha) die(`could not resolve the commit that bumped ${name} on main`);
   return sha;
 }

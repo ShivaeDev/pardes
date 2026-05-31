@@ -1,0 +1,32 @@
+{
+  "author": {
+    "name": "Pardes contributors",
+    "url": "https://github.com/ShivaeDev"
+  },
+  "description": "Run long coding efforts through a durable Codex manager that delegates investigation, implementation, verification, and pull-request follow-through.",
+  "homepage": "https://github.com/ShivaeDev/pardes/tree/main/plugins/codex-workstreams",
+  "interface": {
+    "brandColor": "#21483A",
+    "capabilities": ["Interactive", "Write"],
+    "category": "Productivity",
+    "composerIcon": "./assets/pardes-logo.png",
+    "defaultPrompt": [
+      "Use $drive-workstream to coordinate this multi-PR coding objective.",
+      "Use $investigate-codebase to map this code path before we choose a change.",
+      "Use $configure-workstream to set up the shared artifact directory."
+    ],
+    "developerName": "Pardes contributors",
+    "displayName": "Codex Workstreams",
+    "logo": "./assets/pardes-logo.png",
+    "longDescription": "Give Codex a durable manager workflow for long-running engineering efforts. It coordinates read-only explorers, isolated worktree owners, fresh verifiers, and blocking pull-request monitoring while keeping checkpoints concise across compaction.",
+    "screenshots": ["./assets/pardes-card.png"],
+    "shortDescription": "Delegate multi-PR coding work without losing the thread.",
+    "websiteURL": "https://github.com/ShivaeDev/pardes"
+  },
+  "keywords": ["codex", "orchestration", "worktrees", "pull-requests", "sub-agents"],
+  "license": "MIT",
+  "name": "codex-workstreams",
+  "repository": "https://github.com/ShivaeDev/pardes",
+  "skills": "./skills/",
+  "version": "0.1.0"
+}

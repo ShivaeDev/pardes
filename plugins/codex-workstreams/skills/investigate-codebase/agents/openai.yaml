@@ -1,0 +1,6 @@
+interface:
+  display_name: "Investigate Codebase"
+  short_description: "Gather evidence with focused exploration"
+  default_prompt: "Use $investigate-codebase to understand this problem before proposing a change."
+policy:
+  allow_implicit_invocation: true

@@ -11,8 +11,12 @@
     "lint": "biome check --error-on-warnings .",
     "lint:fix": "biome check --error-on-warnings --write .",
     "test": "vitest run",
+    "test:codex": "bun run --sequential 'test:codex:*'",
+    "test:codex:configure-workstream": "uv run python -B plugins/codex-workstreams/skills/configure-workstream/scripts/test_check_setup.py",
+    "test:codex:implement-change": "uv run python -B plugins/codex-workstreams/skills/implement-change/scripts/test_manage_worker_worktree.py",
+    "test:codex:run-pr-cycle": "uv run python -B plugins/codex-workstreams/skills/run-pr-cycle/scripts/test_watch_pr.py",
     "typecheck": "tsc -p plugins/statusline/tsconfig.json --noEmit",
-    "ready": "bun run typecheck && bun run lint && bun run format:check && bun run test"
+    "ready": "bun run typecheck && bun run lint && bun run format:check && bun run test && bun run test:codex"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.15",

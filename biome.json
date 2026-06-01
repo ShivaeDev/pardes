@@ -47,7 +47,6 @@
         "noUnusedVariables": "error"
       },
       "performance": {
-        "noBarrelFile": "error",
         "noReExportAll": "error"
       },
       "recommended": true,

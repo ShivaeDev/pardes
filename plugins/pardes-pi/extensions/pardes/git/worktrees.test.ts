@@ -1,0 +1,752 @@
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Effect } from 'effect';
+import { afterEach, describe, expect, test } from 'vitest';
+import { discoverRepository } from './repository.ts';
+import {
+  type CreateDetachedReviewCheckoutInput,
+  type ManagedLeaseOwner,
+  type ManagedWorktreeShape,
+  makeManagedWorktreeService,
+  managedWorktreeBranch,
+} from './worktrees.ts';
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0))
+    rmSync(directory, { force: true, recursive: true });
+});
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+}
+
+function owner(
+  repo: ManagedLeaseOwner['repo'],
+  managerId: string,
+  agentId: string,
+): ManagedLeaseOwner {
+  return { agentId, managerId, repo };
+}
+
+const provisionReview = Effect.fnUntraced(function* (
+  service: ManagedWorktreeShape,
+  input: CreateDetachedReviewCheckoutInput,
+) {
+  const lease = yield* service.prepareDetachedReviewCheckout(input);
+  yield* service.provisionDetachedReviewCheckout(
+    { managerId: input.managerId, repo: input.repo, verificationId: input.verificationId },
+    lease,
+  );
+  return lease;
+});
+
+function fixtureRepository(): string {
+  const root = mkdtempSync(join(tmpdir(), 'pardes-worktree-'));
+  temporaryDirectories.push(root);
+  const repo = join(root, 'project');
+  execFileSync('git', ['init', '-b', 'main', repo]);
+  git(repo, 'config', 'user.email', 'pardes@example.test');
+  git(repo, 'config', 'user.name', 'Pardes Test');
+  writeFileSync(join(repo, 'README.md'), 'fixture\n');
+  git(repo, 'add', 'README.md');
+  git(repo, 'commit', '-m', 'fixture');
+  return realpathSync(repo);
+}
+
+describe('managed worktree service', () => {
+  test('creates an isolated lease from an explicit SHA and removes only when clean', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-1', branchPointSha, managerId: 'manager-1', repo }),
+    );
+
+    expect(lease.path).toBe(join(primary, '.worktrees', 'pardes', 'manager-1', 'agent-1'));
+    expect(git(lease.path, 'rev-parse', 'HEAD')).toBe(branchPointSha);
+    expect(git(lease.path, 'branch', '--show-current')).toBe(
+      managedWorktreeBranch('manager-1', 'agent-1'),
+    );
+    expect(git(primary, 'status', '--porcelain', '--untracked-files=all')).toBe('');
+    expect(
+      await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
+    ).toEqual({ changedPaths: [], dirty: false, headSha: branchPointSha, path: lease.path });
+
+    const changed = join(lease.path, 'worker.txt');
+    writeFileSync(changed, 'dirty\n');
+    expect(
+      await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
+    ).toEqual({
+      changedPaths: ['worker.txt'],
+      dirty: true,
+      headSha: branchPointSha,
+      path: lease.path,
+    });
+    const removal = await Effect.runPromise(
+      service.removeIfClean(owner(repo, 'manager-1', 'agent-1'), lease).pipe(Effect.flip),
+    );
+    expect(removal._tag).toBe('DirtyWorktreeError');
+    expect(existsSync(lease.path)).toBe(true);
+
+    git(lease.path, 'add', 'worker.txt');
+    git(lease.path, 'commit', '-m', 'worker fixture');
+    const committedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
+    expect(
+      await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
+    ).toEqual({
+      changedPaths: ['worker.txt'],
+      dirty: false,
+      headSha: committedHeadSha,
+      path: lease.path,
+    });
+    await Effect.runPromise(service.removeIfClean(owner(repo, 'manager-1', 'agent-1'), lease));
+    expect(existsSync(lease.path)).toBe(false);
+  });
+
+  test('returns an immutable audited head snapshot when later commits advance the worker branch', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-snapshot', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'first.txt'), 'first audited commit\n');
+    git(lease.path, 'add', 'first.txt');
+    git(lease.path, 'commit', '-m', 'first audited fixture');
+
+    const firstInspection = await Effect.runPromise(
+      service.inspect(owner(repo, 'manager-1', 'agent-snapshot'), lease),
+    );
+    expect(firstInspection).toEqual({
+      changedPaths: ['first.txt'],
+      dirty: false,
+      headSha: git(lease.path, 'rev-parse', 'HEAD'),
+      path: lease.path,
+    });
+
+    writeFileSync(join(lease.path, 'second.txt'), 'later commit\n');
+    git(lease.path, 'add', 'second.txt');
+    git(lease.path, 'commit', '-m', 'later fixture');
+    const secondInspection = await Effect.runPromise(
+      service.inspect(owner(repo, 'manager-1', 'agent-snapshot'), lease),
+    );
+
+    expect(secondInspection.headSha).not.toBe(firstInspection.headSha);
+    expect(firstInspection.changedPaths).toEqual(['first.txt']);
+    expect(secondInspection.changedPaths).toEqual(['first.txt', 'second.txt']);
+  });
+
+  test('creates a fresh manager-namespaced detached review checkout pinned to an immutable worker head', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const worker = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-source',
+        branchPointSha,
+        managerId: 'manager-review',
+        repo,
+      }),
+    );
+    writeFileSync(join(worker.path, 'reviewed.txt'), 'reviewed\n');
+    writeFileSync(join(worker.path, '.gitignore'), 'ignored-scratch.txt\n');
+    git(worker.path, 'add', 'reviewed.txt', '.gitignore');
+    git(worker.path, 'commit', '-m', 'reviewed fixture');
+    const reviewedHeadSha = git(worker.path, 'rev-parse', 'HEAD');
+
+    const lease = await Effect.runPromise(
+      provisionReview(service, {
+        managerId: 'manager-review',
+        repo,
+        reviewedHeadSha,
+        verificationId: 'verify-one',
+      }),
+    );
+    expect(lease.path).toBe(
+      join(primary, '.worktrees', 'pardes', 'manager-review', 'reviews', 'verify-one'),
+    );
+    expect(git(lease.path, 'rev-parse', 'HEAD')).toBe(reviewedHeadSha);
+    expect(git(lease.path, 'branch', '--show-current')).toBe('');
+    expect(
+      await Effect.runPromise(
+        service.inspectDetachedReviewCheckout(
+          { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+          lease,
+        ),
+      ),
+    ).toEqual({ dirty: false, headSha: reviewedHeadSha, path: lease.path });
+
+    writeFileSync(join(worker.path, 'later.txt'), 'later\n');
+    git(worker.path, 'add', 'later.txt');
+    git(worker.path, 'commit', '-m', 'later fixture');
+    expect(git(worker.path, 'rev-parse', 'HEAD')).not.toBe(reviewedHeadSha);
+    expect(git(lease.path, 'rev-parse', 'HEAD')).toBe(reviewedHeadSha);
+    writeFileSync(join(lease.path, 'unexpected.txt'), 'same-user mutation remains observable\n');
+    expect(
+      await Effect.runPromise(
+        service.inspectDetachedReviewCheckout(
+          { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+          lease,
+        ),
+      ),
+    ).toEqual({ dirty: true, headSha: reviewedHeadSha, path: lease.path });
+    git(lease.path, 'add', 'unexpected.txt');
+    git(lease.path, 'commit', '-m', 'disposable verifier scratch commit');
+    writeFileSync(join(lease.path, 'untracked-scratch.txt'), 'discard me\n');
+    writeFileSync(join(lease.path, 'ignored-scratch.txt'), 'discard ignored scratch too\n');
+    const latestSourceHeadSha = git(worker.path, 'rev-parse', 'HEAD');
+    const refreshed = await Effect.runPromise(
+      service.refreshDetachedReviewCheckout(
+        { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+        lease,
+        latestSourceHeadSha,
+      ),
+    );
+    expect(refreshed).toMatchObject({ path: lease.path, reviewedHeadSha: latestSourceHeadSha });
+    expect(
+      await Effect.runPromise(
+        service.inspectDetachedReviewCheckout(
+          { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+          refreshed,
+        ),
+      ),
+    ).toEqual({ dirty: false, headSha: latestSourceHeadSha, path: lease.path });
+    expect(existsSync(join(lease.path, 'unexpected.txt'))).toBe(false);
+    expect(existsSync(join(lease.path, 'untracked-scratch.txt'))).toBe(false);
+    expect(existsSync(join(lease.path, 'ignored-scratch.txt'))).toBe(false);
+
+    writeFileSync(
+      join(lease.path, 'discardable-verifier-scratch.txt'),
+      'discard only detached review scratch\n',
+    );
+    await Effect.runPromise(
+      service.discardDetachedReviewCheckout(
+        { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+        refreshed,
+      ),
+    );
+    expect(existsSync(lease.path)).toBe(false);
+    expect(existsSync(worker.path)).toBe(true);
+    expect(git(worker.path, 'rev-parse', 'HEAD')).toBe(latestSourceHeadSha);
+
+    const reprovisioned = await Effect.runPromise(
+      service.refreshDetachedReviewCheckout(
+        { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+        refreshed,
+        latestSourceHeadSha,
+      ),
+    );
+    expect(
+      await Effect.runPromise(
+        service.inspectDetachedReviewCheckout(
+          { managerId: 'manager-review', repo, verificationId: 'verify-one' },
+          reprovisioned,
+        ),
+      ),
+    ).toEqual({ dirty: false, headSha: latestSourceHeadSha, path: lease.path });
+  });
+
+  test('rejects writing-worktree aliases before detached review reset, clean, or removal', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const worker = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-source',
+        branchPointSha,
+        managerId: 'manager-review',
+        repo,
+      }),
+    );
+    writeFileSync(
+      join(worker.path, 'writer-preserved.txt'),
+      'writer lease must never become disposable review scratch\n',
+    );
+    const aliasedReviewLease = {
+      createdAt: worker.createdAt,
+      managerId: worker.managerId,
+      path: worker.path,
+      reviewedHeadSha: branchPointSha,
+      verificationId: worker.agentId,
+    };
+    const owner = { managerId: 'manager-review', repo, verificationId: 'agent-source' };
+
+    const refreshFailure = await Effect.runPromise(
+      service
+        .refreshDetachedReviewCheckout(owner, aliasedReviewLease, branchPointSha)
+        .pipe(Effect.flip),
+    );
+    expect(refreshFailure).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'detached review checkout path does not match its managed namespace',
+    });
+    const discardFailure = await Effect.runPromise(
+      service.discardDetachedReviewCheckout(owner, aliasedReviewLease).pipe(Effect.flip),
+    );
+    expect(discardFailure).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'detached review checkout path does not match its managed namespace',
+    });
+    expect(existsSync(join(worker.path, 'writer-preserved.txt'))).toBe(true);
+    expect(git(worker.path, 'rev-parse', 'HEAD')).toBe(branchPointSha);
+  });
+
+  test('refuses destructive detached-review operations after the checkout becomes branch-attached', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const reviewedHeadSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const owner = { managerId: 'manager-review', repo, verificationId: 'verify-attached' };
+    const lease = await Effect.runPromise(provisionReview(service, { ...owner, reviewedHeadSha }));
+    git(lease.path, 'switch', '-c', 'malicious-review-branch');
+    writeFileSync(join(lease.path, 'branch-attached-preserved.txt'), 'do not clean or remove\n');
+
+    const refreshFailure = await Effect.runPromise(
+      service.refreshDetachedReviewCheckout(owner, lease, reviewedHeadSha).pipe(Effect.flip),
+    );
+    expect(refreshFailure).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'detached review checkout is attached to a branch',
+    });
+    const discardFailure = await Effect.runPromise(
+      service.discardDetachedReviewCheckout(owner, lease).pipe(Effect.flip),
+    );
+    expect(discardFailure).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'detached review checkout is attached to a branch',
+    });
+    const reprovisionFailure = await Effect.runPromise(
+      service.provisionDetachedReviewCheckout(owner, lease).pipe(Effect.flip),
+    );
+    expect(reprovisionFailure).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'detached review checkout is attached to a branch',
+    });
+    expect(existsSync(join(lease.path, 'branch-attached-preserved.txt'))).toBe(true);
+  });
+
+  test('reports both sides of committed renames and representative ordinary changes', async () => {
+    const primary = fixtureRepository();
+    writeFileSync(join(primary, 'rename-source.txt'), 'rename fixture\n');
+    writeFileSync(join(primary, 'modified.txt'), 'before\n');
+    writeFileSync(join(primary, 'deleted.txt'), 'deleted\n');
+    git(primary, 'add', '.');
+    git(primary, 'commit', '-m', 'audit baseline');
+
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-audit', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    const changedPaths = [
+      'added.txt',
+      'deleted.txt',
+      'modified.txt',
+      'rename-destination.txt',
+      'rename-source.txt',
+    ];
+
+    git(lease.path, 'mv', 'rename-source.txt', 'rename-destination.txt');
+    writeFileSync(join(lease.path, 'modified.txt'), 'after\n');
+    rmSync(join(lease.path, 'deleted.txt'));
+    writeFileSync(join(lease.path, 'added.txt'), 'added\n');
+    expect(
+      await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-audit'), lease)),
+    ).toEqual({ changedPaths, dirty: true, headSha: branchPointSha, path: lease.path });
+
+    git(lease.path, 'add', '-A');
+    git(lease.path, 'commit', '-m', 'audit changes');
+    const auditedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
+    expect(
+      await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-audit'), lease)),
+    ).toEqual({ changedPaths, dirty: false, headSha: auditedHeadSha, path: lease.path });
+  });
+
+  test('rejects dot path segments before mutating managed worktrees', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const registeredBefore = git(primary, 'worktree', 'list', '--porcelain');
+    const cases = [
+      { agentId: 'agent-safe', field: 'managerId', managerId: '.' },
+      { agentId: 'agent-safe', field: 'managerId', managerId: '..' },
+      { agentId: '.', field: 'agentId', managerId: 'manager-safe' },
+      { agentId: '..', field: 'agentId', managerId: 'manager-safe' },
+      { agentId: 'reviews', field: 'agentId', managerId: 'manager-safe' },
+    ] as const;
+
+    for (const input of cases) {
+      const failure = await Effect.runPromise(
+        service.create({ ...input, branchPointSha, repo }).pipe(Effect.flip),
+      );
+      expect(failure).toMatchObject({ _tag: 'InvalidWorktreeInputError', field: input.field });
+      expect(existsSync(join(primary, '.worktrees'))).toBe(false);
+      expect(git(primary, 'for-each-ref', '--format=%(refname)', 'refs/heads/pardes')).toBe('');
+      expect(git(primary, 'worktree', 'list', '--porcelain')).toBe(registeredBefore);
+    }
+  });
+
+  test('rejects dot path segments in retained owners before Git inspection', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = {
+      agentId: 'agent-safe',
+      branch: managedWorktreeBranch('manager-safe', 'agent-safe'),
+      branchPointSha,
+      createdAt: new Date(0).toISOString(),
+      managerId: 'manager-safe',
+      path: join(primary, '.worktrees', 'pardes', 'manager-safe', 'agent-safe'),
+    };
+    const cases = [
+      owner(repo, '.', 'agent-safe'),
+      owner(repo, '..', 'agent-safe'),
+      owner(repo, 'manager-safe', '.'),
+      owner(repo, 'manager-safe', '..'),
+    ];
+
+    for (const retainedOwner of cases) {
+      const failure = await Effect.runPromise(
+        service.inspect(retainedOwner, lease).pipe(Effect.flip),
+      );
+      expect(failure).toMatchObject({
+        _tag: 'InvalidManagedLeaseError',
+        reason: 'owner namespace is invalid',
+      });
+    }
+  });
+
+  test('rejects corrupt retained lease namespaces before inspecting redirected Git paths', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-retained', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    const expectedOwner = owner(repo, 'manager-1', 'agent-retained');
+    const corruptions: ReadonlyArray<Partial<typeof lease>> = [
+      { managerId: 'manager-2' },
+      { agentId: 'agent-other' },
+      { path: primary },
+      { branch: 'pardes/manager-2/agent-retained' },
+      { branchPointSha: 'HEAD' },
+    ];
+
+    for (const corruption of corruptions) {
+      const failure = await Effect.runPromise(
+        service.inspect(expectedOwner, { ...lease, ...corruption }).pipe(Effect.flip),
+      );
+      expect(failure._tag).toBe('InvalidManagedLeaseError');
+    }
+  });
+
+  test('rejects a redirected managed ancestor before creating an outside worktree', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const outside = mkdtempSync(join(tmpdir(), 'pardes-worktree-outside-'));
+    temporaryDirectories.push(outside);
+    symlinkSync(outside, join(primary, '.worktrees'));
+    const branch = managedWorktreeBranch('manager-1', 'agent-ancestor');
+    const outsideTarget = join(outside, 'pardes', 'manager-1', 'agent-ancestor');
+    const registeredBefore = git(primary, 'worktree', 'list', '--porcelain');
+
+    const failure = await Effect.runPromise(
+      service
+        .create({ agentId: 'agent-ancestor', branchPointSha, managerId: 'manager-1', repo })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({ _tag: 'InvalidWorktreeInputError', field: 'path' });
+    expect(existsSync(outsideTarget)).toBe(false);
+    expect(git(primary, 'branch', '--list', branch)).toBe('');
+    expect(git(primary, 'worktree', 'list', '--porcelain')).toBe(registeredBefore);
+    expect(git(primary, 'worktree', 'list', '--porcelain')).not.toContain(
+      `worktree ${outsideTarget}`,
+    );
+  });
+
+  test('rejects an existing symbolic agent target before creating its branch', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const outside = mkdtempSync(join(tmpdir(), 'pardes-worktree-target-'));
+    temporaryDirectories.push(outside);
+    const target = join(primary, '.worktrees', 'pardes', 'manager-1', 'agent-target');
+    mkdirSync(join(primary, '.worktrees', 'pardes', 'manager-1'), { recursive: true });
+    symlinkSync(outside, target);
+    const branch = managedWorktreeBranch('manager-1', 'agent-target');
+    const registeredBefore = git(primary, 'worktree', 'list', '--porcelain');
+
+    const failure = await Effect.runPromise(
+      service
+        .create({ agentId: 'agent-target', branchPointSha, managerId: 'manager-1', repo })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({ _tag: 'InvalidWorktreeInputError', field: 'path' });
+    expect(git(primary, 'branch', '--list', branch)).toBe('');
+    expect(git(primary, 'worktree', 'list', '--porcelain')).toBe(registeredBefore);
+  });
+
+  test('rejects a physically redirected managed worktree before Git inspection', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-redirected', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    rmSync(lease.path, { force: true, recursive: true });
+    symlinkSync(primary, lease.path);
+
+    const failure = await Effect.runPromise(
+      service.inspect(owner(repo, 'manager-1', 'agent-redirected'), lease).pipe(Effect.flip),
+    );
+    expect(failure).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'worktree path is redirected',
+    });
+  });
+
+  test('classifies and cleans safe merged worktree and branch artifacts', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-cleanup-clean',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const retainedOwner = owner(repo, 'manager-1', 'agent-cleanup-clean');
+
+    expect(await Effect.runPromise(service.inspectForCleanup(retainedOwner, lease))).toEqual({
+      branch: 'present_merged',
+      changedPaths: [],
+      worktree: 'present_clean',
+    });
+    expect(await Effect.runPromise(service.cleanup(retainedOwner, lease))).toEqual({
+      branch: 'present_merged',
+      branchOutcome: 'deleted_merged',
+      changedPaths: [],
+      worktree: 'present_clean',
+      worktreeOutcome: 'removed_clean',
+    });
+    expect(existsSync(lease.path)).toBe(false);
+    expect(git(primary, 'branch', '--list', lease.branch)).toBe('');
+  });
+
+  test('requires separate force intent for dirty discard and unmerged branch-history deletion', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-cleanup-dirty',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const retainedOwner = owner(repo, 'manager-1', 'agent-cleanup-dirty');
+    writeFileSync(join(lease.path, 'committed.txt'), 'unmerged history\n');
+    git(lease.path, 'add', 'committed.txt');
+    git(lease.path, 'commit', '-m', 'unmerged cleanup fixture');
+    writeFileSync(join(lease.path, 'dirty.txt'), 'discard only with force\n');
+
+    expect(await Effect.runPromise(service.inspectForCleanup(retainedOwner, lease))).toEqual({
+      branch: 'present_unmerged',
+      changedPaths: ['committed.txt', 'dirty.txt'],
+      worktree: 'present_dirty',
+    });
+    const rejected = await Effect.runPromise(
+      service.cleanup(retainedOwner, lease).pipe(Effect.flip),
+    );
+    expect(rejected._tag).toBe('DirtyWorktreeError');
+    expect(existsSync(lease.path)).toBe(true);
+    expect(git(primary, 'branch', '--list', lease.branch)).toContain(lease.branch);
+
+    expect(
+      await Effect.runPromise(service.cleanup(retainedOwner, lease, { forceDiscardDirty: true })),
+    ).toMatchObject({
+      branchOutcome: 'preserved_unmerged',
+      worktreeOutcome: 'discarded_dirty',
+    });
+    expect(existsSync(lease.path)).toBe(false);
+    expect(git(primary, 'branch', '--list', lease.branch)).toContain(lease.branch);
+
+    expect(
+      await Effect.runPromise(
+        service.cleanup(retainedOwner, lease, { forceDeleteUnmergedBranch: true }),
+      ),
+    ).toMatchObject({
+      branch: 'present_unmerged',
+      branchOutcome: 'deleted_unmerged',
+      worktree: 'already_missing',
+      worktreeOutcome: 'already_missing',
+    });
+    expect(git(primary, 'branch', '--list', lease.branch)).toBe('');
+  });
+
+  test('reconciles a manually removed managed worktree registration while preserving unmerged history', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-cleanup-missing',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const retainedOwner = owner(repo, 'manager-1', 'agent-cleanup-missing');
+    writeFileSync(join(lease.path, 'retained.txt'), 'retain branch history\n');
+    git(lease.path, 'add', 'retained.txt');
+    git(lease.path, 'commit', '-m', 'retained history fixture');
+    rmSync(lease.path, { force: true, recursive: true });
+
+    expect(await Effect.runPromise(service.inspectForCleanup(retainedOwner, lease))).toEqual({
+      branch: 'present_unmerged',
+      changedPaths: [],
+      worktree: 'already_missing',
+    });
+    expect(await Effect.runPromise(service.cleanup(retainedOwner, lease))).toMatchObject({
+      branchOutcome: 'preserved_unmerged',
+      worktreeOutcome: 'already_missing',
+    });
+    expect(git(primary, 'worktree', 'list', '--porcelain')).not.toContain(lease.path);
+    expect(git(primary, 'branch', '--list', lease.branch)).toContain(lease.branch);
+  });
+
+  test('refuses corrupt cleanup namespaces without deleting arbitrary paths or managed artifacts', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-cleanup-safe',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const outside = mkdtempSync(join(tmpdir(), 'pardes-worktree-cleanup-outside-'));
+    temporaryDirectories.push(outside);
+    writeFileSync(join(outside, 'keep.txt'), 'must remain\n');
+    const retainedOwner = owner(repo, 'manager-1', 'agent-cleanup-safe');
+
+    const arbitraryPath = await Effect.runPromise(
+      service
+        .cleanup(
+          retainedOwner,
+          { ...lease, path: outside },
+          {
+            forceDeleteUnmergedBranch: true,
+            forceDiscardDirty: true,
+          },
+        )
+        .pipe(Effect.flip),
+    );
+    expect(arbitraryPath).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'worktree path does not match its managed namespace',
+    });
+    expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
+    expect(existsSync(lease.path)).toBe(true);
+    expect(git(primary, 'branch', '--list', lease.branch)).toContain(lease.branch);
+
+    const traversal = await Effect.runPromise(
+      service
+        .cleanup(owner(repo, '..', 'agent-cleanup-safe'), lease, {
+          forceDeleteUnmergedBranch: true,
+          forceDiscardDirty: true,
+        })
+        .pipe(Effect.flip),
+    );
+    expect(traversal).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'owner namespace is invalid',
+    });
+    expect(existsSync(join(outside, 'keep.txt'))).toBe(true);
+    expect(existsSync(lease.path)).toBe(true);
+  });
+
+  test('holds the repository-scoped lock before cleanup mutation', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ lockRetries: 1, lockRetryDelay: '1 millis' });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-cleanup-lock',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const retainedOwner = owner(repo, 'manager-1', 'agent-cleanup-lock');
+    const lock = join(repo.gitCommonDir, 'pardes-worktrees.lock');
+    mkdirSync(lock);
+
+    const busy = await Effect.runPromise(service.cleanup(retainedOwner, lease).pipe(Effect.flip));
+    expect(busy).toMatchObject({ _tag: 'WorktreeLockError', busy: true });
+    expect(existsSync(lease.path)).toBe(true);
+    expect(git(primary, 'branch', '--list', lease.branch)).toContain(lease.branch);
+  });
+
+  test('rejects symbolic branch points and reports a busy repository lock', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ lockRetries: 1, lockRetryDelay: '1 millis' });
+
+    const symbolic = await Effect.runPromise(
+      service
+        .create({ agentId: 'agent-symbolic', branchPointSha: 'HEAD', managerId: 'manager-1', repo })
+        .pipe(Effect.flip),
+    );
+    expect(symbolic._tag).toBe('InvalidWorktreeInputError');
+
+    const lock = join(repo.gitCommonDir, 'pardes-worktrees.lock');
+    mkdirSync(lock);
+    const busy = await Effect.runPromise(
+      service
+        .create({ agentId: 'agent-busy', branchPointSha, managerId: 'manager-1', repo })
+        .pipe(Effect.flip),
+    );
+    expect(busy._tag).toBe('WorktreeLockError');
+    if (busy._tag !== 'WorktreeLockError')
+      throw new Error(`Expected a lock error, received ${busy._tag}`);
+    expect(busy.busy).toBe(true);
+  });
+});

@@ -1,0 +1,11 @@
+node_modules/
+
+# Local source checkout used as an implementation reference. Recreate with:
+#   bun run references:effect
+/docs/references/effect-smol/
+
+# Local runtime artifacts
+*.log
+.DS_Store
+/.pi/
+/.worktrees/

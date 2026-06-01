@@ -1,8 +1,36 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
   "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "description": "Pin and group routine Bun dependency updates",
+      "groupName": "weekly Bun dependencies",
+      "matchManagers": ["bun"],
+      "rangeStrategy": "pin",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Group pinned repository toolchain updates",
+      "groupName": "weekly toolchain",
+      "matchManagers": ["asdf"],
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Group immutable GitHub Action digest updates",
+      "groupName": "weekly GitHub Actions",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true,
+      "schedule": ["before 6am on monday"]
+    }
+  ],
+  "timezone": "Europe/Berlin",
   "vulnerabilityAlerts": {
-    "minimumReleaseAge": "3 days"
+    "minimumReleaseAge": "3 days",
+    "schedule": ["at any time"]
   }
 }

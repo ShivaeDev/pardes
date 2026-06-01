@@ -14,7 +14,10 @@ repo, many plugins (see `README.md` and `.claude-plugin/marketplace.json`).
 ## Conventions
 
 - Owner/author in manifests is the org (`ShivaeDev`), never a personal name.
-- No barrel files; named exports; bun for everything.
+- No barrel files in Claude/Codex marketplace plugins; named exports; bun for everything.
+- `plugins/pardes-pi/` is a self-contained Pi extension source tree with its own
+  `AGENTS.md` and TypeScript config. It intentionally uses bounded-context
+  `index.ts` public entrypoints.
 
 ## One skill per plugin
 

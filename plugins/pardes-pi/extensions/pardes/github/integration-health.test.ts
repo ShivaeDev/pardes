@@ -1,0 +1,398 @@
+import { Effect } from 'effect';
+import { describe, expect, test } from 'vitest';
+import {
+  GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS,
+  GitHubCommandError,
+  makeGitHubIntegrationHealthService,
+} from './index.ts';
+import { result, scriptedRunner } from './test-fixtures.ts';
+import type { GitHubCommandRunnerShape, ProcessInvocation } from './transport.ts';
+
+const MAIN_SHA = 'a'.repeat(40);
+const AUDITED_PR_SHA = 'b'.repeat(40);
+const OBSERVED_PR_SHA = 'c'.repeat(40);
+const OLD_CHECK_SHA = 'd'.repeat(40);
+
+function defaultBranchResult(sha = MAIN_SHA) {
+  return result(
+    JSON.stringify({
+      data: { repository: { defaultBranchRef: { name: 'main', target: { oid: sha } } } },
+    }),
+  );
+}
+
+function hostedChecksResult(
+  options: {
+    readonly sha?: string;
+    readonly checks?: ReadonlyArray<unknown>;
+    readonly hasNextPage?: boolean;
+    readonly noRollup?: boolean;
+  } = {},
+) {
+  return result(
+    JSON.stringify({
+      data: {
+        repository: {
+          object: {
+            oid: options.sha ?? MAIN_SHA,
+            statusCheckRollup:
+              options.noRollup === true
+                ? null
+                : {
+                    contexts: {
+                      nodes: options.checks ?? [],
+                      pageInfo: { hasNextPage: options.hasNextPage ?? false },
+                    },
+                  },
+          },
+        },
+      },
+    }),
+  );
+}
+
+function checkRun(
+  overrides: Partial<{
+    readonly status: string;
+    readonly conclusion: string | null;
+    readonly workflowId: number | null;
+  }> = {},
+) {
+  return {
+    __typename: 'CheckRun',
+    checkSuite: { workflowRun: { workflow: { databaseId: 101 } } },
+    conclusion: 'SUCCESS',
+    status: 'COMPLETED',
+    ...overrides,
+    ...(overrides.workflowId === undefined
+      ? {}
+      : { checkSuite: { workflowRun: { workflow: { databaseId: overrides.workflowId } } } }),
+  };
+}
+
+function association(
+  overrides: Partial<{
+    readonly id: string;
+    readonly url: string;
+    readonly number: number;
+    readonly lastPushedHeadSha: string;
+    readonly headBranch: string;
+  }> = {},
+) {
+  return {
+    headBranch: 'pardes/review/12345678-1234-1234-1234-123456789abc',
+    id: 'pr-42',
+    lastPushedHeadSha: AUDITED_PR_SHA,
+    number: 42,
+    url: 'https://github.test/acme/project/pull/42',
+    ...overrides,
+  };
+}
+
+describe('GitHub integration-health inspection', () => {
+  test('times out and interrupts a stalled command while degrading only the affected leaf to enum-only unavailable metadata', async () => {
+    let invocations = 0;
+    let interrupted = false;
+    const runner: GitHubCommandRunnerShape = {
+      run: () => {
+        invocations += 1;
+        return invocations === 1
+          ? Effect.succeed(defaultBranchResult())
+          : Effect.never.pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  interrupted = true;
+                }),
+              ),
+            );
+      },
+    };
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ commandTimeout: '5 millis', runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [],
+      }),
+    );
+
+    expect(interrupted).toBe(true);
+    expect(inspection.defaultBranch).toEqual({
+      advertisedHeadSha: MAIN_SHA,
+      availability: 'available',
+      defaultBranch: 'main',
+      hostedChecks: { availability: 'unavailable', issue: 'timed_out' },
+    });
+    expect(JSON.stringify(inspection)).not.toContain('GitHubIntegrationHealthTimeoutError');
+  });
+
+  test('uses shell-free server-selected GraphQL fields and reports current checks with shared default-branch failure hints', async () => {
+    const fixture = scriptedRunner([
+      defaultBranchResult(),
+      hostedChecksResult({
+        checks: [checkRun({ conclusion: 'FAILURE' }), checkRun({ workflowId: 102 })],
+      }),
+      result(JSON.stringify({ headRefOid: AUDITED_PR_SHA, number: 42 })),
+      hostedChecksResult({
+        checks: [checkRun({ conclusion: 'FAILURE' }), checkRun({ workflowId: 103 })],
+        sha: AUDITED_PR_SHA,
+      }),
+    ]);
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association()],
+      }),
+    );
+
+    expect(inspection).toEqual({
+      bounds: { maxHostedChecksPerRef: 50, maxPullRequests: 12 },
+      defaultBranch: {
+        advertisedHeadSha: MAIN_SHA,
+        availability: 'available',
+        defaultBranch: 'main',
+        hostedChecks: {
+          availability: 'available',
+          ci: 'failing',
+          completeness: 'complete',
+          countAccuracy: 'exact',
+          headSha: MAIN_SHA,
+          observedCheckCount: 2,
+          observedFailingCheckCount: 1,
+          relation: 'current',
+        },
+      },
+      inspectedPullRequestCount: 1,
+      observation: 'opt_in_read_only_hosted_metadata',
+      omittedPullRequestCount: 0,
+      pullRequests: [
+        {
+          auditedHeadSha: AUDITED_PR_SHA,
+          hostedChecks: {
+            availability: 'available',
+            ci: 'failing',
+            completeness: 'complete',
+            countAccuracy: 'exact',
+            headSha: AUDITED_PR_SHA,
+            observedCheckCount: 2,
+            observedFailingCheckCount: 1,
+            relation: 'current',
+          },
+          id: 'pr-42',
+          number: 42,
+          observedHeadSha: AUDITED_PR_SHA,
+          pullRequestHead: 'current',
+          sharedFailingWorkflowCount: 1,
+        },
+      ],
+    });
+    expect(fixture.invocations.map(({ command }) => command)).toEqual(['gh', 'gh', 'gh', 'gh']);
+    expect(fixture.invocations.map(({ args }) => args.slice(0, 2))).toEqual([
+      ['api', 'graphql'],
+      ['api', 'graphql'],
+      ['pr', 'view'],
+      ['api', 'graphql'],
+    ]);
+    expect(fixture.invocations[1]?.args).toContain('expression=main');
+    expect(fixture.invocations[1]?.args).toContain('limit=50');
+    expect(fixture.invocations[1]?.args.join(' ')).toContain('pageInfo{hasNextPage}');
+    expect(fixture.invocations[1]?.args.join(' ')).toContain('workflow{databaseId}');
+    expect(fixture.invocations[2]?.args).toEqual([
+      'pr',
+      'view',
+      '42',
+      '--json',
+      'number,headRefOid',
+    ]);
+    expect(fixture.invocations[3]?.args).toContain(`expression=${association().headBranch}`);
+    expect(fixture.invocations.flatMap(({ args }) => args).join(' ')).not.toContain('actions/runs');
+    expect(fixture.invocations.flatMap(({ args }) => args).join(' ')).not.toContain('logs');
+    expect(JSON.stringify(inspection)).not.toContain('body');
+  });
+
+  test('classifies an audited PR-head divergence separately from stale hosted checks and suppresses shared hints', async () => {
+    const fixture = scriptedRunner([
+      defaultBranchResult(),
+      hostedChecksResult({ checks: [checkRun({ conclusion: 'FAILURE' })] }),
+      result(JSON.stringify({ headRefOid: OBSERVED_PR_SHA, number: 42 })),
+      hostedChecksResult({ checks: [checkRun({ conclusion: 'FAILURE' })], sha: OLD_CHECK_SHA }),
+    ]);
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association()],
+      }),
+    );
+
+    expect(inspection.pullRequests[0]).toMatchObject({
+      auditedHeadSha: AUDITED_PR_SHA,
+      hostedChecks: {
+        availability: 'available',
+        ci: 'failing',
+        completeness: 'complete',
+        headSha: OLD_CHECK_SHA,
+        relation: 'stale',
+      },
+      observedHeadSha: OBSERVED_PR_SHA,
+      pullRequestHead: 'diverged',
+      sharedFailingWorkflowCount: 0,
+    });
+  });
+
+  test('retains page-cap evidence, marks non-failing partial observations unknown, and suppresses shared hints', async () => {
+    const fixture = scriptedRunner([
+      defaultBranchResult(),
+      hostedChecksResult({ checks: [checkRun({ conclusion: 'FAILURE' })] }),
+      result(JSON.stringify({ headRefOid: AUDITED_PR_SHA, number: 42 })),
+      hostedChecksResult({
+        checks: [checkRun({ conclusion: 'SUCCESS' })],
+        hasNextPage: true,
+        sha: AUDITED_PR_SHA,
+      }),
+    ]);
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association()],
+      }),
+    );
+
+    expect(inspection.pullRequests[0]).toMatchObject({
+      hostedChecks: {
+        availability: 'available',
+        ci: 'unknown',
+        completeness: 'partial',
+        countAccuracy: 'lower_bound',
+        observedCheckCount: 1,
+        observedFailingCheckCount: 0,
+      },
+      sharedFailingWorkflowCount: 0,
+    });
+  });
+
+  test('suppresses shared hints when the default-branch page is partial even if matching failures are visible', async () => {
+    const fixture = scriptedRunner([
+      defaultBranchResult(),
+      hostedChecksResult({ checks: [checkRun({ conclusion: 'FAILURE' })], hasNextPage: true }),
+      result(JSON.stringify({ headRefOid: AUDITED_PR_SHA, number: 42 })),
+      hostedChecksResult({ checks: [checkRun({ conclusion: 'FAILURE' })], sha: AUDITED_PR_SHA }),
+    ]);
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association()],
+      }),
+    );
+
+    expect(inspection.defaultBranch).toMatchObject({
+      hostedChecks: {
+        availability: 'available',
+        ci: 'failing',
+        completeness: 'partial',
+        countAccuracy: 'lower_bound',
+      },
+    });
+    expect(inspection.pullRequests[0]?.sharedFailingWorkflowCount).toBe(0);
+  });
+
+  test('maps an unknown completed conclusion to unknown instead of passing', async () => {
+    const fixture = scriptedRunner([
+      defaultBranchResult(),
+      hostedChecksResult({ checks: [checkRun({ conclusion: 'FUTURE_CONCLUSION' })] }),
+    ]);
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [],
+      }),
+    );
+
+    expect(inspection.defaultBranch).toMatchObject({
+      hostedChecks: { availability: 'available', ci: 'unknown', completeness: 'complete' },
+    });
+  });
+
+  test('degrades unavailable leaves safely and hard-caps review inspection before any argv invocation', async () => {
+    const invocations: ProcessInvocation[] = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        return Effect.fail(
+          new GitHubCommandError({
+            args: invocation.args,
+            cause: 'fixture outage with private diagnostics',
+            command: invocation.command,
+            cwd: invocation.cwd,
+          }),
+        );
+      },
+    };
+    const pullRequests = Array.from(
+      { length: GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS + 3 },
+      (_, index) => association({ id: `pr-${index}`, number: index + 1 }),
+    );
+
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner }).inspect({ cwd: '', pullRequests }),
+    );
+
+    expect(invocations).toEqual([]);
+    expect(inspection.defaultBranch).toEqual({
+      availability: 'unavailable',
+      issue: 'command_failed',
+    });
+    expect(inspection.inspectedPullRequestCount).toBe(GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS);
+    expect(inspection.omittedPullRequestCount).toBe(3);
+    expect(
+      inspection.pullRequests.every(
+        ({ hostedChecks }) =>
+          hostedChecks.availability === 'unavailable' && hostedChecks.issue === 'command_failed',
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(inspection)).not.toContain('private diagnostics');
+  });
+
+  test('continues bounded PR observation when default-branch metadata is unavailable', async () => {
+    let invocationCount = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocationCount += 1;
+        if (invocationCount === 1)
+          return Effect.fail(
+            new GitHubCommandError({
+              args: invocation.args,
+              cause: 'fixture outage',
+              command: invocation.command,
+              cwd: invocation.cwd,
+            }),
+          );
+        if (invocation.args[0] === 'pr')
+          return Effect.succeed(result(JSON.stringify({ headRefOid: AUDITED_PR_SHA, number: 42 })));
+        return Effect.succeed(hostedChecksResult({ noRollup: true, sha: AUDITED_PR_SHA }));
+      },
+    };
+
+    const { headBranch: _headBranch, ...legacyAssociation } = association();
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [legacyAssociation],
+      }),
+    );
+
+    expect(inspection.defaultBranch).toEqual({
+      availability: 'unavailable',
+      issue: 'command_failed',
+    });
+    expect(inspection.pullRequests[0]).toMatchObject({
+      hostedChecks: { availability: 'none' },
+      pullRequestHead: 'current',
+      sharedFailingWorkflowCount: 0,
+    });
+    expect(invocationCount).toBe(3);
+  });
+});

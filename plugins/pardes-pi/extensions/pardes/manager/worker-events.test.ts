@@ -1,0 +1,491 @@
+import { Schema } from 'effect';
+import { describe, expect, test } from 'vitest';
+import type { WorktreeInspection } from '../git/index.ts';
+import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
+import { type AgentRecord, type ManagerEvent, ManagerEventSchema } from './domain.ts';
+import {
+  applyHandoffAudit,
+  boundedEventSummary,
+  boundedFailureSummary,
+  failedHandoffAudit,
+  type HandoffAuditOutcome,
+  handoffAuditSuffix,
+  hasPendingAgentAttention,
+  isDuplicateWorkerAttention,
+  type ReportArtifactPersistence,
+  reportPersistenceSuffix,
+  successfulHandoffAudit,
+  truncateModelFacingText,
+  type WorkerEventSummary,
+  workerEventSummary,
+} from './worker-events.ts';
+
+const createdAt = '2026-06-01T00:00:00.000Z';
+const laterAt = '2026-06-01T00:01:00.000Z';
+const persistedReport = {
+  reportId: 'report-one',
+  status: 'persisted',
+} as const satisfies ReportArtifactPersistence;
+const failedReport = {
+  failureSummary: 'report store unavailable',
+  status: 'failed',
+} as const satisfies ReportArtifactPersistence;
+
+function agent(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return {
+    createdAt,
+    id: 'agent-one',
+    model: 'fixture/model',
+    role: 'worker',
+    sessionDir: '/tmp/pardes/session',
+    status: 'idle',
+    task: 'Exercise manager event policy.',
+    thinkingLevel: 'high',
+    updatedAt: createdAt,
+    workstreamId: 'ws-one',
+    ...overrides,
+  };
+}
+
+function inspection(overrides: Partial<WorktreeInspection> = {}): WorktreeInspection {
+  return {
+    changedPaths: [],
+    dirty: false,
+    headSha: 'a'.repeat(40),
+    path: '/tmp/pardes/worktree',
+    ...overrides,
+  };
+}
+
+function inboxEvent(type: string, agentId?: string): ManagerEvent {
+  return {
+    createdAt,
+    id: `event-${type}-${agentId ?? 'unassociated'}`,
+    summary: 'Pending attention.',
+    type,
+    ...(agentId === undefined ? {} : { agentId }),
+  };
+}
+
+describe('manager event schema compatibility', () => {
+  test('decodes historical schema-v1 events without report pointers and additive structured report associations', () => {
+    const historical: ManagerEvent = {
+      createdAt,
+      id: 'event-old',
+      summary: 'Historical bounded preview.',
+      type: 'agent_report_completed',
+    };
+    const associated: ManagerEvent = {
+      ...historical,
+      id: 'event-new',
+      reportId: 'report-123',
+      reportPreviewTruncated: true,
+    };
+
+    expect(Schema.decodeUnknownSync(ManagerEventSchema)(historical)).toEqual(historical);
+    expect(Schema.decodeUnknownSync(ManagerEventSchema)(associated)).toEqual(associated);
+  });
+});
+
+describe('manager event text policy', () => {
+  test('normalizes whitespace and applies the 240-character model-facing ellipsis bound', () => {
+    const cases = [
+      { expected: 'hello world', input: '  hello\n\tworld  ' },
+      { expected: 'x'.repeat(240), input: 'x'.repeat(240) },
+      { expected: `${'x'.repeat(239)}…`, input: 'x'.repeat(241) },
+    ];
+
+    for (const { input, expected } of cases) expect(truncateModelFacingText(input)).toBe(expected);
+  });
+
+  test('normalizes joined parts and applies the 900-character event-summary ellipsis bound', () => {
+    const cases = [
+      { expected: 'hello world', parts: ['  hello', '', '\n world  '] },
+      { expected: 'x'.repeat(900), parts: ['x'.repeat(900)] },
+      { expected: `${'x'.repeat(899)}…`, parts: ['x'.repeat(901)] },
+    ];
+
+    for (const { parts, expected } of cases) expect(boundedEventSummary(parts)).toBe(expected);
+  });
+
+  test('formats, normalizes, and bounds failure summaries', () => {
+    const summary = boundedFailureSummary(new Error(`  inspection\n failed ${'x'.repeat(300)}  `));
+
+    expect(summary.startsWith('inspection failed ')).toBe(true);
+    expect(summary).toHaveLength(240);
+    expect(summary.endsWith('…')).toBe(true);
+    expect(summary).not.toContain('\n');
+  });
+});
+
+describe('manager handoff-audit policy', () => {
+  test('constructs success and bounded failure outcomes', () => {
+    const succeeded = successfulHandoffAudit(
+      'completion',
+      laterAt,
+      inspection({ changedPaths: ['src/a.ts'], dirty: true }),
+    );
+    const failed = failedHandoffAudit(
+      'stop',
+      laterAt,
+      new Error(`inspection failed ${'x'.repeat(300)}`),
+    );
+
+    expect(succeeded).toEqual({
+      changedPaths: ['src/a.ts'],
+      gitAudit: { checkedAt: laterAt, dirty: true, status: 'succeeded', trigger: 'completion' },
+      status: 'succeeded',
+    });
+    expect(failed).toMatchObject({
+      gitAudit: { checkedAt: laterAt, status: 'failed', trigger: 'stop' },
+      status: 'failed',
+    });
+    if (failed.status !== 'failed') throw new Error('Expected a failed handoff audit fixture.');
+    expect(failed.gitAudit.failureSummary).toHaveLength(240);
+    expect(failed.gitAudit.failureSummary.endsWith('…')).toBe(true);
+  });
+
+  test('applies fresh success paths and clears stale paths after failure', () => {
+    const original = agent({
+      changedPaths: ['stale.ts'],
+      gitAudit: { checkedAt: createdAt, dirty: true, status: 'succeeded', trigger: 'completion' },
+    });
+    const succeeded = successfulHandoffAudit(
+      'publication',
+      laterAt,
+      inspection({ changedPaths: ['fresh.ts'] }),
+    );
+    const failed = failedHandoffAudit('stop', laterAt, new Error('inspection unavailable'));
+
+    expect(applyHandoffAudit(original, undefined)).toBe(original);
+    expect(applyHandoffAudit(original, succeeded)).toMatchObject({
+      changedPaths: ['fresh.ts'],
+      gitAudit: succeeded.gitAudit,
+      updatedAt: laterAt,
+    });
+    const failedAgent = applyHandoffAudit(original, failed);
+    expect(failedAgent).toMatchObject({ gitAudit: failed.gitAudit, updatedAt: laterAt });
+    expect(failedAgent).not.toHaveProperty('changedPaths');
+  });
+
+  test('renders absent, plural, dirty, and failure audit suffixes', () => {
+    const cases: ReadonlyArray<{
+      readonly audit: HandoffAuditOutcome | undefined;
+      readonly expected: string;
+    }> = [
+      { audit: undefined, expected: '' },
+      {
+        audit: successfulHandoffAudit('completion', laterAt, inspection()),
+        expected: 'Git audit: 0 changed paths.',
+      },
+      {
+        audit: successfulHandoffAudit(
+          'completion',
+          laterAt,
+          inspection({ changedPaths: ['one.ts'] }),
+        ),
+        expected: 'Git audit: 1 changed path.',
+      },
+      {
+        audit: successfulHandoffAudit(
+          'completion',
+          laterAt,
+          inspection({ changedPaths: ['one.ts', 'two.ts'], dirty: true }),
+        ),
+        expected: 'Git audit: 2 changed paths. Worktree is dirty.',
+      },
+      {
+        audit: failedHandoffAudit('completion', laterAt, new Error('inspection unavailable')),
+        expected: 'Git audit failed: inspection unavailable.',
+      },
+    ];
+
+    for (const { audit, expected } of cases) expect(handoffAuditSuffix(audit)).toBe(expected);
+  });
+
+  test('renders only failed report-persistence suffixes', () => {
+    expect(reportPersistenceSuffix(undefined)).toBe('');
+    expect(reportPersistenceSuffix(persistedReport)).toBe('');
+    expect(reportPersistenceSuffix(failedReport)).toBe(
+      'Report artifact persistence failed: report store unavailable.',
+    );
+  });
+});
+
+describe('worker-event summary policy', () => {
+  test('projects the existing actionable and suppressed event table', () => {
+    const succeededAudit = successfulHandoffAudit(
+      'completion',
+      laterAt,
+      inspection({ changedPaths: ['one.ts', 'two.ts'], dirty: true }),
+    );
+    const cases: ReadonlyArray<{
+      readonly event: WorkerSupervisorEvent;
+      readonly persistence?: ReportArtifactPersistence;
+      readonly audit?: HandoffAuditOutcome;
+      readonly options?: { readonly suppressIdleWakeup?: boolean };
+      readonly expected: WorkerEventSummary | undefined;
+    }> = [
+      {
+        event: {
+          agentId: 'agent-one',
+          status: 'progress',
+          summary: '  Routine\nprogress. ',
+          type: 'report',
+        },
+        expected: {
+          actionable: false,
+          reportPreviewTruncated: false,
+          summary: 'agent-one: Routine progress.',
+          type: 'agent_report_progress',
+        },
+        persistence: persistedReport,
+      },
+      {
+        audit: succeededAudit,
+        event: { agentId: 'agent-one', status: 'completed', summary: 'Done.', type: 'report' },
+        expected: {
+          actionable: true,
+          reportPreviewTruncated: false,
+          summary: 'agent-one: Done. Git audit: 2 changed paths. Worktree is dirty.',
+          type: 'agent_report_completed',
+        },
+        persistence: persistedReport,
+      },
+      {
+        event: {
+          agentId: 'agent-one',
+          status: 'blocked',
+          summary: 'Needs decision.',
+          type: 'report',
+        },
+        expected: {
+          actionable: true,
+          summary: 'agent-one: Needs decision.',
+          type: 'agent_report_blocked',
+        },
+      },
+      {
+        event: { agentId: 'agent-one', question: '  Choose\npath? ', type: 'question' },
+        expected: {
+          actionable: true,
+          summary: 'agent-one asks: Choose path?',
+          type: 'agent_question',
+        },
+      },
+      {
+        event: {
+          agentId: 'agent-one',
+          exitCode: 1,
+          signal: null,
+          stderr: 'fixture failure',
+          type: 'unexpected_exit',
+        },
+        expected: {
+          actionable: true,
+          summary: 'agent-one exited unexpectedly.',
+          type: 'agent_crashed',
+        },
+      },
+      {
+        event: { agentId: 'agent-one', message: ' invalid\njson ', type: 'protocol_error' },
+        expected: {
+          actionable: true,
+          summary: 'agent-one emitted invalid RPC JSON: invalid json',
+          type: 'agent_protocol_error',
+        },
+      },
+      {
+        event: { agentId: 'agent-one', status: 'idle', type: 'status' },
+        expected: {
+          actionable: true,
+          summary: 'agent-one is idle and ready for follow-up.',
+          type: 'agent_idle',
+        },
+      },
+      {
+        event: { agentId: 'agent-one', status: 'idle', type: 'status' },
+        expected: undefined,
+        options: { suppressIdleWakeup: true },
+      },
+      {
+        event: { agentId: 'agent-one', status: 'running', type: 'status' },
+        expected: undefined,
+      },
+    ];
+
+    for (const { event, persistence, audit, options, expected } of cases) {
+      expect(workerEventSummary(event, persistence, audit, options)).toEqual(expected);
+    }
+  });
+
+  test('exposes structural preview truncation metadata for persisted report events instead of embedding ids in prose', () => {
+    const projected = workerEventSummary(
+      { agentId: 'agent-one', status: 'completed', summary: 'x'.repeat(241), type: 'report' },
+      persistedReport,
+    );
+
+    expect(projected).toMatchObject({
+      reportPreviewTruncated: true,
+      type: 'agent_report_completed',
+    });
+    expect(projected?.summary).not.toContain('report-one');
+    expect(projected?.summary.endsWith('…')).toBe(true);
+  });
+
+  test('makes progress persistence failures actionable and lets Git audit failure type win', () => {
+    const progress = workerEventSummary(
+      { agentId: 'agent-one', status: 'progress', summary: 'Routine progress.', type: 'report' },
+      failedReport,
+    );
+    expect(progress).toEqual({
+      actionable: true,
+      summary:
+        'agent-one: Routine progress. Report artifact persistence failed: report store unavailable.',
+      type: 'agent_report_persist_failed',
+    });
+
+    const failedAudit = failedHandoffAudit(
+      'completion',
+      laterAt,
+      new Error('inspection unavailable'),
+    );
+    const completed = workerEventSummary(
+      { agentId: 'agent-one', status: 'completed', summary: 'Done.', type: 'report' },
+      failedReport,
+      failedAudit,
+    );
+    expect(completed).toEqual({
+      actionable: true,
+      summary:
+        'agent-one: Done. Report artifact persistence failed: report store unavailable. Git audit failed: inspection unavailable.',
+      type: 'agent_git_audit_failed',
+    });
+  });
+});
+
+describe('manager event dedupe policy', () => {
+  test('matches pending generic attention by exact type and agent association', () => {
+    const inbox = [inboxEvent('agent_git_audit_failed', 'agent-one'), inboxEvent('manager_notice')];
+
+    expect(
+      hasPendingAgentAttention(inbox, { agentId: 'agent-one', type: 'agent_git_audit_failed' }),
+    ).toBe(true);
+    expect(
+      hasPendingAgentAttention(inbox, { agentId: 'agent-one', type: 'agent_git_audit_dirty' }),
+    ).toBe(false);
+    expect(
+      hasPendingAgentAttention(inbox, { agentId: 'agent-two', type: 'agent_git_audit_failed' }),
+    ).toBe(false);
+    expect(hasPendingAgentAttention(inbox, { type: 'manager_notice' })).toBe(true);
+  });
+
+  test('deduplicates only pending progress persistence failures and Git audit failures by type plus agent', () => {
+    const progress: WorkerSupervisorEvent = {
+      agentId: 'agent-one',
+      status: 'progress',
+      summary: 'Routine progress.',
+      type: 'report',
+    };
+    const blocked: WorkerSupervisorEvent = {
+      agentId: 'agent-one',
+      status: 'blocked',
+      summary: 'Needs decision.',
+      type: 'report',
+    };
+    const completed: WorkerSupervisorEvent = {
+      agentId: 'agent-one',
+      status: 'completed',
+      summary: 'Done.',
+      type: 'report',
+    };
+    const progressFailure = {
+      actionable: true,
+      summary: 'Persistence failed.',
+      type: 'agent_report_persist_failed',
+    } satisfies WorkerEventSummary;
+    const blockedFailure = {
+      actionable: true,
+      summary: 'Persistence failed.',
+      type: 'agent_report_persist_failed',
+    } satisfies WorkerEventSummary;
+    const completion = {
+      actionable: true,
+      summary: 'Done.',
+      type: 'agent_report_completed',
+    } satisfies WorkerEventSummary;
+    const gitAuditFailure = {
+      actionable: true,
+      summary: 'Audit failed.',
+      type: 'agent_git_audit_failed',
+    } satisfies WorkerEventSummary;
+    const cases: ReadonlyArray<{
+      readonly inbox: ReadonlyArray<ManagerEvent>;
+      readonly workerEvent: WorkerSupervisorEvent;
+      readonly event: WorkerEventSummary | undefined;
+      readonly persistence: ReportArtifactPersistence | undefined;
+      readonly expected: boolean;
+    }> = [
+      {
+        event: progressFailure,
+        expected: true,
+        inbox: [inboxEvent('agent_report_persist_failed', 'agent-one')],
+        persistence: failedReport,
+        workerEvent: progress,
+      },
+      {
+        event: progressFailure,
+        expected: false,
+        inbox: [inboxEvent('agent_report_persist_failed', 'agent-two')],
+        persistence: failedReport,
+        workerEvent: progress,
+      },
+      {
+        event: progressFailure,
+        expected: false,
+        inbox: [inboxEvent('agent_report_persist_failed', 'agent-one')],
+        persistence: persistedReport,
+        workerEvent: progress,
+      },
+      {
+        event: blockedFailure,
+        expected: false,
+        inbox: [inboxEvent('agent_report_persist_failed', 'agent-one')],
+        persistence: failedReport,
+        workerEvent: blocked,
+      },
+      {
+        event: completion,
+        expected: false,
+        inbox: [inboxEvent('agent_report_completed', 'agent-one')],
+        persistence: persistedReport,
+        workerEvent: completed,
+      },
+      {
+        event: gitAuditFailure,
+        expected: true,
+        inbox: [inboxEvent('agent_git_audit_failed', 'agent-one')],
+        persistence: failedReport,
+        workerEvent: completed,
+      },
+      {
+        event: gitAuditFailure,
+        expected: false,
+        inbox: [inboxEvent('agent_git_audit_failed', 'agent-two')],
+        persistence: failedReport,
+        workerEvent: completed,
+      },
+      {
+        event: completion,
+        expected: false,
+        inbox: [inboxEvent('agent_git_audit_failed', 'agent-one')],
+        persistence: persistedReport,
+        workerEvent: completed,
+      },
+    ];
+
+    for (const { inbox, workerEvent, event, persistence, expected } of cases) {
+      expect(isDuplicateWorkerAttention(inbox, workerEvent, event, persistence)).toBe(expected);
+    }
+  });
+});

@@ -1,9 +1,10 @@
 name: lint
 
-# Blocks PRs that aren't ready to merge. The repository gate covers typechecking,
-# linting, formatting, Vitest, and the Codex plugin's Python helper tests. Read-only
-# token, actions pinned to full commit SHAs. Runs on PRs (and pushes to main as a
-# backstop).
+# Blocks PRs that aren't ready to merge. The unified repository gate covers
+# statusline and Pardes Pi typechecking, Biome across the whole repository,
+# marketplace and Pardes Pi Vitest suites, and the Codex plugin's Python helper
+# tests. Read-only token, actions pinned to full commit SHAs. Runs on PRs (and
+# pushes to main as a backstop).
 #
 # NOTE: this workflow only REPORTS pass/fail. To actually block merge, add it as a
 # required status check in the repo ruleset (a repo setting, not YAML).
@@ -28,7 +29,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.3.13'
+          bun-version: '1.3.14'
 
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:

@@ -3,3 +3,5 @@ dist/
 *.bun-build
 .DS_Store
 *.log
+/.pi/
+/.worktrees/

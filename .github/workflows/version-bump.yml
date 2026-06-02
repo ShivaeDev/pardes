@@ -26,18 +26,21 @@ name: version-bump
 #   `*--v*` blocks tag update + delete (supply-chain protection). The script never
 #   force/moves them — only the disposable bot-owned `bump/<sha>` branch may be
 #   force-with-leased on a re-run.
-# - Bounded untrusted strings (commit subjects/diffs) are one argv DATA value,
+# - Bounded untrusted strings (commit subjects/paths) are one argv DATA value,
 #   never interpolated into a shell. OpenCode runs in a disposable Git-rooted
 #   cwd/HOME with global + PRIMARY-agent wildcard deny and one schema-first verdict
 #   submission tool. Its narrowed child env has OPENCODE_API_KEY plus isolated
 #   runtime paths/config controls — never GH_TOKEN, persisted credentials, or
 #   publication secrets.
-#   OpenCode uses one isolated config root and bounded startup/run timeouts. A
+#   OpenCode uses one isolated config root and bounded startup/run timeouts. Its
+#   snapshot-only Git workspace receives read-only credential-free tracked
+#   before/after blobs; config/HOME/XDG/verdict stay outside that workspace. A
 #   resolved-policy preflight asserts fallback build has zero enabled tools and
-#   bump has only submit_verdict. The script also rejects fallback-agent warnings,
-#   prose salvage, unexpected tools, invalid/multiple submissions, and
-#   non-allowlisted release diffs before push. Existing plugin manifest versions
-#   are workflow-owned: a source push that edits one is rejected.
+#   bump has only read/glob/grep + submit_verdict, with external directories
+#   denied. The script also rejects fallback-agent warnings, prose salvage,
+#   unexpected tools, escaped contextual reads/searches, invalid/multiple
+#   submissions, and non-allowlisted release diffs before push. Existing plugin
+#   manifest versions are workflow-owned: a source push that edits one is rejected.
 # - GITHUB_TOKEN-created bump branch/PR events do NOT launch lint.yml. Before any
 #   bump branch push, bump.ts runs the same `bun run ready` deterministic gate
 #   inline with publication/provider credentials removed, then reasserts a clean
@@ -94,7 +97,7 @@ jobs:
       - name: Classify, bump, merge, and tag
         env:
           # ONLY GitHub-controlled SHAs here (safe). bump.ts gathers commit
-          # messages/diffs itself via git as DATA — nothing attacker-controlled is
+          # messages/paths itself via git as DATA — nothing attacker-controlled is
           # interpolated into a shell command anywhere.
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}

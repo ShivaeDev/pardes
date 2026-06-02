@@ -1,6 +1,13 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { type ManagerController, projectResolvedWorkCleanup } from '../manager/index.ts';
+import {
+  AUTONOMOUS_INBOX_PATH,
+  INBOX_TWO_PATH_GUIDANCE,
+  type ManagerController,
+  projectResolvedWorkCleanup,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from '../manager/index.ts';
 import { agentLines } from './projections/agents.ts';
 import { resolvedWorkCleanupLines } from './projections/cleanup.ts';
 import { summaryLines, workstreamLines } from './projections/control-plane.ts';
@@ -22,7 +29,7 @@ import { managerId, registerPardesTool, runTool, textResult } from './registrati
 export function registerPardesStatusTool(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
     description:
-      'Read a bounded Pardes control-plane projection. Defaults to a cheap in-memory aggregate summary. Select activation for a fresh path-free shared-plugin safety inspection; select agents, workstreams, reviews, composition, verifications, inbox, or cleanup for compact state-only rows without raw state reads; select storage for an explicit read-only bounded artifact inspection; select github for an opt-in read-only bounded hosted-metadata network inspection without logs, fetch, or pull. Cleanup suggests explicit conservative operator actions but never mutates artifacts.',
+      'Read a bounded Pardes control-plane projection. Defaults to a cheap in-memory aggregate summary. Select activation for a fresh path-free shared-plugin safety inspection; select agents, workstreams, reviews, composition, verifications, inbox, or cleanup for compact state-only rows without raw state reads; select storage for an explicit read-only bounded artifact inspection; select github for an opt-in read-only bounded hosted-metadata network inspection without logs, fetch, or pull. Cleanup suggests explicit conservative operator actions but never mutates artifacts. Inbox projections orient judgment before acknowledgement.',
     async execute(_toolCallId, params) {
       const state = manager.snapshot();
       if (!state) return textResult('Error: Pardes manager is inactive. Run /pardes start first.');
@@ -133,15 +140,15 @@ export function registerPardesStatusTool(pi: ExtensionAPI, manager: ManagerContr
       { name: 'reviewFilter', value: args.reviewFilter },
       { name: 'maxRows', value: args.maxRows },
     ],
+    promptGuidelines: [AUTONOMOUS_INBOX_PATH, USER_JUDGMENT_INBOX_PATH, USER_JUDGMENT_HANDOFF_PATH],
     promptSnippet:
-      'Inspect concise bounded Pardes manager status before drilling into exceptional detail',
+      'Inspect concise bounded Pardes manager status and judge inbox attention before acknowledgement',
   });
 }
 
 export function registerInboxGetTool(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
-    description:
-      'Read one known currently-pending durable Pardes inbox row by eventId. Returns a trust-labelled JSON-escaped bounded summary plus allowlisted metadata; never lists audit history, fetches external bodies, or routes external feedback.',
+    description: `Read one known currently-pending durable Pardes inbox row by eventId, then judge which path applies. Returns a trust-labelled JSON-escaped bounded summary plus allowlisted metadata; never lists audit history, fetches external bodies, or routes external feedback. ${INBOX_TWO_PATH_GUIDANCE}`,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.getInboxEvent(params, ctx));
       return result.ok
@@ -157,14 +164,15 @@ export function registerInboxGetTool(pi: ExtensionAPI, manager: ManagerControlle
       { additionalProperties: false },
     ),
     preview: (args) => [{ name: 'eventId', value: args.eventId }],
-    promptSnippet: 'Read one known durable Pardes attention row after compact inbox status',
+    promptGuidelines: [AUTONOMOUS_INBOX_PATH, USER_JUDGMENT_INBOX_PATH, USER_JUDGMENT_HANDOFF_PATH],
+    promptSnippet:
+      'Read and judge one known durable Pardes attention row after compact inbox status',
   });
 }
 
 export function registerInboxAcknowledgeTool(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
-    description:
-      'Acknowledge handled durable Pardes inbox rows through exactly one cursor. Defaults to the active delivered wake cursor. For autonomous handling before delivery, pass the exact inspected inbox event cursor. Never consumes a later queued suffix.',
+    description: `Use only for the autonomous path after rows are handled: acknowledge durable Pardes inbox rows through exactly one cursor. Defaults to the active delivered wake cursor. For autonomous handling before delivery, pass the exact inspected inbox event cursor. Never consumes a later queued suffix. ${INBOX_TWO_PATH_GUIDANCE}`,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.acknowledgeInbox(ctx, params));
       return result.ok
@@ -180,13 +188,15 @@ export function registerInboxAcknowledgeTool(pi: ExtensionAPI, manager: ManagerC
       {
         cursor: Type.Optional(
           managerId(
-            'Optional exact event cursor copied from pardes_status(view="inbox"); omit to consume only the delivered wake cursor',
+            'Optional exact autonomous-path event cursor copied from pardes_status(view="inbox"); omit to consume only the delivered wake cursor',
           ),
         ),
       },
       { additionalProperties: false },
     ),
     preview: (args) => [{ name: 'cursor', value: args.cursor }],
-    promptSnippet: 'Acknowledge handled Pardes inbox rows through one exact cursor',
+    promptGuidelines: [AUTONOMOUS_INBOX_PATH, USER_JUDGMENT_INBOX_PATH, USER_JUDGMENT_HANDOFF_PATH],
+    promptSnippet:
+      'Acknowledge autonomous handled Pardes inbox rows through one exact cursor; never pre-acknowledge user judgment',
   });
 }

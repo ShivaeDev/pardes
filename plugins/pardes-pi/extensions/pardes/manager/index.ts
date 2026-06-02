@@ -140,17 +140,21 @@ export {
   WorkstreamNotFoundError,
 } from './errors.ts';
 export {
-  boundManagerGuidance,
-  MANAGER_GUIDANCE_BOUNDS,
-  MANAGER_GUIDANCE_MAX_CHARS,
-  MANAGER_GUIDANCE_MAX_LINE_CHARS,
-  MANAGER_GUIDANCE_MAX_LINES,
+  AUTONOMOUS_INBOX_PATH,
+  boundedManagerGuidanceCount,
+  INBOX_TWO_PATH_GUIDANCE,
+  MANAGER_COMPACTION_COORDINATING_GUIDANCE,
+  MANAGER_GUIDANCE_DYNAMIC_COUNT_MAX,
   MANAGER_GUIDANCE_MESSAGE_TYPE,
+  MANAGER_LIFECYCLE_AUTHORED_GUIDANCE,
   type ManagerGuidanceReason,
   managerGuidanceReasonForSessionStart,
+  PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
   queueManagerGuidance,
   renderManagerGuidance,
-} from './guidance.ts';
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from './guidance/index.ts';
 export {
   IDLE_WORKER_DISPOSITION_PRECEDENCE,
   type IdleWorkerDisposition,

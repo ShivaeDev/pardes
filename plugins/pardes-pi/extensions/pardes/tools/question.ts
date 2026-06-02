@@ -1,6 +1,12 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import {
+  AUTONOMOUS_INBOX_PATH,
+  INBOX_TWO_PATH_GUIDANCE,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from '../manager/index.ts';
+import {
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
   QUESTION_OPTIONS_MAX_ITEMS,
@@ -30,8 +36,7 @@ const QuestionOption = Type.Object(
 
 export function registerQuestionTool(pi: ExtensionAPI): void {
   registerPardesTool(pi, {
-    description:
-      'Ask the user a genuine decision question with options. Use for forks and blockers, not routine confirmations.',
+    description: `Structured user-judgment path: ask the user a genuine decision question with options. Use for forks and blockers, not routine confirmations. If durable Pardes attention led here, do not acknowledge its active cursor first; this tool does not consume that cursor. ${INBOX_TWO_PATH_GUIDANCE}`,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return textResult('Error: question requires an interactive UI.');
       const selection = await selectPardesQuestionOption(
@@ -77,6 +82,13 @@ export function registerQuestionTool(pi: ExtensionAPI): void {
       { mode: 'length', name: 'options', value: args.options },
       { name: 'allowCustom', value: args.allowCustom },
     ],
-    promptSnippet: 'Ask the user a structured question when a real decision is required',
+    promptGuidelines: [
+      AUTONOMOUS_INBOX_PATH,
+      USER_JUDGMENT_INBOX_PATH,
+      USER_JUDGMENT_HANDOFF_PATH,
+      'For structured user judgment, surface the issue with question while any active Pardes attention cursor remains open until response.',
+    ],
+    promptSnippet:
+      'Ask a structured user-judgment question while leaving any active Pardes attention cursor open until response',
   });
 }

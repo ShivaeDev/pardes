@@ -1,16 +1,25 @@
 import { createHash } from 'node:crypto';
 import type { InboxHandoff, InboxWake, ManagerEvent, ManagerState } from './domain.ts';
+import {
+  AUTONOMOUS_INBOX_PATH,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from './guidance/lifecycle.ts';
 
 export const MANAGER_INBOX_WAKE_MESSAGE_TYPE = 'pardes-worker-event';
 export const MANAGER_INBOX_WAKE_DETAIL_TYPE = 'manager_inbox_wake';
-export const MANAGER_INBOX_WAKE_MAX_CHARS = 900;
+export const MANAGER_INBOX_WAKE_MAX_CHARS = 1_200;
 export const MANAGER_INBOX_WAKE_MAX_ROWS = 4;
 export const MANAGER_INBOX_WAKE_MAX_ROW_CHARS = 120;
 const VISIBLE_CURSOR_MAX_CHARS = 80;
 const VISIBLE_EVENT_TYPE_MAX_CHARS = 44;
 const HEADER_MAX_CHARS = 160;
-const FULL_INBOX_HINT =
-  'Inspect `pardes_status(view="inbox")` for full bounded rows; use `inbox_get({ eventId })` to read one known row; call `inbox_acknowledge` after handling; trust current inbox if stale.';
+const FULL_INBOX_HINT_LINES = [
+  'Inspect `pardes_status(view="inbox")` for bounded rows; use `inbox_get({ eventId })` only for a known row; trust current inbox if stale.',
+  AUTONOMOUS_INBOX_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+  USER_JUDGMENT_HANDOFF_PATH,
+];
 
 const CHILD_SUMMARY_EVENT_TYPES = new Set(['agent_report_blocked', 'agent_report_completed']);
 const GITHUB_METADATA_EVENT_TYPES = new Set([
@@ -60,11 +69,9 @@ function compactText(text: string, limit: number): string {
     : `${normalized.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-function boundedContent(lines: ReadonlyArray<string>): string {
-  const content = lines.join('\n');
-  return content.length <= MANAGER_INBOX_WAKE_MAX_CHARS
-    ? content
-    : `${content.slice(0, MANAGER_INBOX_WAKE_MAX_CHARS - 1)}…`;
+/** Upstream row selection and field previews bound dynamic data; keep authored wake guidance intact. */
+function projectedWakeContent(lines: ReadonlyArray<string>): string {
+  return lines.join('\n');
 }
 
 /** Stable and bounded even if a forward-compatible persisted event id is unexpectedly large. */
@@ -210,13 +217,13 @@ export function renderInboxWakeMessage(release: InboxWakeRelease) {
             : []),
         ];
   return {
-    content: boundedContent([
+    content: projectedWakeContent([
       compactText(
         `[Pardes wake ${wake.token}] ${wake.pendingCount} pending through cursor ${cursor}`,
         HEADER_MAX_CHARS,
       ),
       ...digestLines,
-      FULL_INBOX_HINT,
+      ...FULL_INBOX_HINT_LINES,
     ]),
     customType: MANAGER_INBOX_WAKE_MESSAGE_TYPE,
     details: {

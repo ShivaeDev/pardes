@@ -1,7 +1,11 @@
 import { Semaphore } from 'effect';
 import { createWorkerActivityState, type WorkerActivityState } from './activity.ts';
 import type { ChildLaunchProfile } from './child-profile.ts';
-import type { WorkerProtocolDiagnostic, WorkerStderrTail } from './diagnostics.ts';
+import type {
+  WorkerCompactionFailure,
+  WorkerProtocolDiagnostic,
+  WorkerStderrTail,
+} from './diagnostics.ts';
 import type { WorkerRpcState } from './rpc/codecs.ts';
 import type { WorkerRpcSession } from './rpc/session.ts';
 
@@ -23,7 +27,7 @@ export interface WorkerCompactionCompletion {
   readonly aborted: boolean;
   readonly willRetry: boolean;
   readonly tokensBefore?: number;
-  readonly errorMessage?: string;
+  readonly failure?: WorkerCompactionFailure;
   readonly completedAt: number;
 }
 

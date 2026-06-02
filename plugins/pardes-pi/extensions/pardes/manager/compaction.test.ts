@@ -757,6 +757,30 @@ describe('Pardes coordinating-manager compaction', () => {
     }
   });
 
+  test('makes fallback cause diagnostics terminal-inert before rendering or operator delivery', () => {
+    const diagnostic = renderManagerCompactionFallbackDiagnostic(
+      'summarize',
+      new Error('\u001b]0;private-title\u0007 token=private-control-token'),
+    );
+    const delivered: string[] = [];
+    const ctx = context({
+      ui: { notify: (message: string) => delivered.push(message) } as never,
+    });
+
+    reportManagerCompactionFallback(ctx, `${diagnostic}\u001b\u0007`, (message) =>
+      delivered.push(message),
+    );
+
+    expect(diagnostic).not.toContain('\u001b');
+    expect(diagnostic).not.toContain('\u0007');
+    expect(diagnostic).toContain('token=[redacted]');
+    expect(diagnostic).not.toContain('private-control-token');
+    expect(delivered).toHaveLength(2);
+    expect(
+      delivered.every((message) => !message.includes('\u001b') && !message.includes('\u0007')),
+    ).toBe(true);
+  });
+
   test('accounts for redacted fallback diagnostic field omissions without midpoint ellipses', () => {
     const diagnostic = renderManagerCompactionFallbackDiagnostic(
       'summarize',

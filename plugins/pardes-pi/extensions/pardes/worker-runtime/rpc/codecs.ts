@@ -118,9 +118,12 @@ const WorkerCompactionResultSchema = Schema.Struct({
   summary: Schema.String,
   tokensBefore: Schema.Number,
 });
+export const WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS = 4_096;
 const WorkerCompactionEndEventSchema = Schema.Struct({
   aborted: Schema.Boolean,
-  errorMessage: Schema.optionalKey(Schema.String),
+  errorMessage: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS)),
+  ),
   reason: WorkerCompactionReasonSchema,
   result: Schema.optionalKey(Schema.Union([WorkerCompactionResultSchema, Schema.Null])),
   type: Schema.Literal('compaction_end'),
@@ -201,5 +204,7 @@ export function rpcPayloadDiagnostic(
   message: string,
   originalChars?: number,
 ): WorkerProtocolDiagnostic {
-  return workerProtocolDiagnostic('invalid_rpc_payload', message, originalChars);
+  return originalChars === undefined
+    ? workerProtocolDiagnostic('invalid_rpc_payload', message)
+    : workerProtocolDiagnostic('invalid_rpc_payload', message, originalChars);
 }

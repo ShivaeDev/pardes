@@ -6,7 +6,7 @@ import {
   summarizeToolInvocation,
   visibleAssistantText,
 } from './activity.ts';
-import type { WorkerRpcRecordMetadata } from './diagnostics.ts';
+import { type WorkerRpcRecordMetadata, workerCompactionFailure } from './diagnostics.ts';
 import {
   type RetainedWorkerRuntime,
   recalibratingContextStats,
@@ -216,7 +216,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
         ...(decoded.value.result && { tokensBefore: decoded.value.result.tokensBefore }),
         ...(decoded.value.errorMessage === undefined
           ? {}
-          : { errorMessage: decoded.value.errorMessage }),
+          : { failure: workerCompactionFailure(decoded.value.errorMessage.length) }),
         completedAt: now(),
       };
       runtime.isCompacting = false;

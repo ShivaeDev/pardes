@@ -439,8 +439,17 @@ function safeString(value: unknown): string {
   }
 }
 
+function terminalInertManagerCompactionText(value: string): string {
+  return Array.from(value, (character) => {
+    const code = character.charCodeAt(0);
+    return (code <= 31 && code !== 9 && code !== 10 && code !== 13) || (code >= 127 && code <= 159)
+      ? ' '
+      : character;
+  }).join('');
+}
+
 function redactManagerCompactionDiagnostic(value: unknown): string {
-  return safeString(value)
+  return terminalInertManagerCompactionText(safeString(value))
     .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, '$1 [redacted]')
     .replace(
       /\b(api[-_ ]?key|authorization|cookie|password|secret|token)\s*[:=]\s*[^\s,;]+/gi,
@@ -529,13 +538,14 @@ export function reportManagerCompactionFallback(
   diagnostic: string,
   log: (message: string) => void = (message) => console.error(message),
 ): void {
+  const inertDiagnostic = terminalInertManagerCompactionText(diagnostic);
   try {
-    ctx.ui.notify(diagnostic, 'warning');
+    ctx.ui.notify(inertDiagnostic, 'warning');
   } catch {
     // stderr remains a useful operator surface when a presentation adapter fails.
   }
   try {
-    log(diagnostic);
+    log(inertDiagnostic);
   } catch {
     // Diagnostics are best-effort; declining the override is the safety property.
   }

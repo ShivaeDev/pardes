@@ -29,6 +29,7 @@ import { makeFileSystemStateStore, type StateStoreShape } from '../storage/index
 import {
   type GuardedWorkerSupervisorShape,
   makeWorkerSupervisor,
+  renderWorkerCompactionFailure,
   type WorkerRuntimeSnapshot,
   type WorkerSendBehavior,
   type WorkerSendResult,
@@ -130,11 +131,7 @@ import {
   makeWorkerSupervisorEventCoordinator,
   type WorkerSupervisorEventCoordinatorShape,
 } from './worker-event-coordinator.ts';
-import {
-  boundedEventSummary,
-  boundedFailureSummary,
-  truncateModelFacingText,
-} from './worker-events.ts';
+import { boundedEventSummary, boundedFailureSummary } from './worker-events.ts';
 
 const SESSION_ENTRY_TYPE = 'pardes-manager';
 
@@ -1965,9 +1962,9 @@ export class ManagerController {
       ...(completion === undefined
         ? {}
         : { aborted: completion.aborted, willRetry: completion.willRetry }),
-      ...(completion?.errorMessage === undefined
+      ...(completion?.failure === undefined
         ? {}
-        : { failureSummary: truncateModelFacingText(completion.errorMessage) }),
+        : { failureSummary: renderWorkerCompactionFailure(completion.failure) }),
     };
     const compactedAt = yield* nowIso;
     yield* this.appendEventSafely(

@@ -203,7 +203,7 @@ function handle(command) {
     if (command.message === "failed-compaction") {
       start();
       startCompaction("overflow");
-      endCompaction("overflow", null, false, false, "quota exhausted");
+      endCompaction("overflow", null, false, false, "token=private-compaction-secret\\u001b");
       end();
       return;
     }
@@ -555,12 +555,11 @@ describe('worker supervisor', () => {
     ]);
     expect(
       protocolDiagnostics.every(
-        ({ countAccuracy, omittedChars, originalChars, shownChars }) =>
-          countAccuracy === 'exact' &&
-          typeof originalChars === 'number' &&
-          originalChars > 0 &&
-          omittedChars === originalChars &&
-          shownChars === 0,
+        (diagnostic) =>
+          diagnostic.countAccuracy === 'exact' &&
+          diagnostic.originalChars > 0 &&
+          diagnostic.omittedChars === diagnostic.originalChars &&
+          diagnostic.shownChars === 0,
       ),
     ).toBe(true);
     expect(events.some((event) => event.type === 'report' || event.type === 'question')).toBe(
@@ -823,7 +822,12 @@ describe('worker supervisor', () => {
       expect.objectContaining({
         compaction: expect.objectContaining({
           aborted: false,
-          errorMessage: 'quota exhausted',
+          failure: {
+            omittedChars: 15,
+            originalChars: 15,
+            reason: 'child_compaction_error_message_omitted',
+            shownChars: 0,
+          },
           reason: 'overflow',
           succeeded: false,
         }),
@@ -834,7 +838,16 @@ describe('worker supervisor', () => {
       compactionReason: undefined,
       completedCompactionCount: 2,
       isCompacting: false,
-      lastCompaction: { errorMessage: 'quota exhausted', reason: 'overflow', succeeded: false },
+      lastCompaction: {
+        failure: {
+          omittedChars: 15,
+          originalChars: 15,
+          reason: 'child_compaction_error_message_omitted',
+          shownChars: 0,
+        },
+        reason: 'overflow',
+        succeeded: false,
+      },
     });
 
     await Effect.runPromise(supervisor.compact('agent-fixture'));
@@ -914,10 +927,22 @@ describe('worker supervisor', () => {
     );
     expect(await Effect.runPromise(supervisor.status('agent-fixture'))).toMatchObject({
       completedCompactionCount: 1,
-      lastCompaction: { errorMessage: 'quota exhausted', reason: 'overflow', succeeded: false },
+      lastCompaction: {
+        failure: {
+          omittedChars: 32,
+          originalChars: 32,
+          reason: 'child_compaction_error_message_omitted',
+          shownChars: 0,
+        },
+        reason: 'overflow',
+        succeeded: false,
+      },
       stats: { contextUsage: { contextWindow: 10000, percent: 50, tokens: 5000 } },
       status: 'idle',
     });
+    expect(
+      JSON.stringify(await Effect.runPromise(supervisor.status('agent-fixture'))),
+    ).not.toContain('private-compaction-secret');
     await Effect.runPromise(supervisor.shutdown());
   });
 

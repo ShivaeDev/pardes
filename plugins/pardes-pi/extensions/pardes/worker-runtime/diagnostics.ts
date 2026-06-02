@@ -20,14 +20,25 @@ export interface WorkerRpcRecordMetadata {
   readonly originalChars: number;
 }
 
-export interface WorkerProtocolDiagnostic {
-  readonly originalChars?: number;
-  readonly shownChars: 0;
-  readonly omittedChars?: number;
+interface WorkerProtocolDiagnosticFields {
   readonly reason: WorkerProtocolDiagnosticReason;
   /** Fixed software-authored inert description. Never include child-authored record content. */
   readonly message: string;
-  readonly countAccuracy: WorkerDiagnosticCountAccuracy;
+  readonly shownChars: 0;
+}
+
+export type WorkerProtocolDiagnostic =
+  | (WorkerProtocolDiagnosticFields & {
+      readonly countAccuracy: 'unknown';
+    })
+  | (WorkerProtocolDiagnosticFields & {
+      readonly countAccuracy: 'exact' | 'lower_bound';
+      readonly originalChars: number;
+      readonly omittedChars: number;
+    });
+
+export interface WorkerCompactionFailure extends WorkerTextCounts {
+  readonly reason: 'child_compaction_error_message_omitted';
 }
 
 export interface WorkerStderrTail extends WorkerTextCounts {
@@ -39,28 +50,60 @@ export interface WorkerStderrTail extends WorkerTextCounts {
 export function workerProtocolDiagnostic(
   reason: WorkerProtocolDiagnosticReason,
   message: string,
+): WorkerProtocolDiagnostic;
+export function workerProtocolDiagnostic(
+  reason: WorkerProtocolDiagnosticReason,
+  message: string,
+  originalChars: number,
+  countAccuracy?: Exclude<WorkerDiagnosticCountAccuracy, 'unknown'>,
+): WorkerProtocolDiagnostic;
+export function workerProtocolDiagnostic(
+  reason: WorkerProtocolDiagnosticReason,
+  message: string,
   originalChars?: number,
   countAccuracy: WorkerDiagnosticCountAccuracy = originalChars === undefined ? 'unknown' : 'exact',
 ): WorkerProtocolDiagnostic {
+  return originalChars === undefined || countAccuracy === 'unknown'
+    ? { countAccuracy: 'unknown', message, reason, shownChars: 0 }
+    : { countAccuracy, message, omittedChars: originalChars, originalChars, reason, shownChars: 0 };
+}
+
+function coherentCountedDiagnostic(
+  diagnostic: WorkerProtocolDiagnostic,
+): diagnostic is Extract<
+  WorkerProtocolDiagnostic,
+  { readonly countAccuracy: 'exact' | 'lower_bound' }
+> {
+  return (
+    diagnostic.countAccuracy !== 'unknown' &&
+    typeof diagnostic.originalChars === 'number' &&
+    typeof diagnostic.omittedChars === 'number' &&
+    diagnostic.omittedChars === diagnostic.originalChars
+  );
+}
+
+export function renderWorkerProtocolDiagnostic(diagnostic: WorkerProtocolDiagnostic): string {
+  const counted = coherentCountedDiagnostic(diagnostic);
+  const original = counted
+    ? `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.originalChars)}`
+    : 'unknown';
+  const omitted = counted
+    ? `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.omittedChars)}`
+    : 'unknown';
+  return `[${diagnostic.reason}] ${diagnostic.message} chars(original=${original}, shown=${diagnostic.shownChars}, omitted=${omitted}).`;
+}
+
+export function workerCompactionFailure(originalChars: number): WorkerCompactionFailure {
   return {
-    countAccuracy,
-    message,
-    ...(originalChars === undefined ? {} : { omittedChars: originalChars, originalChars }),
-    reason,
+    omittedChars: originalChars,
+    originalChars,
+    reason: 'child_compaction_error_message_omitted',
     shownChars: 0,
   };
 }
 
-export function renderWorkerProtocolDiagnostic(diagnostic: WorkerProtocolDiagnostic): string {
-  const original =
-    diagnostic.countAccuracy === 'unknown'
-      ? 'unknown'
-      : `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.originalChars)}`;
-  const omitted =
-    diagnostic.countAccuracy === 'unknown'
-      ? 'unknown'
-      : `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.omittedChars)}`;
-  return `[${diagnostic.reason}] ${diagnostic.message} chars(original=${original}, shown=${diagnostic.shownChars}, omitted=${omitted}).`;
+export function renderWorkerCompactionFailure(failure: WorkerCompactionFailure): string {
+  return `[${failure.reason}] Child-authored compaction diagnostic text omitted. chars(original=${failure.originalChars}, shown=${failure.shownChars}, omitted=${failure.omittedChars}).`;
 }
 
 export function appendWorkerStderrTail(current: WorkerStderrTail, chunk: string): WorkerStderrTail {

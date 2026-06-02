@@ -1869,7 +1869,7 @@ describe('manager controller', () => {
     process.env.PARDES_PI_STATE_DIR = stateRoot;
     const fixture = harness(repo);
     const workers = stubWorkers();
-    const rawChildFailure = 'private child compaction detail '.repeat(80);
+    const rawChildFailure = 'token=private-child-compaction-secret\u001b';
     const makeWorkers = (
       onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
     ): GuardedWorkerSupervisorShape => {
@@ -1883,7 +1883,12 @@ describe('manager controller', () => {
               lastCompaction: {
                 ...requiredValue(runtime.lastCompaction),
                 aborted: true,
-                errorMessage: rawChildFailure,
+                failure: {
+                  omittedChars: rawChildFailure.length,
+                  originalChars: rawChildFailure.length,
+                  reason: 'child_compaction_error_message_omitted',
+                  shownChars: 0,
+                },
                 willRetry: false,
               },
             })),
@@ -1908,9 +1913,8 @@ describe('manager controller', () => {
     expect(compacted).toEqual({
       aborted: true,
       agentId: agent.id,
-      failureSummary: expect.stringContaining(
-        '[omitted reason=manager_event_text_limit originalChars=2559 shownChars=146 omittedChars=2413]',
-      ),
+      failureSummary:
+        '[child_compaction_error_message_omitted] Child-authored compaction diagnostic text omitted. chars(original=38, shown=0, omitted=38).',
       outcome: 'manual',
       status: 'idle',
       tokensBefore: 321,
@@ -1934,6 +1938,8 @@ describe('manager controller', () => {
     });
     expect(event.summary.length).toBeLessThanOrEqual(900);
     expect(event.summary).not.toContain(rawChildFailure);
+    expect(event.summary).not.toContain('private-child-compaction-secret');
+    expect(event.summary).not.toContain('\u001b');
   });
 
   test('appends a bounded associated compact failure audit without inbox wakeup and re-fails synchronously', async () => {

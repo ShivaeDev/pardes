@@ -1,8 +1,12 @@
 import { Effect, Exit, Option } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
-import { renderWorkerProtocolDiagnostic } from '../diagnostics.ts';
-import { rpcPayloadDiagnostic, WorkerRpcWire } from './codecs.ts';
+import { renderWorkerProtocolDiagnostic, type WorkerProtocolDiagnostic } from '../diagnostics.ts';
+import {
+  rpcPayloadDiagnostic,
+  WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS,
+  WorkerRpcWire,
+} from './codecs.ts';
 
 describe('worker RPC wire schema', () => {
   test('keeps tolerant envelope dispatch separate from targeted response decoding', () => {
@@ -83,6 +87,27 @@ describe('worker RPC wire schema', () => {
     ).toBe(true);
   });
 
+  test('bounds child compaction error fields at the wire codec boundary', () => {
+    const bounded = {
+      aborted: true,
+      errorMessage: 'x'.repeat(WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS),
+      reason: 'overflow',
+      result: null,
+      type: 'compaction_end',
+      willRetry: false,
+    } as const;
+
+    expect(Option.isSome(WorkerRpcWire.decodeCompactionEndEvent(bounded))).toBe(true);
+    expect(
+      Option.isNone(
+        WorkerRpcWire.decodeCompactionEndEvent({
+          ...bounded,
+          errorMessage: `${bounded.errorMessage}x`,
+        }),
+      ),
+    ).toBe(true);
+  });
+
   test('codes targeted payload failures without clipping software-authored labels', () => {
     const withoutFramingMetadata = rpcPayloadDiagnostic('Invalid text_delta RPC event');
     expect(withoutFramingMetadata).toEqual({
@@ -102,5 +127,19 @@ describe('worker RPC wire schema', () => {
       reason: 'invalid_rpc_payload',
       shownChars: 0,
     });
+  });
+
+  test('degrades incoherent counted diagnostics to unknown accounting at render time', () => {
+    const incoherent = {
+      countAccuracy: 'exact',
+      message: 'Fixed software label.',
+      reason: 'invalid_json',
+      shownChars: 0,
+    } as unknown as WorkerProtocolDiagnostic;
+
+    expect(renderWorkerProtocolDiagnostic(incoherent)).toContain(
+      'chars(original=unknown, shown=0, omitted=unknown)',
+    );
+    expect(renderWorkerProtocolDiagnostic(incoherent)).not.toContain('undefined');
   });
 });

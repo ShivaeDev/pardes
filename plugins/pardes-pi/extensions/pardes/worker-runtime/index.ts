@@ -2,14 +2,17 @@ export { type ChildLaunchProfile, verifierChildProfile } from './child-profile.t
 export {
   appendWorkerStderrTail,
   emptyWorkerStderrTail,
+  renderWorkerCompactionFailure,
   renderWorkerProtocolDiagnostic,
   WORKER_STDERR_TAIL_MAX_CHARS,
+  type WorkerCompactionFailure,
   type WorkerDiagnosticCountAccuracy,
   type WorkerProtocolDiagnostic,
   type WorkerProtocolDiagnosticReason,
   type WorkerRpcRecordMetadata,
   type WorkerStderrTail,
   type WorkerTextCounts,
+  workerCompactionFailure,
   workerProtocolDiagnostic,
 } from './diagnostics.ts';
 export { WorkerProcessError, WorkerRpcError } from './errors.ts';

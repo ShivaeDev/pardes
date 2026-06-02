@@ -203,6 +203,38 @@ describe('GitHub hosted drill-down service', () => {
     ]);
   });
 
+  test('applies shared authorization and quoted-key redaction before CI excerpt pagination', async () => {
+    const authorization = `Author${'ization'}`;
+    const longCredential = 'x'.repeat(400);
+    const fixture = scriptedRunner([
+      checksResult(),
+      result(
+        `${authorization}: Basic ${longCredential}\n${JSON.stringify({ authorization: 'Basic json-auth-tail', client_secret: 'json-ci-secret', password: 'json ci tail' })}\nvisible`,
+      ),
+    ]);
+
+    const excerpt = await Effect.runPromise(
+      makeGitHubHostedDrilldownService({ runner: fixture.runner }).getCiLogExcerpt({
+        cwd: '/tmp/project',
+        jobId: 8001,
+        maxChars: 200,
+        pullRequest: association(),
+        runId: 7001,
+      }),
+    );
+
+    expect(excerpt.excerpt).toContain('Authorization: [REDACTED]');
+    expect(excerpt.excerpt).toContain('"authorization":[REDACTED]');
+    expect(excerpt.excerpt).toContain('"client_secret":[REDACTED]');
+    expect(excerpt.excerpt).toContain('"password":[REDACTED]');
+    expect(excerpt.excerpt).toContain('visible');
+    expect(excerpt.hasMore).toBe(false);
+    expect(excerpt.excerpt).not.toContain(longCredential);
+    expect(excerpt.excerpt).not.toContain('json-auth-tail');
+    expect(excerpt.excerpt).not.toContain('json-ci-secret');
+    expect(excerpt.excerpt).not.toContain('json ci tail');
+  });
+
   test('rejects an arbitrary run/job before requesting a hosted log body', async () => {
     const fixture = scriptedRunner([checksResult()]);
 
@@ -225,12 +257,15 @@ describe('GitHub hosted drill-down service', () => {
   });
 
   test('retrieves external discussion bodies only through an explicit surface/page path with first-N redacted excerpts', async () => {
+    const authorization = `Author${'ization'}`;
+    const authorizationLower = authorization.toLowerCase();
+    const quotedYamlKey = `'api_${'key'}': 'yaml-tail-marker'`;
     const secret = 'github_pat_abcdefghijklmnop';
     const temporaryAwsKey = `ASIA${'A'.repeat(16)}`;
     const items = Array.from({ length: 10 }, (_, index) => ({
       body:
         index === 0
-          ? `client_secret=do-not-leak password="alpha beta" api_key='gamma delta' token=${secret} aws=${temporaryAwsKey} marker\u061cleft\n${'x'.repeat(5_000)}`
+          ? `client_secret=do-not-leak password="alpha beta" api_key='gamma delta' token=${secret} aws=${temporaryAwsKey} marker\u061cleft\n${JSON.stringify({ client_secret: 'json-do-not-leak', password: 'json alpha beta', token: 'generic-json-token' })}\n${quotedYamlKey}\n${authorization}: Basic basic-tail-marker\n${authorizationLower}=token opaque-tail-marker\n${authorizationLower}: Digest username="admin", response="digest-tail-marker"\n${authorization}: Bearer bearer-tail-marker\n${authorization}: Custom unknown-tail-marker\n${'x'.repeat(5_000)}`
           : `body-${index}`,
       id: index + 1,
       user: index === 0 ? { login: 'alice' } : index === 1 ? { login: 'evil\u202e' } : null,
@@ -279,6 +314,18 @@ describe('GitHub hosted drill-down service', () => {
     expect(page.items[0]?.excerpt).not.toContain('do-not-leak');
     expect(page.items[0]?.excerpt).not.toContain('alpha beta');
     expect(page.items[0]?.excerpt).not.toContain('gamma delta');
+    expect(page.items[0]?.excerpt).not.toContain('json-do-not-leak');
+    expect(page.items[0]?.excerpt).not.toContain('json alpha beta');
+    expect(page.items[0]?.excerpt).not.toContain('generic-json-token');
+    expect(page.items[0]?.excerpt).not.toContain('basic-tail-marker');
+    expect(page.items[0]?.excerpt).not.toContain('yaml-tail-marker');
+    expect(page.items[0]?.excerpt).not.toContain('opaque-tail-marker');
+    expect(page.items[0]?.excerpt).not.toContain('digest-tail-marker');
+    expect(page.items[0]?.excerpt).not.toContain('bearer-tail-marker');
+    expect(page.items[0]?.excerpt).not.toContain('unknown-tail-marker');
+    expect(page.items[0]?.excerpt).toContain('Authorization: [REDACTED]');
+    expect(page.items[0]?.excerpt).toContain('authorization=[REDACTED]');
+    expect(page.items[0]?.excerpt).toContain('authorization: [REDACTED]');
     expect(page.items[0]?.excerpt).not.toContain('\u061c');
     expect(page.items[0]?.excerpt).toContain('\\u061c');
     expect(fixture.invocations[0]?.args).toEqual([

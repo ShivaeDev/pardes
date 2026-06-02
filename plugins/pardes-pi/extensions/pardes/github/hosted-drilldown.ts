@@ -213,8 +213,10 @@ const UNSAFE_DIRECTIONAL_PATTERN = new RegExp(
   '[\\u0080-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]',
   'g',
 );
+const AUTHORIZATION_FIELD_PATTERN =
+  /(^|[^a-zA-Z0-9_-])(["']?)(authorization)\2(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gim;
 const SECRET_ASSIGNMENT_PATTERN =
-  /(^|[^a-zA-Z0-9_-])((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|Bearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}|[^\s,;]+)/gim;
+  /(^|[^a-zA-Z0-9_-])(["']?)((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))\2(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|Bearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}|[^\s,;]+)/gim;
 const SAFE_DISCUSSION_AUTHOR_PATTERN = /^[a-zA-Z0-9-]+(?:\[bot\])?$/;
 
 function escapedCodePoint(value: string): string {
@@ -228,7 +230,8 @@ function redactHostedExcerpt(source: string): string {
     .replace(TERMINAL_CONTROL_PATTERN, '')
     .replace(UNSAFE_DIRECTIONAL_PATTERN, escapedCodePoint)
     .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g, '[REDACTED PEM]')
-    .replace(SECRET_ASSIGNMENT_PATTERN, '$1$2$3[REDACTED]')
+    .replace(AUTHORIZATION_FIELD_PATTERN, '$1$2$3$2$4[REDACTED]')
+    .replace(SECRET_ASSIGNMENT_PATTERN, '$1$2$3$2$4[REDACTED]')
     .replace(
       /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/g,
       '[REDACTED TOKEN]',

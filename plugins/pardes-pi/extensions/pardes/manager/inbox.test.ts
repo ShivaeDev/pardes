@@ -196,6 +196,23 @@ describe('manager inbox notification projection', () => {
     expect(message.content).not.toContain('raw GitHub comment body');
   });
 
+  test('renders retained verifier missing-report attention as one actionable Pardes warning', () => {
+    const message = render([
+      {
+        ...event(
+          'event-verifier-idle',
+          'verification_terminal_report_missing',
+          'verifier-1: terminal report missing; follow up; do not poll. Retained advisory verifier remains attached idle.',
+        ),
+        verificationId: 'verify-1',
+      },
+    ]);
+
+    expect(message.content).toContain(
+      '- verification_terminal_report_missing: [Pardes] verifier-1: terminal report missing; follow up; do not poll. Retained …',
+    );
+  });
+
   test('labels verifier-associated reports and questions explicitly without writing-worker attribution', () => {
     const message = render([
       {

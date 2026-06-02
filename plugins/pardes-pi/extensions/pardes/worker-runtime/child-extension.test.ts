@@ -41,6 +41,46 @@ function createFixture(parent = tmpdir()) {
   return { outside, worktree };
 }
 
+interface ChildProfileEnvironment {
+  readonly baseline: string | undefined;
+  readonly profile: string | undefined;
+  readonly reviewed: string | undefined;
+  readonly root: string | undefined;
+}
+
+function childProfileEnvironment(): ChildProfileEnvironment {
+  return {
+    baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+    profile: process.env.PARDES_AGENT_PROFILE,
+    reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
+    root: process.env.PARDES_WORKTREE_ROOT,
+  };
+}
+
+function restoreChildProfileEnvironment(previous: ChildProfileEnvironment): void {
+  if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
+  else process.env.PARDES_WORKTREE_ROOT = previous.root;
+  if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
+  else process.env.PARDES_AGENT_PROFILE = previous.profile;
+  if (previous.baseline === undefined) delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+  else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
+  if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+  else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
+}
+
+function withWorkerProfileEnvironment<Result>(worktree: string, run: () => Result): Result {
+  const previous = childProfileEnvironment();
+  process.env.PARDES_WORKTREE_ROOT = worktree;
+  delete process.env.PARDES_AGENT_PROFILE;
+  delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+  delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+  try {
+    return run();
+  } finally {
+    restoreChildProfileEnvironment(previous);
+  }
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0))
     rmSync(directory, { force: true, recursive: true });
@@ -249,16 +289,26 @@ describe('verifier child profile', () => {
 describe('worker child reporting tool rendering', () => {
   test('uses bounded one-line length-only previews without adding result renderers', () => {
     const { worktree } = createFixture();
-    const previousRoot = process.env.PARDES_WORKTREE_ROOT;
-    process.env.PARDES_WORKTREE_ROOT = worktree;
+    const previous = childProfileEnvironment();
+    const inheritedVerifier = {
+      baseline: 'a'.repeat(40),
+      profile: 'verifier',
+      reviewed: 'b'.repeat(40),
+      root: '/tmp/inherited-verifier-root',
+    };
+    restoreChildProfileEnvironment(inheritedVerifier);
     try {
-      const tools: ToolDefinition[] = [];
-      pardesWorker({
-        on() {},
-        registerTool(tool: ToolDefinition) {
-          tools.push(tool);
-        },
-      } as unknown as ExtensionAPI);
+      const tools = withWorkerProfileEnvironment(worktree, () => {
+        const registered: ToolDefinition[] = [];
+        pardesWorker({
+          on() {},
+          registerTool(tool: ToolDefinition) {
+            registered.push(tool);
+          },
+        } as unknown as ExtensionAPI);
+        return registered;
+      });
+      expect(childProfileEnvironment()).toEqual(inheritedVerifier);
       const theme = {
         bold: (text: string) => text,
         fg: (_color: string, text: string) => text,
@@ -295,8 +345,7 @@ describe('worker child reporting tool rendering', () => {
         expect(lines[0], tool.name).not.toContain('private');
       }
     } finally {
-      if (previousRoot === undefined) delete process.env.PARDES_WORKTREE_ROOT;
-      else process.env.PARDES_WORKTREE_ROOT = previousRoot;
+      restoreChildProfileEnvironment(previous);
     }
   });
 });

@@ -4,21 +4,54 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach } from 'vitest';
 
-const GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS = 64 * 1024;
-let gitFixtureDiagnostics = '';
+export const GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS = 64 * 1024;
+export const GIT_FIXTURE_TIMEOUT_MS = 30_000;
+let gitFixtureDiagnosticsTail = '';
+let omittedGitFixtureDiagnosticChars = 0;
+
+function gitFixtureDiagnosticsOmissionMarker(omittedChars: number): string {
+  return `[... ${omittedChars} earlier diagnostic chars omitted ...]\n`;
+}
+
+function readGitFixtureDiagnostics(): string {
+  return omittedGitFixtureDiagnosticChars === 0
+    ? gitFixtureDiagnosticsTail
+    : `${gitFixtureDiagnosticsOmissionMarker(omittedGitFixtureDiagnosticChars)}${gitFixtureDiagnosticsTail}`;
+}
 
 function appendGitFixtureDiagnostics(diagnostics: string): void {
-  gitFixtureDiagnostics += `${gitFixtureDiagnostics === '' ? '' : '\n'}${diagnostics}`;
-  if (gitFixtureDiagnostics.length <= GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS) return;
-  const omitted = gitFixtureDiagnostics.length - GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS;
-  gitFixtureDiagnostics = `[... ${omitted} earlier diagnostic chars omitted ...]\n${gitFixtureDiagnostics.slice(-GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS)}`;
+  gitFixtureDiagnosticsTail += `${gitFixtureDiagnosticsTail === '' ? '' : '\n'}${diagnostics}`;
+  while (
+    gitFixtureDiagnosticsTail.length +
+      (omittedGitFixtureDiagnosticChars === 0
+        ? 0
+        : gitFixtureDiagnosticsOmissionMarker(omittedGitFixtureDiagnosticChars).length) >
+    GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS
+  ) {
+    const marker = gitFixtureDiagnosticsOmissionMarker(omittedGitFixtureDiagnosticChars + 1);
+    const omitted = Math.max(
+      1,
+      gitFixtureDiagnosticsTail.length + marker.length - GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS,
+    );
+    gitFixtureDiagnosticsTail = gitFixtureDiagnosticsTail.slice(omitted);
+    omittedGitFixtureDiagnosticChars += omitted;
+  }
+}
+
+function resetGitFixtureDiagnostics(): void {
+  gitFixtureDiagnosticsTail = '';
+  omittedGitFixtureDiagnosticChars = 0;
+}
+
+export function readGitFixtureDiagnosticsForTest(): string {
+  return readGitFixtureDiagnostics();
 }
 
 beforeEach(({ onTestFailed }) => {
-  gitFixtureDiagnostics = '';
+  resetGitFixtureDiagnostics();
   onTestFailed(() => {
-    if (gitFixtureDiagnostics !== '')
-      process.stderr.write(`\n[git fixture diagnostics]\n${gitFixtureDiagnostics}\n`);
+    const diagnostics = readGitFixtureDiagnostics();
+    if (diagnostics !== '') process.stderr.write(`\n[git fixture diagnostics]\n${diagnostics}\n`);
   });
 });
 
@@ -26,26 +59,66 @@ function formatGitFixtureCommand(cwd: string, args: ReadonlyArray<string>): stri
   return [`$ git ${args.map((arg) => JSON.stringify(arg)).join(' ')}`, `  cwd: ${cwd}`].join('\n');
 }
 
-export function runGitFixture(cwd: string, ...args: string[]): string {
+function trimGitFixtureOutput(output: unknown): string {
+  return typeof output === 'string' ? output.trim() : '';
+}
+
+function formatGitFixtureFailure(
+  command: string,
+  result: ReturnType<typeof spawnSync>,
+  timeoutMs: number,
+): string {
+  const stdout = trimGitFixtureOutput(result.stdout);
+  const stderr = trimGitFixtureOutput(result.stderr);
+  const error = result.error as NodeJS.ErrnoException | undefined;
+  return [
+    command,
+    ...(error?.code === 'ETIMEDOUT'
+      ? [`  timeout: exceeded ${timeoutMs}ms; investigate a stalled Git fixture command`]
+      : []),
+    ...(error === undefined ? [] : [`  spawn error: ${error.message}`]),
+    `  exit: ${result.status ?? result.signal ?? error?.code ?? 'unknown'}`,
+    ...(stdout === '' ? [] : [`  stdout:\n${stdout}`]),
+    ...(stderr === '' ? [] : [`  stderr:\n${stderr}`]),
+  ].join('\n');
+}
+
+interface RunGitFixtureOptions {
+  readonly timeoutMs?: number;
+}
+
+export function runGitFixtureWithOptions(
+  cwd: string,
+  args: ReadonlyArray<string>,
+  options: RunGitFixtureOptions = {},
+): string {
+  const timeoutMs = options.timeoutMs ?? GIT_FIXTURE_TIMEOUT_MS;
   const command = formatGitFixtureCommand(cwd, args);
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: timeoutMs,
   });
-  const stderr = result.stderr.trim();
-  if (stderr !== '') appendGitFixtureDiagnostics(`${command}\n${stderr}`);
-  if (result.error === undefined && result.status === 0) return result.stdout.trim();
+  if (result.error !== undefined) {
+    const diagnostics = formatGitFixtureFailure(command, result, timeoutMs);
+    appendGitFixtureDiagnostics(diagnostics);
+    throw new Error(`Git fixture command failed.\n${diagnostics}`, { cause: result.error });
+  }
 
-  const stdout = result.stdout.trim();
-  const diagnostics = [
-    command,
-    `  exit: ${result.status ?? result.signal ?? result.error?.message ?? 'unknown'}`,
-    ...(stdout === '' ? [] : [`  stdout:\n${stdout}`]),
-    ...(stderr === '' ? [] : [`  stderr:\n${stderr}`]),
-  ].join('\n');
-  if (stderr === '') appendGitFixtureDiagnostics(diagnostics);
-  throw new Error(`Git fixture command failed.\n${diagnostics}`, { cause: result.error });
+  const stderr = result.stderr.trim();
+  if (result.status === 0) {
+    if (stderr !== '') appendGitFixtureDiagnostics(`${command}\n${stderr}`);
+    return result.stdout.trim();
+  }
+
+  const diagnostics = formatGitFixtureFailure(command, result, timeoutMs);
+  appendGitFixtureDiagnostics(diagnostics);
+  throw new Error(`Git fixture command failed.\n${diagnostics}`);
+}
+
+export function runGitFixture(cwd: string, ...args: string[]): string {
+  return runGitFixtureWithOptions(cwd, args);
 }
 
 interface LocalGitRepositoryFixture {
@@ -125,10 +198,15 @@ function immutableRemoteGitTemplate(defaultBranch: string): string {
   return root;
 }
 
-function copyGitTemplate(template: string, prefix: string): string {
+export function copyGitTemplate(template: string, prefix: string): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
-  cpSync(template, root, { recursive: true });
-  return root;
+  try {
+    cpSync(template, root, { recursive: true });
+    return root;
+  } catch (cause) {
+    rmSync(root, { force: true, recursive: true });
+    throw cause;
+  }
 }
 
 export function copyLocalGitRepositoryFixture(prefix: string): LocalGitRepositoryFixture {

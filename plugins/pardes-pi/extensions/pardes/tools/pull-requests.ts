@@ -35,7 +35,8 @@ export function registerPullRequestTools(pi: ExtensionAPI, manager: ManagerContr
           pattern: MANAGER_INPUT_PULL_REQUEST_BRANCH_PATTERN,
         }),
         body: Type.String({
-          description: 'Pull-request body with summary and validation',
+          description:
+            'Reviewer-first pull-request body with concise Why / How / Decisions / Callouts content',
           maxLength: PULL_REQUEST_BODY_MAX_LENGTH,
           minLength: 1,
         }),

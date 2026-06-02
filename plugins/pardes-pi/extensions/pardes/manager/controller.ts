@@ -1559,6 +1559,7 @@ export class ManagerController {
       const covered = inboxThroughCursor(current.inbox, cursor);
       const eligible =
         covered !== undefined &&
+        !covered.some((event) => event.presentationBlocked === true) &&
         (retainedWake === undefined || retainedWake.cursor === cursor) &&
         (options.handoff === undefined ||
           (retainedWake?.cursor === cursor &&

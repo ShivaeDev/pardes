@@ -1840,6 +1840,9 @@ describe('Pardes model-visible tools', () => {
     ]);
     expect(publish.parameters.properties.title?.maxLength).toBe(256);
     expect(publish.parameters.properties.body?.maxLength).toBe(10_000);
+    expect(publish.parameters.properties.body?.description).toBe(
+      'Reviewer-first pull-request body with concise Why / How / Decisions / Callouts content',
+    );
     expect(publish.parameters.properties.baseBranch?.maxLength).toBe(255);
     expect(publish.parameters.required).not.toContain('openInBrowser');
     expect([...tools.keys()].some((name) => name.includes('merge'))).toBe(false);
@@ -1848,7 +1851,7 @@ describe('Pardes model-visible tools', () => {
       {
         agentId: 'agent-1',
         baseBranch: 'main',
-        body: 'Summary and validation.',
+        body: '### Why?\n\nApproved intent.\n\n### How?\n\nHigh-level approach.',
         title: 'Review gate',
         workstreamId: 'ws-1',
       },

@@ -43,12 +43,9 @@ import {
   registerQuestionTool,
   registerWorkstreamTools,
 } from './index.ts';
-import {
-  compositionLines,
-  githubIntegrationHealthLines,
-  verificationLines,
-  verificationStatusLines,
-} from './projections.ts';
+import { githubIntegrationHealthLines } from './inspection-projections.ts';
+import { compositionLines } from './review-projections.ts';
+import { verificationLines, verificationStatusLines } from './verification-projections.ts';
 
 interface ToolResult {
   readonly content: ReadonlyArray<{ readonly type: 'text'; readonly text: string }>;

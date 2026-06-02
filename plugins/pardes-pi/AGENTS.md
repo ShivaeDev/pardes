@@ -28,6 +28,17 @@ Read `docs/CODE_QUALITY.md` before source-organization or maintainability
 refactors. Implement one reviewed vertical slice at a time. Do not add daemon
 behavior, cross-manager scheduling, or speculative recovery machinery.
 
+## Local maintainer documentation
+
+Before modifying a service or capability folder, read its local `AGENTS.md` and
+referenced `ARCHITECTURE.md` when present. A capability may include a very short
+`AGENTS.md`, automatically loaded for agents, containing only non-obvious
+invariants and a pointer to its local `ARCHITECTURE.md`. Keep verbose
+capability-specific design detail in that local architecture document. Do not
+create local maintainer docs speculatively. Keep any `CLAUDE.md` extremely short
+and noise-free: include only high-value instructions not already discoverable
+elsewhere.
+
 ## Architecture and code-quality documentation gate
 
 Treat `docs/ARCHITECTURE.md` and `docs/CODE_QUALITY.md` as closed by default.

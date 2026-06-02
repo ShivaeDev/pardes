@@ -97,6 +97,19 @@ dependency-direction test when a boundary is safety-critical and regression
 would otherwise be easy. Do not pin incidental folder shape unless that shape
 is itself the contract.
 
+## Keep local maintainer docs focused
+
+A service or capability folder may include a very short `AGENTS.md`. Agents load
+that file automatically while working in the area, so reserve it for
+non-obvious invariants and a pointer to the folder's `ARCHITECTURE.md`. Keep
+verbose capability-specific design detail in that local architecture document,
+and read it before modifying the area.
+
+Do not add maintainer docs to every folder or use them to justify a refactor.
+Introduce local docs only when a concrete capability needs durable explanation.
+Keep any `CLAUDE.md` extremely short and noise-free: include only high-value
+instructions not already discoverable elsewhere.
+
 ## Documentation discipline
 
 Keep architecture inventories boundary-level. Internal files and nested folders
@@ -126,6 +139,8 @@ For a source-organization or maintainability refactor, verify:
   threshold-driven extraction;
 - the change avoids file-type folders, generic utility bags, and tiny wrappers;
 - tests remain colocated and cover preserved invariants;
+- relevant local maintainer docs were read, and any new local docs serve a
+  concrete capability need without duplicating discoverable information;
 - documentation remains boundary-level and any convention change had explicit
   approval;
 - the slice contains no opportunistic feature work.

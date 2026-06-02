@@ -52,6 +52,9 @@ From the root of a local Pardes checkout, use:
 pi install .
 ```
 
+The package also loads the reviewer-first `pardes-pr-description` skill. Invoke
+`/skill:pardes-pr-description` when publishing or rewriting a PR.
+
 For development inside this directory, load the extension directly:
 
 ```bash

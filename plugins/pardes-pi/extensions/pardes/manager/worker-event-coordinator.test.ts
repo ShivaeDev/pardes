@@ -411,6 +411,7 @@ describe('incoming worker-event coordinator', () => {
               Effect.andThen(verificationPermit.withPermit(Effect.void)),
             ),
           stopIdleWorker: () => Effect.succeed(undefined),
+          trySerializeWorkstreamCompletion: (_retryKey, effect) => effect.pipe(Effect.as(true)),
         },
         namespace,
       }),

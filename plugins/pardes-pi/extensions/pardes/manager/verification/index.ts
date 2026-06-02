@@ -41,6 +41,10 @@ export interface VerificationLifecycleCoordinatorShape {
   readonly retryResolvedRetirementForIdleVerifier: (
     verifierAgentId: string,
   ) => Effect.Effect<boolean, unknown>;
+  readonly stopIdleForWorkstreamCompletion: (
+    verifierAgentId: string,
+    ctx?: ExtensionContext,
+  ) => Effect.Effect<boolean, unknown>;
 }
 
 export class VerificationLifecycleCoordinator extends Context.Service<
@@ -123,6 +127,9 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
     serializeMutation(provisioner.refresh(verificationId, ctx));
   const status: VerificationLifecycleCoordinatorShape['status'] = (verificationId, ctx) =>
     serializeMutation(statusUnlocked(verificationId, ctx));
+  const stopIdleForWorkstreamCompletion: VerificationLifecycleCoordinatorShape['stopIdleForWorkstreamCompletion'] =
+    (verifierAgentId, ctx) =>
+      serializeMutation(retirement.stopIdleForWorkstreamCompletion(verifierAgentId, ctx));
   const reconcileForSource: VerificationLifecycleCoordinatorShape['reconcileForSource'] = (
     sourceAgentId,
   ) => serializeMutation(reconcileForSourceUnlocked(sourceAgentId));
@@ -137,5 +144,6 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
     retryResolvedRetirementForIdleVerifier,
     serializeMutation,
     status,
+    stopIdleForWorkstreamCompletion,
   });
 });

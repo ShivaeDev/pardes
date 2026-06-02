@@ -381,4 +381,46 @@ describe('manager inbox notification projection', () => {
     );
     expect(message.content.endsWith('and leave the cursor open until response.')).toBe(true);
   });
+
+  test('reserves intact authored hints and omission metadata before selecting complete legacy wake rows', () => {
+    const coveredCount = MANAGER_INBOX_WAKE_MAX_ROWS + 100;
+    const inbox = Array.from({ length: coveredCount + 100 }, (_, index) =>
+      event(
+        `event-${index}-${'c'.repeat(500)}`,
+        'agent_report_completed',
+        `worker-authored ${'s'.repeat(2_000)}`,
+      ),
+    );
+    const cursor = requiredValue(inbox[coveredCount - 1]).id;
+    const message = renderInboxWakeMessage({
+      inbox,
+      wake: {
+        createdAt,
+        cursor,
+        pendingCount: coveredCount,
+        token: `wake-${'t'.repeat(500)}`,
+      },
+    });
+    const digestRows = message.content
+      .split('\n')
+      .filter((line) => line.startsWith('- agent_report_completed'));
+
+    expect(message.content.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_CHARS);
+    expect(digestRows).toHaveLength(MANAGER_INBOX_WAKE_MAX_ROWS - 1);
+    for (const row of digestRows) expect(row.length).toBe(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
+    expect(message.details).toMatchObject({
+      digestCount: MANAGER_INBOX_WAKE_MAX_ROWS - 1,
+      omittedCount: coveredCount - MANAGER_INBOX_WAKE_MAX_ROWS + 1,
+      queuedSuffixCount: 100,
+      staleCursor: false,
+    });
+    expect(message.content).toContain(
+      `- … +${coveredCount - MANAGER_INBOX_WAKE_MAX_ROWS + 1} more pending events omitted.`,
+    );
+    expect(message.content).toContain(
+      '- queued suffix: +100 durable events await the next cursor release.',
+    );
+    expect(message.content).toContain('Autonomous rows may be acknowledged once handled.');
+    expect(message.content.endsWith('and leave the cursor open until response.')).toBe(true);
+  });
 });

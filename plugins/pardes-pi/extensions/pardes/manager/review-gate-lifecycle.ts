@@ -6,6 +6,7 @@ import {
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
   type GitHubWatcherCallbacks,
+  type GitHubWatcherThrottleDiagnostic,
   type PullRequestDiscussionFeedback,
   type PullRequestDiscussionPageCap,
   type PullRequestDiscussionSnapshot,
@@ -482,6 +483,8 @@ interface TerminalObservationFollowUp {
   readonly mergedWorkstreamId?: string;
 }
 
+type WorkstreamCompletionAdmission = 'already_serialized' | 'try_serialize';
+
 export interface ReviewGateLifecycleCoordinatorShape {
   readonly watcherCallbacks: GitHubWatcherCallbacks;
   readonly observePublishedTerminal: (event: {
@@ -497,6 +500,7 @@ export interface ReviewGateLifecycleCoordinatorShape {
   ) => Effect.Effect<void, unknown>;
   readonly retryMergedRetirementForWorkstream: (
     workstreamId: string,
+    options?: { readonly alreadySerialized?: boolean },
   ) => Effect.Effect<void, unknown>;
 }
 
@@ -520,6 +524,11 @@ export interface ReviewGateLifecycleCoordinatorCallbacks {
   readonly retireResolvedVerificationsForSource: (
     sourceAgentId: string,
   ) => Effect.Effect<void, unknown>;
+  readonly trySerializeWorkstreamCompletion: <A, E, R>(
+    retryKey: string,
+    effect: Effect.Effect<A, E, R>,
+    retry: Effect.Effect<void, unknown>,
+  ) => Effect.Effect<boolean, E, R>;
   readonly githubRateLimitSymptomOwnership?: GitHubRateLimitSymptomOwnershipPort;
 }
 
@@ -704,17 +713,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     };
   });
 
-  const retireMergedPullRequest = Effect.fnUntraced(function* (pullRequestId: string) {
-    const known = namespace.state.pullRequests[pullRequestId];
-    if (!known || known.status !== 'merged') return;
-    if (
-      namespace.state.workstreams[known.workstreamId]?.status === 'complete' &&
-      hasMergedRetirementSummary(namespace.state, pullRequestId)
-    ) {
-      yield* callbacks.releaseInboxWake();
-      return;
-    }
-    const ownerRetirement = yield* stopMergedPullRequestIdleWorker(known);
+  const retireMergedPullRequestDisposition = Effect.fnUntraced(function* (
+    pullRequestId: string,
+    ownerRetirement: MergedRetirementProjection,
+  ) {
     const pullRequest = namespace.state.pullRequests[pullRequestId];
     if (!pullRequest || pullRequest.status !== 'merged') return;
     const timestamp = yield* nowIso;
@@ -793,13 +795,43 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     yield* callbacks.releaseInboxWake();
   });
 
-  const handlePullRequestObservation = Effect.fnUntraced(function* (event: {
-    readonly pullRequestId: string;
-    readonly expectedHeadSha?: string;
-    readonly observation: PullRequestObservation;
-    readonly discussion?: PullRequestDiscussionSnapshot;
-    readonly complete?: boolean;
-  }) {
+  const retireMergedPullRequest: (
+    pullRequestId: string,
+    completionAdmission: WorkstreamCompletionAdmission,
+  ) => Effect.Effect<void, unknown> = Effect.fnUntraced(
+    function* (pullRequestId, completionAdmission) {
+      const known = namespace.state.pullRequests[pullRequestId];
+      if (!known || known.status !== 'merged') return;
+      if (
+        namespace.state.workstreams[known.workstreamId]?.status === 'complete' &&
+        hasMergedRetirementSummary(namespace.state, pullRequestId)
+      ) {
+        yield* callbacks.releaseInboxWake();
+        return;
+      }
+      const ownerRetirement = yield* stopMergedPullRequestIdleWorker(known);
+      if (completionAdmission === 'already_serialized')
+        return yield* retireMergedPullRequestDisposition(pullRequestId, ownerRetirement);
+      // A miss is queued once by manager/workstream/pull-request and drained
+      // after the unrelated lifecycle holder settles; watcher callbacks never wait.
+      yield* callbacks.trySerializeWorkstreamCompletion(
+        `${known.workstreamId}/${known.id}`,
+        retireMergedPullRequestDisposition(pullRequestId, ownerRetirement),
+        semaphore.withPermit(retireMergedPullRequest(pullRequestId, 'already_serialized')),
+      );
+    },
+  );
+
+  const handlePullRequestObservation = Effect.fnUntraced(function* (
+    event: {
+      readonly pullRequestId: string;
+      readonly expectedHeadSha?: string;
+      readonly observation: PullRequestObservation;
+      readonly discussion?: PullRequestDiscussionSnapshot;
+      readonly complete?: boolean;
+    },
+    completionAdmission: 'already_serialized' | 'try_serialize',
+  ) {
     const known = namespace.state.pullRequests[event.pullRequestId];
     if (!known || !watcherEventMatchesAssociation(known, event.expectedHeadSha)) return;
     // Older watcher callbacks are complete by construction. The explicit false
@@ -962,7 +994,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     const merged = nextObservation.status === 'merged';
     const terminal =
       merged || transitions.some((transition) => transition.type === 'closed_unmerged');
-    if (merged) yield* retireMergedPullRequest(event.pullRequestId);
+    if (merged) yield* retireMergedPullRequest(event.pullRequestId, completionAdmission);
     if (transitions.length > 0) yield* callbacks.releaseInboxWake();
     return terminal
       ? ({
@@ -1044,6 +1076,60 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     if (outcome.enqueued) yield* callbacks.releaseInboxWake();
   });
 
+  const handleWatcherThrottleDiagnostic = Effect.fnUntraced(function* (
+    event: GitHubWatcherThrottleDiagnostic,
+  ) {
+    if (event.status !== 'rate_metadata_unavailable') {
+      if (namespace.state.githubRateMetadataUnavailableAt === undefined) {
+        yield* callbacks.refresh();
+        return;
+      }
+      const timestamp = yield* nowIso;
+      const changed = yield* namespace.store.mutate((state) => {
+        if (state.githubRateMetadataUnavailableAt === undefined)
+          return Effect.succeed([false, state] as const);
+        const {
+          githubRateMetadataUnavailableAt: _githubRateMetadataUnavailableAt,
+          ...withoutWarning
+        } = state;
+        return Effect.succeed([true, withoutWarning] as const);
+      });
+      if (!changed) return;
+      yield* callbacks.appendEventSafely(
+        makeEvent(
+          'github_rate_metadata_recovered',
+          'GitHub.com watcher rate metadata recovered; deferred polling may resume.',
+          timestamp,
+        ),
+      );
+      yield* callbacks.refresh();
+      return;
+    }
+    if (namespace.state.githubRateMetadataUnavailableAt !== undefined) return;
+    const timestamp = yield* nowIso;
+    const attention = makeEvent(
+      'github_rate_metadata_unavailable',
+      'GitHub.com watcher rate metadata is unavailable or invalid; polling is deferred until bounded metadata recovers.',
+      timestamp,
+    );
+    const changed = yield* namespace.store.mutate((state) => {
+      if (state.githubRateMetadataUnavailableAt !== undefined)
+        return Effect.succeed([false, state] as const);
+      return Effect.succeed([
+        true,
+        {
+          ...state,
+          githubRateMetadataUnavailableAt: timestamp,
+          inbox: [...state.inbox, attention],
+        },
+      ] as const);
+    });
+    if (!changed) return;
+    yield* callbacks.appendEventSafely(attention);
+    yield* callbacks.refresh();
+    yield* callbacks.releaseInboxWake();
+  });
+
   const handlePullRequestHeadDivergence = Effect.fnUntraced(function* (event: {
     readonly pullRequestId: string;
     readonly expectedHeadSha: string;
@@ -1092,6 +1178,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
 
   const retryMergedRetirementForWorkstreamUnlocked = Effect.fnUntraced(function* (
     workstreamId: string,
+    completionAdmission: 'already_serialized' | 'try_serialize',
   ) {
     const pullRequestIds = Object.values(namespace.state.pullRequests)
       .filter(
@@ -1099,30 +1186,41 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           pullRequest.status === 'merged' && pullRequest.workstreamId === workstreamId,
       )
       .map((pullRequest) => pullRequest.id);
-    for (const pullRequestId of pullRequestIds) yield* retireMergedPullRequest(pullRequestId);
+    for (const pullRequestId of pullRequestIds)
+      yield* retireMergedPullRequest(pullRequestId, completionAdmission);
   });
 
   const runTerminalObservationFollowUp = Effect.fnUntraced(function* (
     followUp: TerminalObservationFollowUp | undefined,
+    completionAdmission: 'already_serialized' | 'try_serialize',
   ) {
     if (!followUp) return;
     yield* callbacks.retireResolvedVerificationsForSource(followUp.sourceAgentId);
     if (followUp.mergedWorkstreamId)
       yield* semaphore.withPermit(
-        retryMergedRetirementForWorkstreamUnlocked(followUp.mergedWorkstreamId),
+        retryMergedRetirementForWorkstreamUnlocked(
+          followUp.mergedWorkstreamId,
+          completionAdmission,
+        ),
       );
   });
 
-  const observePullRequest = (event: Parameters<GitHubWatcherCallbacks['onObservation']>[0]) =>
+  const observePullRequest = (
+    event: Parameters<GitHubWatcherCallbacks['onObservation']>[0],
+    completionAdmission: 'already_serialized' | 'try_serialize',
+  ) =>
     semaphore
-      .withPermit(handlePullRequestObservation(event))
-      .pipe(Effect.flatMap(runTerminalObservationFollowUp));
+      .withPermit(handlePullRequestObservation(event, completionAdmission))
+      .pipe(
+        Effect.flatMap((followUp) => runTerminalObservationFollowUp(followUp, completionAdmission)),
+      );
 
   const watcherCallbacks: GitHubWatcherCallbacks = {
     cwd: () => namespace.state.repo.primaryCheckout,
     onFailure: (event) => semaphore.withPermit(handlePullRequestWatcherFailure(event)),
     onHeadDivergence: (event) => semaphore.withPermit(handlePullRequestHeadDivergence(event)),
-    onObservation: observePullRequest,
+    onObservation: (event) => observePullRequest(event, 'try_serialize'),
+    onThrottleDiagnostic: (event) => semaphore.withPermit(handleWatcherThrottleDiagnostic(event)),
     persistedAssociations: () =>
       Object.values(namespace.state.pullRequests).filter(
         (pullRequest) => pullRequest.status === 'open',
@@ -1131,18 +1229,21 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
 
   const observePublishedTerminal: ReviewGateLifecycleCoordinatorShape['observePublishedTerminal'] =
     (event) =>
-      observePullRequest({
-        complete: false,
-        expectedHeadSha: event.expectedHeadSha,
-        observation: {
-          ci: 'unknown',
-          mergeable: 'unknown',
-          number: event.number,
-          reviewDecision: 'unknown',
-          status: event.status,
+      observePullRequest(
+        {
+          complete: false,
+          expectedHeadSha: event.expectedHeadSha,
+          observation: {
+            ci: 'unknown',
+            mergeable: 'unknown',
+            number: event.number,
+            reviewDecision: 'unknown',
+            status: event.status,
+          },
+          pullRequestId: event.pullRequestId,
         },
-        pullRequestId: event.pullRequestId,
-      });
+        'already_serialized',
+      );
 
   const retirePersistedMergedPullRequests: ReviewGateLifecycleCoordinatorShape['retirePersistedMergedPullRequests'] =
     () =>
@@ -1151,7 +1252,8 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           const pullRequestIds = Object.values(namespace.state.pullRequests)
             .filter((pullRequest) => pullRequest.status === 'merged')
             .map((pullRequest) => pullRequest.id);
-          for (const pullRequestId of pullRequestIds) yield* retireMergedPullRequest(pullRequestId);
+          for (const pullRequestId of pullRequestIds)
+            yield* retireMergedPullRequest(pullRequestId, 'already_serialized');
         }),
       );
 
@@ -1167,13 +1269,19 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
                 pullRequest.workstreamId === workstreamId,
             )
             .map((pullRequest) => pullRequest.id);
-          for (const pullRequestId of pullRequestIds) yield* retireMergedPullRequest(pullRequestId);
+          for (const pullRequestId of pullRequestIds)
+            yield* retireMergedPullRequest(pullRequestId, 'try_serialize');
         }),
       );
 
   const retryMergedRetirementForWorkstream: ReviewGateLifecycleCoordinatorShape['retryMergedRetirementForWorkstream'] =
-    (workstreamId) =>
-      semaphore.withPermit(retryMergedRetirementForWorkstreamUnlocked(workstreamId));
+    (workstreamId, options) =>
+      semaphore.withPermit(
+        retryMergedRetirementForWorkstreamUnlocked(
+          workstreamId,
+          options?.alreadySerialized === true ? 'already_serialized' : 'try_serialize',
+        ),
+      );
 
   return ReviewGateLifecycleCoordinator.of({
     observePublishedTerminal,

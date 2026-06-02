@@ -7,6 +7,7 @@ import {
   bridgeMonitorLines,
   compactWidgetLines,
   dashboardLines,
+  githubRateStatusToken,
   makeManagerPresentation,
 } from './index.ts';
 
@@ -329,6 +330,38 @@ describe('pardes dashboard', () => {
 
     expect(lines[0]).toBe('pardes manager- · [░░░░░░░░░░] ctx … · 1 running · 0 idle · inbox 0');
     expect(lines[1]).toBe('────────────────────────────────────────────────────────────────');
+  });
+
+  test('renders bounded GitHub budget throttle tokens in the compact widget and manager status', () => {
+    const state = fixtureState();
+    const paused = { effectiveRemaining: 400, throttle: 'paused' as const };
+    expect(githubRateStatusToken({ effectiveRemaining: 3_000, throttle: 'normal' })).toBe(
+      'GH:3000',
+    );
+    expect(githubRateStatusToken({ effectiveRemaining: 1_500, throttle: 'moderate' })).toBe(
+      'GH:1500~',
+    );
+    expect(githubRateStatusToken({ effectiveRemaining: 900, throttle: 'aggressive' })).toBe(
+      'GH:900!',
+    );
+    expect(githubRateStatusToken(paused)).toBe('GH:400⏸');
+    expect(githubRateStatusToken({ throttle: 'unavailable' })).toBe('GH:…?');
+    expect(compactWidgetLines(state, new Map(), 71_000, paused)[0]).toContain('· GH:400⏸ ·');
+
+    let status = '';
+    const ctx = {
+      hasUI: true,
+      ui: {
+        setStatus: (_key: string, value: string) => {
+          status = value;
+        },
+        setTitle: () => {},
+        setWidget: () => {},
+        theme: { fg: (_color: string, value: string) => value },
+      },
+    } as unknown as ExtensionContext;
+    updateDashboard(ctx, state, new Map(), undefined, paused);
+    expect(status).toContain('GH:400⏸');
   });
 
   test('renders known manager Pi context usage inline and resamples recalibration on widget rerender', () => {

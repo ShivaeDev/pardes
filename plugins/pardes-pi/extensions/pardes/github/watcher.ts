@@ -18,6 +18,14 @@ import {
   GitHubWatcherTimeoutError,
 } from './errors.ts';
 import {
+  GITHUB_HOSTED_METADATA_HOSTNAME,
+  type GitHubHostedMetadataShape,
+  type GitHubRepositoryIdentity,
+  type GitHubWatcherRateLimitStatus,
+  type GitHubWatcherThrottleTier,
+  makeGitHubHostedMetadataAdapter,
+} from './hosted-metadata.ts';
+import {
   GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH,
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
@@ -33,11 +41,12 @@ import {
   makeExecFileGitHubCommandRunner,
   makeGitHubCli,
 } from './transport.ts';
+import { classifyGitHubWatcherFailure } from './watcher-diagnostics.ts';
 
 export const DEFAULT_GITHUB_WATCHER_CADENCE: Duration.Input = '15 seconds';
 export const DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT: Duration.Input = '10 seconds';
 const WATCHER_JSON_FIELDS = 'number,headRefOid,state,mergeable,reviewDecision,statusCheckRollup';
-const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}}}`;
+const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}} rateLimit{cost limit remaining resetAt}}`;
 
 export type PullRequestWatcherTransition =
   | 'ci_failed'
@@ -116,6 +125,12 @@ export interface PullRequestWatcherHeadDivergence {
   readonly observedHeadSha: string;
 }
 
+/** Content-free adjacent diagnostic: unavailable metadata warns once durably; near-exhaustion stays quiet. */
+export interface GitHubWatcherThrottleDiagnostic {
+  readonly status: 'rate_metadata_unavailable' | 'rate_metadata_recovered' | 'proactive_throttle';
+  readonly tier?: GitHubWatcherThrottleTier;
+}
+
 export interface GitHubWatcherCallbacks {
   readonly cwd: () => string;
   readonly persistedAssociations: () => ReadonlyArray<PullRequestWatcherAssociation>;
@@ -123,6 +138,9 @@ export interface GitHubWatcherCallbacks {
   readonly onFailure: (event: PullRequestWatcherFailure) => Effect.Effect<void, unknown>;
   readonly onHeadDivergence: (
     event: PullRequestWatcherHeadDivergence,
+  ) => Effect.Effect<void, unknown>;
+  readonly onThrottleDiagnostic: (
+    event: GitHubWatcherThrottleDiagnostic,
   ) => Effect.Effect<void, unknown>;
 }
 
@@ -315,9 +333,12 @@ export function makeGitHubWatcherService(
     readonly runner?: GitHubCommandRunnerShape;
     readonly cadence?: Duration.Input;
     readonly commandTimeout?: Duration.Input;
+    readonly hostedMetadata?: GitHubHostedMetadataShape;
   } = {},
 ): GitHubWatcherShape {
-  const github = makeGitHubCli(options.runner ?? makeExecFileGitHubCommandRunner());
+  const runner = options.runner ?? makeExecFileGitHubCommandRunner();
+  const github = makeGitHubCli(runner);
+  const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
   const commandTimeout = options.commandTimeout ?? DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT;
   const run = (cwd: string, args: ReadonlyArray<string>) =>
@@ -331,18 +352,52 @@ export function makeGitHubWatcherService(
       ),
     );
   let active: ActiveWatcher | undefined;
+  let rateMetadataCallbacks: GitHubWatcherCallbacks | undefined;
+  let rateMetadataStatus: string | undefined;
+  let nextAssociationOffset = 0;
   const pollSemaphore = Semaphore.makeUnsafe(1);
+
+  const notifyThrottleDiagnostic = (
+    callbacks: GitHubWatcherCallbacks,
+    reservation: GitHubWatcherRateLimitStatus,
+  ) => {
+    if (rateMetadataCallbacks !== callbacks) {
+      rateMetadataCallbacks = callbacks;
+      rateMetadataStatus = undefined;
+    }
+    const diagnostic: GitHubWatcherThrottleDiagnostic =
+      reservation.status === 'deferred'
+        ? reservation.reason === 'rate_metadata_unavailable'
+          ? { status: 'rate_metadata_unavailable', tier: reservation.tier }
+          : { status: 'proactive_throttle', tier: reservation.tier }
+        : { status: 'rate_metadata_recovered', tier: reservation.tier };
+    const key = `${diagnostic.status}:${diagnostic.tier ?? 'unknown'}`;
+    if (rateMetadataStatus === key) return Effect.void;
+    return callbacks.onThrottleDiagnostic(diagnostic).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          rateMetadataStatus = key;
+        }),
+      ),
+    );
+  };
 
   const inspect = Effect.fnUntraced(function* (
     cwd: string,
     rawAssociation: PullRequestWatcherAssociation,
+    route: GitHubRepositoryIdentity,
+    watcherCliReservationId: string,
   ) {
     const association = yield* Schema.decodeUnknownEffect(PullRequestAssociationSchema)(
       rawAssociation,
     ).pipe(Effect.mapError(watcherInputError));
     const identifier =
       association.number === undefined ? association.url : String(association.number);
-    const viewed = yield* run(cwd, ['pr', 'view', identifier, '--json', WATCHER_JSON_FIELDS]);
+    const viewed = yield* hostedMetadata.accountReservedOpaqueRequest(
+      'graphql',
+      watcherCliReservationId,
+      run(cwd, ['pr', 'view', identifier, '--json', WATCHER_JSON_FIELDS, '--repo', route.slug]),
+    );
     const decoded = yield* decodeGitHubJson(
       'watch pull request',
       GitHubPullRequestObservationSchema,
@@ -375,30 +430,46 @@ export function makeGitHubWatcherService(
     };
   });
 
-  const inspectDiscussion = Effect.fnUntraced(function* (cwd: string, number: number) {
+  const inspectDiscussion = Effect.fnUntraced(function* (
+    cwd: string,
+    number: number,
+    graphqlReservationId: string,
+    route: GitHubRepositoryIdentity,
+    watcherRestReservationId: string,
+  ) {
+    yield* hostedMetadata.launchGraphQLRequest(graphqlReservationId);
     const discussionResponse = yield* run(cwd, [
       'api',
       'graphql',
+      '--hostname',
+      GITHUB_HOSTED_METADATA_HOSTNAME,
       '--raw-field',
       `query=${DISCUSSION_GRAPHQL_QUERY}`,
       '--field',
-      'owner={owner}',
+      `owner=${route.owner}`,
       '--field',
-      'repo={repo}',
+      `repo=${route.repo}`,
       '--field',
       `number=${number}`,
       '--field',
       `limit=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}`,
     ]);
-    const discussion = yield* decodeGitHubJson(
+    const discussion = yield* hostedMetadata.decodeGraphQL(
       'watch pull request discussion',
       GitHubPullRequestDiscussionGraphQLSchema,
       discussionResponse.stdout,
+      graphqlReservationId,
     );
-    const inlineResponse = yield* run(cwd, [
-      'api',
-      `repos/{owner}/{repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
-    ]);
+    const inlineResponse = yield* hostedMetadata.accountReservedOpaqueRequest(
+      'rest',
+      watcherRestReservationId,
+      run(cwd, [
+        'api',
+        `repos/${route.owner}/${route.repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
+        '--hostname',
+        GITHUB_HOSTED_METADATA_HOSTNAME,
+      ]),
+    );
     const inlineComments = yield* decodeGitHubJson(
       'watch inline pull request comments',
       GitHubInlineReviewCommentsSchema,
@@ -451,73 +522,169 @@ export function makeGitHubWatcherService(
     } satisfies PullRequestDiscussionSnapshot;
   });
 
+  const metadataUnavailable = {
+    reason: 'rate_metadata_unavailable',
+    status: 'deferred',
+    tier: 'unavailable',
+  } as const;
+
   const pollUnlocked = (callbacks: GitHubWatcherCallbacks) =>
-    Effect.suspend(() =>
-      Effect.forEach(
-        callbacks.persistedAssociations(),
-        (pullRequest) => {
+    Effect.suspend(() => {
+      const associations = callbacks.persistedAssociations();
+      const offset = associations.length === 0 ? 0 : nextAssociationOffset % associations.length;
+      const indexed = associations.map((pullRequest, index) => [index, pullRequest] as const);
+      const ordered = [...indexed.slice(offset), ...indexed.slice(0, offset)];
+      let pollingDeferred = false;
+      return Effect.forEach(
+        ordered,
+        ([associationIndex, pullRequest]) => {
+          if (pollingDeferred) return Effect.void;
           const cwd = callbacks.cwd();
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
-          return inspect(cwd, pullRequest).pipe(
+          const failure = (error: GitHubWatcherError) =>
+            callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error });
+          const watchedFailure = (error: GitHubWatcherError) => {
+            if (classifyGitHubWatcherFailure(error).kind !== 'rate_limit_likely')
+              return failure(error);
+            pollingDeferred = true;
+            return hostedMetadata
+              .deferWatcherForRateLimitSymptom()
+              .pipe(
+                Effect.flatMap((reservation) => notifyThrottleDiagnostic(callbacks, reservation)),
+              );
+          };
+          const operationalFailure = (error: GitHubWatcherError) =>
+            notifyThrottleDiagnostic(callbacks, metadataUnavailable).pipe(
+              Effect.andThen(failure(error)),
+            );
+          return Schema.decodeUnknownEffect(PullRequestAssociationSchema)(pullRequest).pipe(
+            Effect.mapError(watcherInputError),
             Effect.matchEffect({
-              onFailure: (error) =>
-                callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error }),
-              onSuccess: (inspected) => {
-                if (inspected._tag === 'HeadDivergence') {
-                  const divergence = callbacks.onHeadDivergence({
-                    expectedHeadSha: inspected.expectedHeadSha,
-                    observedHeadSha: inspected.observedHeadSha,
-                    pullRequestId: pullRequest.id,
-                  });
-                  return inspected.terminalObservation === undefined
-                    ? divergence
-                    : divergence.pipe(
-                        Effect.andThen(
-                          callbacks.onObservation({
-                            pullRequestId: pullRequest.id,
-                            ...generation,
-                            complete: false,
-                            observation: inspected.terminalObservation,
+              onFailure: failure,
+              onSuccess: (association) =>
+                hostedMetadata.fixedRoute(cwd, [association.url]).pipe(
+                  Effect.matchEffect({
+                    onFailure: operationalFailure,
+                    onSuccess: (route) =>
+                      hostedMetadata.reserveWatcherPoll(cwd, 1, route).pipe(
+                        Effect.tap((reservation) =>
+                          Effect.sync(() => {
+                            if (reservation.status === 'deferred') {
+                              pollingDeferred = true;
+                              return;
+                            }
+                            nextAssociationOffset =
+                              associations.length === 0
+                                ? 0
+                                : (associationIndex + 1) % associations.length;
                           }),
                         ),
-                      );
-                }
-                return callbacks
-                  .onObservation({
-                    pullRequestId: pullRequest.id,
-                    ...generation,
-                    complete: false,
-                    observation: inspected.observation,
-                  })
-                  .pipe(
-                    Effect.andThen(
-                      inspectDiscussion(cwd, inspected.number).pipe(
                         Effect.matchEffect({
-                          onFailure: (error) =>
-                            callbacks.onFailure({
-                              pullRequestId: pullRequest.id,
-                              ...generation,
-                              error,
-                            }),
-                          onSuccess: (discussion) =>
-                            callbacks.onObservation({
-                              pullRequestId: pullRequest.id,
-                              ...generation,
-                              complete: true,
-                              discussion,
-                              observation: inspected.observation,
-                            }),
+                          onFailure: operationalFailure,
+                          onSuccess: (reservation) =>
+                            notifyThrottleDiagnostic(callbacks, reservation).pipe(
+                              Effect.andThen(
+                                Effect.suspend(() => {
+                                  if (
+                                    reservation.status === 'deferred' ||
+                                    reservation.graphqlReservationId === undefined ||
+                                    reservation.watcherCliReservationId === undefined ||
+                                    reservation.watcherRestReservationId === undefined
+                                  )
+                                    return Effect.void;
+                                  const reservationId = reservation.graphqlReservationId;
+                                  const watcherRestReservationId =
+                                    reservation.watcherRestReservationId;
+                                  return inspect(
+                                    cwd,
+                                    pullRequest,
+                                    route,
+                                    reservation.watcherCliReservationId,
+                                  ).pipe(
+                                    Effect.matchEffect({
+                                      onFailure: watchedFailure,
+                                      onSuccess: (inspected) => {
+                                        if (inspected._tag === 'HeadDivergence') {
+                                          const divergence = callbacks.onHeadDivergence({
+                                            expectedHeadSha: inspected.expectedHeadSha,
+                                            observedHeadSha: inspected.observedHeadSha,
+                                            pullRequestId: pullRequest.id,
+                                          });
+                                          return divergence.pipe(
+                                            Effect.andThen(
+                                              inspected.terminalObservation === undefined
+                                                ? Effect.void
+                                                : callbacks.onObservation({
+                                                    pullRequestId: pullRequest.id,
+                                                    ...generation,
+                                                    complete: false,
+                                                    observation: inspected.terminalObservation,
+                                                  }),
+                                            ),
+                                          );
+                                        }
+                                        return callbacks
+                                          .onObservation({
+                                            pullRequestId: pullRequest.id,
+                                            ...generation,
+                                            complete: false,
+                                            observation: inspected.observation,
+                                          })
+                                          .pipe(
+                                            Effect.andThen(
+                                              inspectDiscussion(
+                                                cwd,
+                                                inspected.number,
+                                                reservationId,
+                                                route,
+                                                watcherRestReservationId,
+                                              ).pipe(
+                                                Effect.matchEffect({
+                                                  onFailure: watchedFailure,
+                                                  onSuccess: (discussion) =>
+                                                    callbacks.onObservation({
+                                                      pullRequestId: pullRequest.id,
+                                                      ...generation,
+                                                      complete: true,
+                                                      discussion,
+                                                      observation: inspected.observation,
+                                                    }),
+                                                }),
+                                              ),
+                                            ),
+                                          );
+                                      },
+                                    }),
+                                  );
+                                }),
+                              ),
+                              Effect.ensuring(
+                                reservation.status === 'ready'
+                                  ? Effect.all(
+                                      [
+                                        reservation.graphqlReservationId,
+                                        reservation.watcherCliReservationId,
+                                        reservation.watcherRestReservationId,
+                                      ].flatMap((reservationId) =>
+                                        reservationId === undefined
+                                          ? []
+                                          : [hostedMetadata.finalizeGraphQLRequest(reservationId)],
+                                      ),
+                                      { discard: true },
+                                    )
+                                  : Effect.void,
+                              ),
+                            ),
                         }),
                       ),
-                    ),
-                  );
-              },
+                  }),
+                ),
             }),
           );
         },
         { discard: true },
-      ),
-    );
+      );
+    });
 
   const poll: GitHubWatcherShape['poll'] = (callbacks) =>
     pollSemaphore.withPermit(pollUnlocked(callbacks));
@@ -525,6 +692,8 @@ export function makeGitHubWatcherService(
   const stop: GitHubWatcherShape['stop'] = Effect.fnUntraced(function* () {
     const current = active;
     active = undefined;
+    rateMetadataCallbacks = undefined;
+    rateMetadataStatus = undefined;
     if (current) yield* Scope.close(current.scope, Exit.void);
   });
 

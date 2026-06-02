@@ -41,7 +41,56 @@ export const GitHubDiscussionPaginationGapsSchema = Schema.Array(
 ).check(Schema.isMaxLength(3));
 
 const NonEmptyStringSchema = Schema.String.check(Schema.isMinLength(1));
+const NonNegativeIntegerSchema = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(0),
+);
 const PositiveIntegerSchema = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
+const GitHubGraphQLResetAtSchema = Schema.String.check(
+  Schema.isMaxLength(32),
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/),
+  Schema.makeFilter(
+    (resetAt) => {
+      const timestamp = Date.parse(resetAt);
+      return (
+        Number.isFinite(timestamp) &&
+        new Date(timestamp).toISOString() === resetAt.replace(/Z$/, '.000Z')
+      );
+    },
+    { description: 'a valid UTC reset timestamp' },
+  ),
+);
+const GitHubRestResetEpochSecondsSchema = NonNegativeIntegerSchema.check(
+  Schema.isLessThanOrEqualTo(10_000_000_000),
+);
+
+export const GitHubGraphQLRateLimitSchema = Schema.Struct({
+  cost: NonNegativeIntegerSchema,
+  limit: NonNegativeIntegerSchema,
+  remaining: NonNegativeIntegerSchema,
+  resetAt: GitHubGraphQLResetAtSchema,
+}).check(
+  Schema.makeFilter(({ limit, remaining }) => remaining <= limit, {
+    description: 'remaining token budget no greater than its limit',
+  }),
+);
+export type GitHubGraphQLRateLimit = typeof GitHubGraphQLRateLimitSchema.Type;
+const GitHubRestRateLimitResourceSchema = Schema.Struct({
+  limit: NonNegativeIntegerSchema,
+  remaining: NonNegativeIntegerSchema,
+  reset: GitHubRestResetEpochSecondsSchema,
+}).check(
+  Schema.makeFilter(({ limit, remaining }) => remaining <= limit, {
+    description: 'remaining token budget no greater than its limit',
+  }),
+);
+/** Narrow fallback for paths whose selected JSON cannot carry GraphQL `rateLimit`. */
+export const GitHubRateLimitFallbackSchema = Schema.Struct({
+  resources: Schema.Struct({
+    core: GitHubRestRateLimitResourceSchema,
+    graphql: GitHubRestRateLimitResourceSchema,
+  }),
+});
 const BoundedDiscussionBodySchema = Schema.String.check(
   Schema.isMaxLength(GITHUB_DISCUSSION_BODY_MAX_LENGTH),
 );
@@ -66,6 +115,23 @@ export const PullRequestUrlSchema = NonEmptyStringSchema.check(
   Schema.isMaxLength(PULL_REQUEST_URL_MAX_LENGTH),
   Schema.isPattern(/^https?:\/\/[^\s]+$/),
 );
+
+function pullRequestUrlNumber(value: string): number | undefined {
+  if (!URL.canParse(value)) return undefined;
+  const parts = new URL(value).pathname.split('/').filter(Boolean);
+  const rawNumber = parts.length === 4 && parts[2] === 'pull' ? parts[3] : undefined;
+  if (rawNumber === undefined || !/^[1-9]\d*$/.test(rawNumber)) return undefined;
+  const number = Number(rawNumber);
+  return Number.isSafeInteger(number) ? number : undefined;
+}
+
+function pullRequestUrlNumberAgrees(value: { readonly number?: number; readonly url: string }) {
+  return value.number === undefined || pullRequestUrlNumber(value.url) === value.number;
+}
+
+const PullRequestUrlNumberAgrees = Schema.makeFilter(pullRequestUrlNumberAgrees, {
+  description: 'pull-request URL number agrees with decoded number',
+});
 
 const FullCommitShaSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40,64}$/));
 const OpaquePublishedReviewBranchPattern = new RegExp(OPAQUE_PUBLISHED_REVIEW_BRANCH_PATTERN);
@@ -193,7 +259,7 @@ export const GitHubPublicationMetadataSchema = Schema.Struct({
   number: PositiveIntegerSchema,
   state: GitHubPullRequestStateSchema,
   url: PullRequestUrlSchema,
-});
+}).check(PullRequestUrlNumberAgrees);
 
 export const GitHubPushedHeadMetadataSchema = Schema.Struct({
   headRefName: PullRequestBranchSchema,
@@ -206,7 +272,7 @@ export const PullRequestAssociationSchema = Schema.Struct({
   lastPushedHeadSha: Schema.optionalKey(FullCommitShaSchema),
   number: Schema.optionalKey(PositiveIntegerSchema),
   url: PullRequestUrlSchema,
-});
+}).check(PullRequestUrlNumberAgrees);
 
 /** Opt-in integration-health association. Persisted review branches remain argv-safe metadata. */
 export const GitHubIntegrationHealthAssociationSchema = Schema.Struct({
@@ -216,10 +282,11 @@ export const GitHubIntegrationHealthAssociationSchema = Schema.Struct({
   number: Schema.optionalKey(PositiveIntegerSchema),
   url: PullRequestUrlSchema,
   watcherFailure: Schema.optionalKey(GitHubWatcherFailureDiagnosticSchema),
-});
+}).check(PullRequestUrlNumberAgrees);
 
 export const GitHubAdvertisedDefaultBranchGraphQLSchema = Schema.Struct({
   data: Schema.Struct({
+    rateLimit: GitHubGraphQLRateLimitSchema,
     repository: Schema.Struct({
       defaultBranchRef: Schema.Union([
         Schema.Struct({
@@ -261,6 +328,7 @@ export const GitHubHostedCheckContextSchema = Schema.Union([
 export type GitHubHostedCheckContext = typeof GitHubHostedCheckContextSchema.Type;
 export const GitHubHostedChecksGraphQLSchema = Schema.Struct({
   data: Schema.Struct({
+    rateLimit: GitHubGraphQLRateLimitSchema,
     repository: Schema.Struct({
       object: Schema.Union([
         Schema.Struct({
@@ -346,6 +414,7 @@ const GitHubReviewNodeSchema = Schema.Struct({
 /** Bounded GraphQL response for issue-style PR comments and review submissions. */
 export const GitHubPullRequestDiscussionGraphQLSchema = Schema.Struct({
   data: Schema.Struct({
+    rateLimit: GitHubGraphQLRateLimitSchema,
     repository: Schema.Struct({
       pullRequest: Schema.Struct({
         comments: Schema.Struct({

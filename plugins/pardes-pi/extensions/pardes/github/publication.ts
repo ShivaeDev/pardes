@@ -8,6 +8,12 @@ import {
   GitHubSyncInputError,
 } from './errors.ts';
 import {
+  GITHUB_HOSTED_METADATA_HOSTNAME,
+  type GitHubHostedMetadataShape,
+  type GitHubRepositoryIdentity,
+  makeGitHubHostedMetadataAdapter,
+} from './hosted-metadata.ts';
+import {
   GitHubOpenGateListSchema,
   GitHubPublicationMetadataSchema,
   GitHubPushedHeadMetadataSchema,
@@ -201,6 +207,7 @@ function boundedVerificationOverride(
 export function makeGitHubPublicationService(
   options: {
     readonly runner?: GitHubCommandRunnerShape;
+    readonly hostedMetadata?: GitHubHostedMetadataShape;
     /** Test seam: production callers may only tighten the bounded convergence window. */
     readonly pushedHeadVerificationDelayMillis?: number;
     /** Test seam: production callers may only tighten the bounded convergence window. */
@@ -211,6 +218,12 @@ export function makeGitHubPublicationService(
   const command = (cwd: string, executable: string, args: ReadonlyArray<string>) =>
     runner.run({ args, command: executable, cwd });
   const github = makeGitHubCli(runner);
+  const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
+  const runGitHub = (route: GitHubRepositoryIdentity, cwd: string, args: ReadonlyArray<string>) =>
+    hostedMetadata.accountOpaqueRequest(
+      'graphql',
+      github.run(cwd, [...args, '--repo', route.slug]),
+    );
   const pushedHeadVerificationDelayMillis = boundedVerificationOverride(
     'pushedHeadVerificationDelayMillis',
     options.pushedHeadVerificationDelayMillis,
@@ -224,8 +237,11 @@ export function makeGitHubPublicationService(
     true,
   );
 
-  const verifyPushedHead = Effect.fnUntraced(function* (input: SyncExistingPullRequestInput) {
-    const verified = yield* github.run(input.cwd, [
+  const verifyPushedHead = Effect.fnUntraced(function* (
+    input: SyncExistingPullRequestInput,
+    route: GitHubRepositoryIdentity,
+  ) {
+    const verified = yield* runGitHub(route, input.cwd, [
       'pr',
       'view',
       String(input.pullRequestNumber),
@@ -284,14 +300,27 @@ export function makeGitHubPublicationService(
   });
 
   const githubActor = Effect.fnUntraced(function* (cwd: string) {
-    const login = yield* github.run(cwd, ['api', 'user', '--jq', '.login']).pipe(
-      Effect.map(({ stdout }) => safeGitHubActor(stdout)),
-      Effect.catch(() => Effect.succeed(undefined)),
-    );
+    const login = yield* hostedMetadata
+      .accountOpaqueRequest(
+        'rest',
+        github.run(cwd, [
+          'api',
+          'user',
+          '--hostname',
+          GITHUB_HOSTED_METADATA_HOSTNAME,
+          '--jq',
+          '.login',
+        ]),
+      )
+      .pipe(
+        Effect.map(({ stdout }) => safeGitHubActor(stdout)),
+        Effect.catch(() => Effect.succeed(undefined)),
+      );
     return login ?? (yield* fallbackActor(cwd));
   });
 
   const remoteHeads = Effect.fnUntraced(function* (
+    route: GitHubRepositoryIdentity,
     cwd: string,
     exactBranches: ReadonlyArray<string>,
     descendantRoots: ReadonlyArray<string> = [],
@@ -300,7 +329,12 @@ export function makeGitHubPublicationService(
       ...exactBranches.map((branch) => `refs/heads/${branch}`),
       ...descendantRoots.map((branch) => `refs/heads/${branch}/*`),
     ];
-    const listed = yield* command(cwd, 'git', ['ls-remote', '--heads', 'origin', ...patterns]);
+    const listed = yield* command(cwd, 'git', [
+      'ls-remote',
+      '--heads',
+      route.pushTarget,
+      ...patterns,
+    ]);
     const heads = new Map<string, string>();
     for (const line of listed.stdout.trim().split(/\r?\n/)) {
       if (!line) continue;
@@ -313,8 +347,12 @@ export function makeGitHubPublicationService(
     return heads;
   });
 
-  const remoteBranchHead = Effect.fnUntraced(function* (cwd: string, branch: string) {
-    return (yield* remoteHeads(cwd, [branch])).get(branch);
+  const remoteBranchHead = Effect.fnUntraced(function* (
+    route: GitHubRepositoryIdentity,
+    cwd: string,
+    branch: string,
+  ) {
+    return (yield* remoteHeads(route, cwd, [branch])).get(branch);
   });
 
   const reservationClaimBranch = (ownershipId: string, headBranch: string) => {
@@ -335,6 +373,7 @@ export function makeGitHubPublicationService(
       const input = yield* Schema.decodeUnknownEffect(PublishedReviewBranchCandidatesInputSchema)(
         rawInput,
       ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
+      const route = yield* hostedMetadata.fixedRoute(input.cwd);
       const actor = yield* githubActor(input.cwd);
       const title = publishedBranchSlug(
         input.workstreamTitle,
@@ -352,7 +391,7 @@ export function makeGitHubPublicationService(
         PUBLISHED_BRANCH_DISAMBIGUATOR_MAX_LENGTH,
       );
       const namespaceRoot = `${actor}/pardes`;
-      const namespaceHeads = yield* remoteHeads(input.cwd, [actor, namespaceRoot]);
+      const namespaceHeads = yield* remoteHeads(route, input.cwd, [actor, namespaceRoot]);
       const namespaceRootBlocked = namespaceHeads.has(actor) || namespaceHeads.has(namespaceRoot);
       const preferred = namespaceRootBlocked
         ? `${actor}-pardes-${title}`
@@ -369,9 +408,11 @@ export function makeGitHubPublicationService(
       const input = yield* Schema.decodeUnknownEffect(ReservePublishedReviewBranchInputSchema)(
         rawInput,
       ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
+      const route = yield* hostedMetadata.fixedRoute(input.cwd);
       const claimBranch = reservationClaimBranch(input.ownershipId, input.headBranch);
       const ancestors = branchAncestors(input.headBranch);
       const before = yield* remoteHeads(
+        route,
         input.cwd,
         [...ancestors, input.headBranch, claimBranch],
         [input.headBranch, claimBranch],
@@ -394,11 +435,12 @@ export function makeGitHubPublicationService(
         '--atomic',
         `--force-with-lease=refs/heads/${input.headBranch}:`,
         `--force-with-lease=refs/heads/${claimBranch}:`,
-        'origin',
+        route.pushTarget,
         `${input.headSha}:refs/heads/${input.headBranch}`,
         `${input.headSha}:refs/heads/${claimBranch}`,
       ]).pipe(Effect.exit);
       const after = yield* remoteHeads(
+        route,
         input.cwd,
         [...ancestors, input.headBranch, claimBranch],
         [input.headBranch, claimBranch],
@@ -424,8 +466,9 @@ export function makeGitHubPublicationService(
       const input = yield* Schema.decodeUnknownEffect(ReleasePublishedReviewBranchClaimInputSchema)(
         rawInput,
       ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
+      const route = yield* hostedMetadata.fixedRoute(input.cwd);
       const claimBranch = reservationClaimBranch(input.ownershipId, input.headBranch);
-      const claim = yield* remoteBranchHead(input.cwd, claimBranch);
+      const claim = yield* remoteBranchHead(route, input.cwd, claimBranch);
       if (claim === undefined) return;
       if (claim !== input.headSha)
         return yield* responseError('verify released published review branch ownership claim', {
@@ -436,7 +479,7 @@ export function makeGitHubPublicationService(
       yield* command(input.cwd, 'git', [
         'push',
         `--force-with-lease=refs/heads/${claimBranch}:${input.headSha}`,
-        'origin',
+        route.pushTarget,
         `:refs/heads/${claimBranch}`,
       ]);
     });
@@ -447,7 +490,8 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(SyncExistingPullRequestInputSchema)(
       rawInput,
     ).pipe(Effect.mapError((cause) => new GitHubSyncInputError({ cause })));
-    const viewed = yield* github.run(input.cwd, [
+    const route = yield* hostedMetadata.fixedRoute(input.cwd);
+    const viewed = yield* runGitHub(route, input.cwd, [
       'pr',
       'view',
       String(input.pullRequestNumber),
@@ -475,13 +519,13 @@ export function makeGitHubPublicationService(
     }
     yield* command(input.cwd, 'git', [
       'push',
-      'origin',
+      route.pushTarget,
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
     // `gh pr view` may briefly report the previous hosted OID after the exact
     // remote ref update. Retry only that decoded OID mismatch: identity drift,
     // malformed metadata, and transport failures still fail immediately.
-    yield* retryPushedHeadMetadataLag(verifyPushedHead(input));
+    yield* retryPushedHeadMetadataLag(verifyPushedHead(input, route));
     return { status: 'synced' };
   });
 
@@ -491,6 +535,7 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(PublishPullRequestInputSchema)(rawInput).pipe(
       Effect.mapError((cause) => new GitHubPublicationInputError({ cause })),
     );
+    const route = yield* hostedMetadata.fixedRoute(input.cwd);
     const managedHeadBranch =
       input.legacyExistingPullRequestNumber === undefined &&
       isManagedPublishedReviewBranch(input.headBranch);
@@ -505,7 +550,7 @@ export function makeGitHubPublicationService(
         });
       }
       const claimBranch = reservationClaimBranch(reservation.ownershipId, input.headBranch);
-      const proof = yield* remoteHeads(input.cwd, [input.headBranch, claimBranch]);
+      const proof = yield* remoteHeads(route, input.cwd, [input.headBranch, claimBranch]);
       if (
         proof.get(input.headBranch) !== reservation.claimSha ||
         proof.get(claimBranch) !== reservation.claimSha
@@ -525,7 +570,7 @@ export function makeGitHubPublicationService(
           cause: 'legacy published review branch requires an existing pull-request number',
         });
       }
-      const viewed = yield* github.run(input.cwd, [
+      const viewed = yield* runGitHub(route, input.cwd, [
         'pr',
         'view',
         String(input.legacyExistingPullRequestNumber),
@@ -537,6 +582,7 @@ export function makeGitHubPublicationService(
         GitHubPublicationMetadataSchema,
         viewed.stdout,
       );
+      yield* hostedMetadata.fixedRoute(input.cwd, [pullRequest.url]);
       if (
         pullRequest.number !== input.legacyExistingPullRequestNumber ||
         status(pullRequest.state) !== 'open' ||
@@ -552,11 +598,11 @@ export function makeGitHubPublicationService(
     }
     yield* command(input.cwd, 'git', [
       'push',
-      'origin',
+      route.pushTarget,
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
     if (managedHeadBranch) {
-      const listed = yield* github.run(input.cwd, [
+      const listed = yield* runGitHub(route, input.cwd, [
         'pr',
         'list',
         '--state',
@@ -583,7 +629,7 @@ export function makeGitHubPublicationService(
     }
     const action = existing ? ('updated' as const) : ('created' as const);
     if (existing) {
-      yield* github.run(input.cwd, [
+      yield* runGitHub(route, input.cwd, [
         'pr',
         'edit',
         String(existing.number),
@@ -595,7 +641,7 @@ export function makeGitHubPublicationService(
         input.baseBranch,
       ]);
     } else {
-      yield* github.run(input.cwd, [
+      yield* runGitHub(route, input.cwd, [
         'pr',
         'create',
         '--title',
@@ -610,7 +656,7 @@ export function makeGitHubPublicationService(
     }
     const identifier = existing ? String(existing.number) : input.headBranch;
     const viewPublishedPullRequest = Effect.fnUntraced(function* () {
-      const viewed = yield* github.run(input.cwd, [
+      const viewed = yield* runGitHub(route, input.cwd, [
         'pr',
         'view',
         identifier,
@@ -622,6 +668,7 @@ export function makeGitHubPublicationService(
         GitHubPublicationMetadataSchema,
         viewed.stdout,
       );
+      yield* hostedMetadata.fixedRoute(input.cwd, [pullRequest.url]);
       if (
         (existing !== undefined && pullRequest.number !== existing.number) ||
         pullRequest.headRefName !== input.headBranch ||
@@ -672,7 +719,7 @@ export function makeGitHubPublicationService(
           );
     const pullRequest = yield* verifyPublishedPullRequest;
     if (input.openInBrowser === true)
-      yield* github.run(input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
+      yield* runGitHub(route, input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
     return {
       action,
       baseBranch: pullRequest.baseRefName,

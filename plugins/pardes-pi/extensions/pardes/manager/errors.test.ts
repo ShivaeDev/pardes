@@ -12,6 +12,7 @@ import {
   InboxEventNotFoundError,
   PluginActivationBlockedError,
   renderModelFacingGitHubCommandOperation,
+  WorkstreamCompletionRejectedError,
   WorkstreamNotFoundError,
 } from './errors.ts';
 import { ManagerInputValidationError } from './inputs.ts';
@@ -200,5 +201,13 @@ describe('Pardes error formatting', () => {
     expect(formatPardesError(new WorkstreamNotFoundError({ workstreamId: 'ws-123' }))).toBe(
       'Unknown workstream: ws-123',
     );
+    expect(
+      formatPardesError(
+        new WorkstreamCompletionRejectedError({
+          reason: 'attached child agent-one is not safely idle',
+          workstreamId: 'ws-123',
+        }),
+      ),
+    ).toBe('Cannot complete workstream ws-123: attached child agent-one is not safely idle');
   });
 });

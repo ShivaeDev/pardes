@@ -29,6 +29,7 @@ const GITHUB_METADATA_EVENT_TYPES = new Set([
   'merged',
   'closed_unmerged',
   'watcher_failed',
+  'github_rate_metadata_unavailable',
   'pull_request_head_diverged',
   'discussion_pagination_gap',
 ]);
@@ -71,7 +72,10 @@ function compactText(text: string, limit: number): string {
 
 /** Upstream row selection and field previews bound dynamic data; keep authored wake guidance intact. */
 function projectedWakeContent(lines: ReadonlyArray<string>): string {
-  return lines.join('\n');
+  const content = lines.join('\n');
+  if (content.length > MANAGER_INBOX_WAKE_MAX_CHARS)
+    throw new Error('Manager inbox wake exceeded its structural character bound.');
+  return content;
 }
 
 /** Stable and bounded even if a forward-compatible persisted event id is unexpectedly large. */
@@ -198,37 +202,48 @@ export function renderInboxWakeMessage(release: InboxWakeRelease) {
   const { wake } = release;
   const cursor = compactText(wake.cursor, VISIBLE_CURSOR_MAX_CHARS);
   const coveredInbox = inboxThroughCursor(release.inbox, release.wake.cursor);
-  const visibleInbox = coveredInbox?.slice(0, MANAGER_INBOX_WAKE_MAX_ROWS) ?? [];
-  const omittedCount = Math.max(0, (coveredInbox?.length ?? 0) - visibleInbox.length);
+  const candidateDigestRows =
+    coveredInbox?.slice(0, MANAGER_INBOX_WAKE_MAX_ROWS).map(digestRow) ?? [];
   const queuedSuffixCount =
     coveredInbox === undefined ? 0 : Math.max(0, release.inbox.length - coveredInbox.length);
-  const digestLines =
-    coveredInbox === undefined
-      ? ['- stale cursor: released batch is no longer pending.']
-      : [
-          ...visibleInbox.map(digestRow),
-          ...(omittedCount > 0
-            ? [`- … +${omittedCount} more pending event${omittedCount === 1 ? '' : 's'} omitted.`]
-            : []),
-          ...(queuedSuffixCount > 0
-            ? [
-                `- queued suffix: +${queuedSuffixCount} durable event${queuedSuffixCount === 1 ? '' : 's'} await the next cursor release.`,
-              ]
-            : []),
-        ];
+  const header = compactText(
+    `[Pardes wake ${wake.token}] ${wake.pendingCount} pending through cursor ${cursor}`,
+    HEADER_MAX_CHARS,
+  );
+  const wakeContentLines = (digestCount: number): ReadonlyArray<string> => {
+    const omittedCount = Math.max(0, (coveredInbox?.length ?? 0) - digestCount);
+    const digestLines =
+      coveredInbox === undefined
+        ? ['- stale cursor: released batch is no longer pending.']
+        : [
+            ...candidateDigestRows.slice(0, digestCount),
+            ...(omittedCount > 0
+              ? [`- … +${omittedCount} more pending event${omittedCount === 1 ? '' : 's'} omitted.`]
+              : []),
+            ...(queuedSuffixCount > 0
+              ? [
+                  `- queued suffix: +${queuedSuffixCount} durable event${queuedSuffixCount === 1 ? '' : 's'} await the next cursor release.`,
+                ]
+              : []),
+          ];
+    return [header, ...digestLines, ...FULL_INBOX_HINT_LINES];
+  };
+  let digestCount = 0;
+  for (
+    let nextDigestCount = 1;
+    nextDigestCount <= candidateDigestRows.length;
+    nextDigestCount += 1
+  ) {
+    if (wakeContentLines(nextDigestCount).join('\n').length <= MANAGER_INBOX_WAKE_MAX_CHARS)
+      digestCount = nextDigestCount;
+  }
+  const omittedCount = Math.max(0, (coveredInbox?.length ?? 0) - digestCount);
   return {
-    content: projectedWakeContent([
-      compactText(
-        `[Pardes wake ${wake.token}] ${wake.pendingCount} pending through cursor ${cursor}`,
-        HEADER_MAX_CHARS,
-      ),
-      ...digestLines,
-      ...FULL_INBOX_HINT_LINES,
-    ]),
+    content: projectedWakeContent(wakeContentLines(digestCount)),
     customType: MANAGER_INBOX_WAKE_MESSAGE_TYPE,
     details: {
       cursor: wake.cursor,
-      digestCount: visibleInbox.length,
+      digestCount,
       omittedCount,
       pendingCount: wake.pendingCount,
       queuedSuffixCount,

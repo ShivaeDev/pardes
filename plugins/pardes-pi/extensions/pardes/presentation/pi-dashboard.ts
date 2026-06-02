@@ -23,6 +23,7 @@ import {
 } from './dashboard.ts';
 import { managerContextSummary } from './manager-context.ts';
 import type { DashboardPalette } from './palette.ts';
+import { showPardesRendererConfigOverlay } from './renderer-config.ts';
 import { TUI_TERMINAL_TEXT_LAYOUT } from './terminal-layout.ts';
 
 const WIDGET_KEY = 'pardes-manager';
@@ -110,6 +111,7 @@ function overlayText(
     palette.accent('Commands:'),
     palette.muted('  /pardes start    activate this session'),
     palette.muted('  /pardes stop     deactivate this session'),
+    palette.muted('  /pardes config   configure Pardes-owned tool rows'),
     palette.muted('  /pardes          open this panel'),
     '',
     palette.accent('Tool groups:'),
@@ -133,6 +135,7 @@ export interface ManagerPresentation {
     state: ManagerState | undefined,
     runtimes?: ReadonlyMap<string, WorkerRuntimeSnapshot>,
   ) => 'hidden' | 'shown' | 'unavailable';
+  readonly showConfigOverlay: (ctx: ExtensionContext) => Promise<void>;
   readonly showDashboardOverlay: (
     ctx: ExtensionContext,
     state: ManagerState | undefined,
@@ -181,6 +184,9 @@ export function makeManagerPresentation(): ManagerPresentation {
       ctx.ui.setWidget(BRIDGE_MONITOR_WIDGET_KEY, undefined);
     },
 
+    async showConfigOverlay(ctx) {
+      await showPardesRendererConfigOverlay(ctx);
+    },
     async showDashboardOverlay(ctx, state, runtimes = new Map()) {
       if (!ctx.hasUI) {
         ctx.ui.notify(

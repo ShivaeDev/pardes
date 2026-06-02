@@ -6,7 +6,11 @@ import {
   MANAGER_INPUT_ID_MAX_LENGTH,
   MANAGER_INPUT_ID_PATTERN,
 } from '../manager/index.ts';
-import { type PardesToolCallPreviewField, renderPardesToolCall } from '../presentation/index.ts';
+import {
+  type PardesToolCallPreviewField,
+  renderPardesToolCall,
+  renderPardesToolResult,
+} from '../presentation/index.ts';
 
 export function json(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -18,7 +22,7 @@ export function textResult(text: string, details?: unknown) {
 
 type PardesToolDefinition<TParams extends TSchema, TDetails, TState> = Omit<
   ToolDefinition<TParams, TDetails, TState>,
-  'executionMode' | 'renderCall'
+  'executionMode' | 'renderCall' | 'renderResult' | 'renderShell'
 > & {
   readonly preview: (args: Static<TParams>) => ReadonlyArray<PardesToolCallPreviewField>;
 };
@@ -32,9 +36,20 @@ export function registerPardesTool<TParams extends TSchema, TDetails = unknown, 
   pi.registerTool({
     ...definition,
     executionMode: 'sequential',
-    renderCall(args, theme) {
-      return renderPardesToolCall(theme, definition.name, preview(args));
+    renderCall(args, theme, context) {
+      return renderPardesToolCall(theme, definition.name, preview(args), !context.isPartial);
     },
+    renderResult(result, options, theme, context) {
+      return renderPardesToolResult(
+        theme,
+        definition.name,
+        preview(context.args),
+        result,
+        options,
+        context,
+      );
+    },
+    renderShell: 'self',
   });
 }
 

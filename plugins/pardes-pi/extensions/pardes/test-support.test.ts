@@ -93,6 +93,24 @@ describe('Git fixture test support', () => {
     }
   });
 
+  test('ignores inherited repository-targeting Git environment', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pardes-hostile-repository-git-env-'));
+    const first = join(root, 'first');
+    const second = join(root, 'second');
+    const previousGitDir = process.env.GIT_DIR;
+    try {
+      runGitFixture(root, 'init', '-b', 'main', first);
+      runGitFixture(root, 'init', '-b', 'main', second);
+      process.env.GIT_DIR = join(second, '.git');
+
+      expect(runGitFixture(first, 'rev-parse', '--git-dir')).toBe('.git');
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   test('times out stalled Git commands boundedly with actionable captured diagnostics', () => {
     const timeoutMs = 25;
     const failure = fixtureFailure(() =>

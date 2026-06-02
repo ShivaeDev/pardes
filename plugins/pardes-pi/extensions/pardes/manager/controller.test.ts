@@ -28,6 +28,7 @@ import {
   type GitHubWatcherShape,
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
+  makeGitHubWatcherService,
   type PublishedPullRequest,
   type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
@@ -51,7 +52,8 @@ import {
   type InboxHandoffStart,
   MANAGER_COMPACTION_SAFETY_EXPIRY_MS,
   type ManagerCompactionSafetyScheduler,
-  ManagerController,
+  type ManagerControllerOptions,
+  ManagerController as ProductionManagerController,
 } from './controller.ts';
 import { currentVerificationAttempt, type PullRequestObservation } from './domain.ts';
 import { AgentNotFoundError } from './errors.ts';
@@ -60,6 +62,21 @@ import { ManagerInputValidationError } from './inputs.ts';
 
 const temporaryDirectories: string[] = [];
 const originalStateDir = process.env.PARDES_PI_STATE_DIR;
+const githubWatcherFixtures: GitHubWatcherShape[] = [];
+
+class ManagerController extends ProductionManagerController {
+  constructor(pi: ExtensionAPI, options: ManagerControllerOptions = {}) {
+    const githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
+    githubWatcherFixtures.push(githubWatcher);
+    super(pi, { ...options, githubWatcher });
+  }
+}
+
+async function stopGithubWatcherFixtures(): Promise<void> {
+  for (const watcher of githubWatcherFixtures.splice(0).reverse())
+    await Effect.runPromise(watcher.stop());
+}
+
 type MutableWorktreeLease = { -readonly [Key in keyof WorktreeLease]: WorktreeLease[Key] };
 type MutablePersistedAgentPaths = {
   worktree: MutableWorktreeLease;
@@ -67,7 +84,8 @@ type MutablePersistedAgentPaths = {
   sessionFile: string;
 };
 
-afterEach(() => {
+afterEach(async () => {
+  await stopGithubWatcherFixtures();
   for (const directory of temporaryDirectories.splice(0))
     rmSync(directory, { force: true, recursive: true });
   if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
@@ -908,6 +926,7 @@ describe('manager controller', () => {
     const restored = new ManagerController(fixture.pi);
     await Effect.runPromise(restored.restore(fixture.ctx));
     expect(restored.snapshot()?.workstreams[created.id]).toEqual(created);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
 
     await Effect.runPromise(controller.deactivate(fixture.ctx));
     expect(controller.isActive()).toBe(false);
@@ -5113,6 +5132,28 @@ describe('manager controller', () => {
     await Effect.runPromise(deactivated.deactivate(fixture.ctx));
     expect(deactivatedWatcher.starts()).toBe(1);
     expect(deactivatedWatcher.stops()).toBe(1);
+  });
+
+  test('test fixture cleanup stops every tracked watcher when restored controllers remain active', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const activatedWatcher = manualGithubWatcher();
+    const activated = new ManagerController(fixture.pi, {
+      githubWatcher: activatedWatcher.watcher,
+    });
+    await Effect.runPromise(activated.activate(fixture.ctx));
+    const restoredWatcher = manualGithubWatcher();
+    const restored = new ManagerController(fixture.pi, { githubWatcher: restoredWatcher.watcher });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(activatedWatcher.stops()).toBe(0);
+    expect(restoredWatcher.stops()).toBe(1);
+    await stopGithubWatcherFixtures();
+    expect(activatedWatcher.stops()).toBe(1);
+    expect(restoredWatcher.stops()).toBe(2);
   });
 
   test('reconciles after publication and treats a deduplicated merged signal as observation only', async () => {

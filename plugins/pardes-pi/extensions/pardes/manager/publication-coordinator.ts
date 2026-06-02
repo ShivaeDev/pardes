@@ -616,8 +616,9 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     // Browser launch is deliberately last: a slow or failing desktop opener must
     // never delay durable association, claim release, event recording, terminal
     // observation, or watcher reconciliation for an already verified remote PR.
+    // Consume the exact verified hosted URL, not reloaded same-user mutable state.
     const handoff = yield* browserHandoff.handoff(
-      persistedPullRequest.url,
+      publication.url,
       resolvePullRequestBrowserMode(input),
     );
     return {

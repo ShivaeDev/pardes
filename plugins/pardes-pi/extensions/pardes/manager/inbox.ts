@@ -4,7 +4,7 @@ import {
   AUTONOMOUS_INBOX_PATH,
   USER_JUDGMENT_HANDOFF_PATH,
   USER_JUDGMENT_INBOX_PATH,
-} from './guidance/wording.ts';
+} from './guidance/lifecycle.ts';
 
 export const MANAGER_INBOX_WAKE_MESSAGE_TYPE = 'pardes-worker-event';
 export const MANAGER_INBOX_WAKE_DETAIL_TYPE = 'manager_inbox_wake';

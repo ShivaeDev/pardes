@@ -98,13 +98,17 @@ instructions.
 
 ## Lifecycle orientation
 
-Initial activation guidance must teach this operating model without assuming
-prior knowledge: manager role, coherent delegated outcomes, advisory review,
-exact-state publication, user-controlled merges, compact projections, durable
-attention, and concise communication. After compaction, deliberately re-establish
-those rules rather than assuming conversational context survived. Restoration
-and reload guidance must explain the lifecycle boundary and next actions before
-resuming coordination.
+Initial activation guidance must teach this operating model comprehensively
+without assuming prior knowledge: manager role, coherent delegated outcomes,
+advisory review, exact-state publication, user-controlled merges, compact
+projections, durable attention, published-history safety, and concise
+communication. After compaction, substantially re-establish the important rules
+and current-state orientation rather than assuming conversational context
+survived. Treat these software-authored lifecycle prompts as high-value signal:
+do not silently truncate them. Bound only dynamic state/data interpolation.
+Restoration and reload guidance should stay concise: explain the lifecycle
+boundary, reconnect, reinspect, and rely on prior activation or compaction
+context rather than repeating onboarding.
 
 ## Activation boundary
 

@@ -1,24 +1,22 @@
 # Manager guidance maintainers
 
-This folder owns deterministic, bounded model-facing orientation for coordinating managers. It teaches the operating model at lifecycle boundaries; it does not implement workflow decisions, classify inbox rows semantically, or replace exact-cursor mechanics.
+This folder owns deterministic model-facing orientation for coordinating managers. Lifecycle guidance is high-value software-authored signal: emit it intact. Do not silently truncate authored prompts. Bound only dynamic state/data interpolation where safety needs it.
 
 ## Surfaces
 
-- `index.ts` queues next-turn lifecycle reminders and exports shared wording invariants.
-- `lifecycle.ts` renders activation, restoration, reload, and post-compaction variants.
-- `projection.ts` derives bounded count-only lifecycle snapshots from durable state and attached runtimes.
-- `bounds.ts` hard-bounds lifecycle lines and characters.
-- `wording.ts` owns reusable operating rules, including the canonical two-path inbox wording and the compaction coordinating guidance embedded by `../compaction.ts`.
+- `lifecycle.ts` is the obvious review surface: it keeps the complete activation, compaction, restoration, and reload prompts together. It also owns the few genuinely shared blocks reused by inbox/tool surfaces and the compaction coordinating suffix.
+- `projection.ts` derives count-only lifecycle snapshots from durable state and attached runtimes. Its explicit count formatter bounds interpolated dynamic values without touching authored prompt text.
+- `index.ts` appends the dynamic snapshot to the intact authored prompt and queues next-turn lifecycle reminders.
 
-Adjacent model-facing surfaces must reuse or faithfully preserve the `wording.ts` inbox rule: inbox wake suffixes, inbox status/detail projections, and the descriptions/snippets/guidelines for `inbox_get`, `inbox_acknowledge`, `question`, and `await_user_feedback`.
+Adjacent model-facing surfaces must reuse or faithfully preserve the lifecycle inbox rule: inbox wake suffixes, inbox status/detail projections, and the descriptions/snippets/guidelines for `inbox_get`, `inbox_acknowledge`, `question`, and `await_user_feedback`.
 
 ## Lifecycle variants
 
-Activation is the full onboarding surface. Assume no prior Pardes knowledge: explain the manager role, delegated worker outcome, advisory verification loop, exact-state publication, user-controlled merge, durable inbox inspection, two-path judgment rule, concise communication, and current counts.
+Activation is comprehensive onboarding. Assume no prior Pardes knowledge: teach the manager role, software/mechanics boundary, compact projections, coherent delegated outcomes, advisory verification loop, exact-state publication, user-controlled merges, durable inbox handling, published-review commit safety, trust boundaries, and concise communication.
 
-Post-compaction guidance deliberately reteaches the operating model at roughly 50–80% fidelity instead of assuming the summary preserved it. The compaction suffix also embeds a bounded coordinating rule list so the reminder and summarized state agree.
+Post-compaction guidance substantially reteaches the important operating model and adds situational current-state orientation. Do not assume conversational context survived. The compaction suffix embeds the same core coordinating block so the reminder and summarized state agree.
 
-Restoration and reload explain what happened before giving next actions. Restoration treats persisted state as authoritative and process-scoped runtime attachment as absent unless re-established. Reload explains intentional plugin-code adoption, pinned child-runtime snapshot refresh, detached RPC attachments, preserved managed artifacts, and selective revival.
+Restoration and reload are concise reconnect/check passes that rely on prior activation or compaction context. Restoration explains that durable state returned while prior process-scoped child attachment is not assumed. Reload explains intentional system-code adoption, pinned child-runtime snapshot refresh, detached former RPC attachments, preserved managed artifacts, and selective revival.
 
 ## Wording invariants
 
@@ -31,6 +29,6 @@ Do not encode semantic classification into software. The manager judges which pa
 
 After publication, keep review-feedback routing explicit: tell the retained worker to make additive descendant commits only. Do not amend, rebase, or rewrite published branch history because exact-SHA publication intentionally never force-pushes.
 
-## Boundedness
+## Dynamic boundedness
 
-Every lifecycle variant has hard line, per-line, and total-character caps. Dynamic projection text stays aggregate-only: no repository paths, worker tasks, report bodies, external text, diagnostics, or unbounded identifiers. Adjacent wakes, projections, and tool outputs retain their own caps. Spend bounded lines to teach clearly; do not compress the operating model into ambiguous hints.
+Dynamic lifecycle projection text stays aggregate-only: no repository paths, worker tasks, report bodies, external text, diagnostics, or unbounded identifiers. Interpolated counts use one explicit cap and render a visible `+` suffix above it. Adjacent wakes, projections, and tool outputs retain their own data bounds. Static authored lifecycle guidance remains complete.

@@ -9,7 +9,7 @@ import type { GitHubDiscussionSurface } from '../github/index.ts';
 import type { WorkerRuntimeSnapshot } from '../worker-runtime/index.ts';
 import { effectiveAgentStatus, hasAgentWarning, pullRequestNeedsAttention } from './attention.ts';
 import type { ManagerState, PullRequestRecord, WorkstreamStatus } from './domain.ts';
-import { MANAGER_COMPACTION_COORDINATING_GUIDANCE } from './guidance/wording.ts';
+import { MANAGER_COMPACTION_COORDINATING_GUIDANCE } from './guidance/lifecycle.ts';
 
 export const MANAGER_COMPACTION_PROJECTION_SCHEMA_VERSION = 2;
 export const MANAGER_COMPACTION_PROJECTION_MAX_CHARS = 24_000;

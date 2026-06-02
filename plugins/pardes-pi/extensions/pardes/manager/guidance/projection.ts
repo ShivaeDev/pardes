@@ -2,6 +2,17 @@ import type { WorkerRuntimeSnapshot, WorkerStatus } from '../../worker-runtime/i
 import { effectiveAgentStatus, hasAgentWarning, pullRequestNeedsAttention } from '../attention.ts';
 import type { ManagerState } from '../domain.ts';
 
+/** Explicit bound for interpolated runtime/state counts; authored lifecycle guidance is never truncated. */
+export const MANAGER_GUIDANCE_DYNAMIC_COUNT_MAX = 999_999_999;
+
+export function boundedManagerGuidanceCount(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return 'unknown';
+  const count = Math.floor(value);
+  return count <= MANAGER_GUIDANCE_DYNAMIC_COUNT_MAX
+    ? String(count)
+    : `${MANAGER_GUIDANCE_DYNAMIC_COUNT_MAX}+`;
+}
+
 export interface ManagerGuidanceProjection {
   readonly workstreams: {
     readonly total: number;
@@ -95,9 +106,10 @@ export function projectManagerGuidance(
 
 export function currentSnapshotLines(projection: ManagerGuidanceProjection): ReadonlyArray<string> {
   const { workstreams, workers, reviews, inbox } = projection;
+  const count = boundedManagerGuidanceCount;
   return [
-    `State: streams ${workstreams.total} total (${workstreams.active} active/${workstreams.planned} planned/${workstreams.complete} complete); workers ${workers.total} total (${workers.attached} attached/${workers.detached} detached, ${workers.revivable} revivable).`,
-    `Attention: ${workers.statuses.running} running/${workers.statuses.idle} idle; ${workers.warnings + reviews.warnings} warnings; inbox ${inbox}; ${reviews.open} open review gates (${reviews.draftOpen} draft).`,
+    `State: streams ${count(workstreams.total)} total (${count(workstreams.active)} active/${count(workstreams.planned)} planned/${count(workstreams.complete)} complete); workers ${count(workers.total)} total (${count(workers.attached)} attached/${count(workers.detached)} detached, ${count(workers.revivable)} revivable).`,
+    `Attention: ${count(workers.statuses.running)} running/${count(workers.statuses.idle)} idle; ${count(workers.warnings + reviews.warnings)} warnings; inbox ${count(inbox)}; ${count(reviews.open)} open review gates (${count(reviews.draftOpen)} draft).`,
   ];
 }
 
@@ -105,9 +117,10 @@ export function operationalSnapshotLines(
   projection: ManagerGuidanceProjection,
 ): ReadonlyArray<string> {
   const { workstreams, workers, reviews, inbox } = projection;
+  const count = boundedManagerGuidanceCount;
   return [
-    `State: streams ${workstreams.total} total; ${workstreams.active} active/${workstreams.planned} planned/${workstreams.complete} complete/${workstreams.cancelled} cancelled.`,
-    `Workers: ${workers.total} total; ${workers.attached} attached/${workers.detached} detached/${workers.revivable} revivable; states ${workers.statuses.starting} starting/${workers.statuses.running} running/${workers.statuses.idle} idle/${workers.statuses.stopped} stopped/${workers.statuses.crashed} crashed; compacting ${workers.compacting}; queued ${workers.pendingMessages}.`,
-    `Attention: ${workers.warnings} worker warnings; ${reviews.warnings} review warnings; inbox ${inbox}; ${reviews.open} open review gates (${reviews.draftOpen} draft).`,
+    `State: streams ${count(workstreams.total)} total; ${count(workstreams.active)} active/${count(workstreams.planned)} planned/${count(workstreams.complete)} complete/${count(workstreams.cancelled)} cancelled.`,
+    `Workers: ${count(workers.total)} total; ${count(workers.attached)} attached/${count(workers.detached)} detached/${count(workers.revivable)} revivable; states ${count(workers.statuses.starting)} starting/${count(workers.statuses.running)} running/${count(workers.statuses.idle)} idle/${count(workers.statuses.stopped)} stopped/${count(workers.statuses.crashed)} crashed; compacting ${count(workers.compacting)}; queued ${count(workers.pendingMessages)}.`,
+    `Attention: ${count(workers.warnings)} worker warnings; ${count(reviews.warnings)} review warnings; inbox ${count(inbox)}; ${count(reviews.open)} open review gates (${count(reviews.draftOpen)} draft).`,
   ];
 }

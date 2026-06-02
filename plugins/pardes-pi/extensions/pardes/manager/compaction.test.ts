@@ -345,16 +345,15 @@ describe('Pardes coordinating-manager compaction', () => {
       'pr-2',
     ]);
     expect(rendered).toContain('<pardes-coordinating-state schemaVersion="2">');
-    expect(projection.operatingGuidance).toContain(
-      'Autonomous rows may be acknowledged once handled.',
-    );
-    expect(projection.operatingGuidance).toContain(
+    const operatingGuidance = projection.operatingGuidance.join('\n');
+    expect(operatingGuidance).toContain('Autonomous rows may be acknowledged once handled.');
+    expect(operatingGuidance).toContain(
       'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
-    expect(projection.operatingGuidance).toContain(
+    expect(operatingGuidance).toContain(
       'Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
     );
-    expect(projection.operatingGuidance).toContain(
+    expect(operatingGuidance).toContain(
       'Published review feedback: tell the retained worker to make additive descendant commits only; do not amend, rebase, or rewrite published branch history. Pardes exact-SHA publication intentionally never force-pushes.',
     );
     expect(JSON.stringify(projection).length).toBeLessThanOrEqual(

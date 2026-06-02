@@ -1,31 +1,23 @@
 import type { ExtensionAPI, SessionStartEvent } from '@earendil-works/pi-coding-agent';
 import type { WorkerRuntimeSnapshot } from '../../worker-runtime/index.ts';
 import type { ManagerState } from '../domain.ts';
-import {
-  boundManagerGuidance,
-  MANAGER_GUIDANCE_BOUNDS,
-  type ManagerGuidanceReason,
-} from './bounds.ts';
-import { renderLifecycleGuidanceLines } from './lifecycle.ts';
+import { type ManagerGuidanceReason, renderLifecycleGuidance } from './lifecycle.ts';
 import { projectManagerGuidance } from './projection.ts';
 
-export {
-  boundManagerGuidance,
-  MANAGER_GUIDANCE_BOUNDS,
-  MANAGER_GUIDANCE_MAX_CHARS,
-  MANAGER_GUIDANCE_MAX_LINE_CHARS,
-  MANAGER_GUIDANCE_MAX_LINES,
-  type ManagerGuidanceBounds,
-  type ManagerGuidanceReason,
-} from './bounds.ts';
 export {
   AUTONOMOUS_INBOX_PATH,
   INBOX_TWO_PATH_GUIDANCE,
   MANAGER_COMPACTION_COORDINATING_GUIDANCE,
+  MANAGER_LIFECYCLE_AUTHORED_GUIDANCE,
+  type ManagerGuidanceReason,
   PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
   USER_JUDGMENT_HANDOFF_PATH,
   USER_JUDGMENT_INBOX_PATH,
-} from './wording.ts';
+} from './lifecycle.ts';
+export {
+  boundedManagerGuidanceCount,
+  MANAGER_GUIDANCE_DYNAMIC_COUNT_MAX,
+} from './projection.ts';
 
 export const MANAGER_GUIDANCE_MESSAGE_TYPE = 'pardes-manager-guidance';
 
@@ -35,17 +27,14 @@ export function managerGuidanceReasonForSessionStart(
   return reason === 'reload' ? 'reloaded' : 'restored';
 }
 
-/** Render one lifecycle-specific, hard-bounded operating reminder from durable state and ephemeral runtimes. */
+/** Render authored lifecycle guidance intact, then append a bounded dynamic count projection. */
 export function renderManagerGuidance(
   state: ManagerState | undefined,
   reason: ManagerGuidanceReason,
   runtimes: ReadonlyMap<string, WorkerRuntimeSnapshot> = new Map(),
 ): string | undefined {
   if (!state) return undefined;
-  return boundManagerGuidance(
-    renderLifecycleGuidanceLines(projectManagerGuidance(state, runtimes), reason),
-    MANAGER_GUIDANCE_BOUNDS[reason],
-  );
+  return renderLifecycleGuidance(projectManagerGuidance(state, runtimes), reason);
 }
 
 export function queueManagerGuidance(

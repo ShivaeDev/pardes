@@ -690,6 +690,9 @@ describe('incoming worker-event coordinator', () => {
       }),
     );
     expect(namespace.state.verifications['verify-one']?.attempts[1]?.status).toBe('idle');
+    expect(namespace.state.inbox.map(({ type }) => type)).toEqual([
+      'verification_terminal_report_missing',
+    ]);
     expect(serializedMutations).toBe(3);
   });
 

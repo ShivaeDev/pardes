@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { homedir, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import type { ExtensionAPI, Theme, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -129,6 +130,10 @@ describe('verifier child profile', () => {
         'ask_manager',
       ]);
       expect(tools.map((tool) => tool.name)).not.toContain('verification_diff');
+      const evidence = requiredValue(tools.find((tool) => tool.name === 'verification_evidence'));
+      expect(evidence.renderShell).toBe('self');
+      expect(typeof evidence.renderCall).toBe('function');
+      expect(typeof evidence.renderResult).toBe('function');
       const report = requiredValue(tools.find((tool) => tool.name === 'report_to_manager'));
       const parameters = report.parameters as unknown as ToolParametersPreview;
       expect(report.description).toContain(
@@ -249,10 +254,20 @@ describe('verifier child profile', () => {
 });
 
 describe('worker child reporting tool rendering', () => {
-  test('uses bounded one-line length-only previews without adding result renderers', () => {
+  test('uses bounded self-shell call and result renderers with length-only previews', () => {
     const { worktree } = createFixture();
-    const previousRoot = process.env.PARDES_WORKTREE_ROOT;
+    const previous = {
+      baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+      profile: process.env.PARDES_AGENT_PROFILE,
+      reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
+      root: process.env.PARDES_WORKTREE_ROOT,
+      stateDir: process.env.PARDES_PI_STATE_DIR,
+    };
     process.env.PARDES_WORKTREE_ROOT = worktree;
+    process.env.PARDES_PI_STATE_DIR = join(worktree, 'pardes-state');
+    process.env.PARDES_AGENT_PROFILE = 'worker';
+    delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+    delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
     try {
       const tools: ToolDefinition[] = [];
       pardesWorker({
@@ -286,19 +301,58 @@ describe('worker child reporting tool rendering', () => {
         maxLength: REPORT_DETAILS_MAX_CHARS,
       });
       for (const tool of tools) {
-        expect(tool.renderResult, tool.name).toBeUndefined();
-        const lines = requiredValue(tool.renderCall)(
-          argsByTool[tool.name as keyof typeof argsByTool],
-          theme,
-          {} as never,
-        ).render(80);
+        expect(typeof tool.renderResult, tool.name).toBe('function');
+        expect(tool.renderShell, tool.name).toBe('self');
+        const args = argsByTool[tool.name as keyof typeof argsByTool];
+        const lines = requiredValue(tool.renderCall)(args, theme, {
+          isPartial: true,
+        } as never).render(80);
         expect(lines, tool.name).toHaveLength(1);
         expect(visibleWidth(requiredValue(lines[0])), tool.name).toBeLessThanOrEqual(80);
         expect(lines[0], tool.name).not.toContain('private');
+        const hiddenCall = requiredValue(tool.renderCall)(args, theme, {
+          isPartial: false,
+        } as never).render(80);
+        const resultLines = requiredValue(tool.renderResult)(
+          { content: [{ text: 'bounded child result', type: 'text' }], details: undefined },
+          { expanded: false, isPartial: false },
+          theme,
+          { args, isError: false } as never,
+        ).render(240);
+        expect(hiddenCall, tool.name).toEqual([]);
+        expect(resultLines, tool.name).toHaveLength(1);
+        expect(stripVTControlCharacters(requiredValue(resultLines[0])), tool.name).toContain(
+          ' → bounded child result',
+        );
       }
+
+      mkdirSync(requiredValue(process.env.PARDES_PI_STATE_DIR), { recursive: true });
+      writeFileSync(
+        join(requiredValue(process.env.PARDES_PI_STATE_DIR), 'config.json'),
+        '{"renderer":{"verboseResults":true}}\n',
+      );
+      const report = requiredValue(tools.find((tool) => tool.name === 'report_to_manager'));
+      const reportArgs = argsByTool.report_to_manager;
+      const verboseLines = requiredValue(report.renderResult)(
+        { content: [{ text: 'first line\nsecond line', type: 'text' }], details: undefined },
+        { expanded: false, isPartial: false },
+        theme,
+        { args: reportArgs, isError: false } as never,
+      ).render(240);
+      expect(verboseLines.map((line) => stripVTControlCharacters(line).trimEnd()).slice(1)).toEqual(
+        ['result', 'first line', 'second line'],
+      );
     } finally {
-      if (previousRoot === undefined) delete process.env.PARDES_WORKTREE_ROOT;
-      else process.env.PARDES_WORKTREE_ROOT = previousRoot;
+      if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
+      else process.env.PARDES_WORKTREE_ROOT = previous.root;
+      if (previous.stateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+      else process.env.PARDES_PI_STATE_DIR = previous.stateDir;
+      if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
+      else process.env.PARDES_AGENT_PROFILE = previous.profile;
+      if (previous.baseline === undefined) delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+      else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
+      if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+      else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
     }
   });
 });

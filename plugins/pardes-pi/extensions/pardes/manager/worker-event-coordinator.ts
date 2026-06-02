@@ -7,6 +7,7 @@ import type { AgentAttachmentLifecycleCoordinatorShape } from './agent-attachmen
 import {
   type AgentRecord,
   currentVerificationAttempt,
+  currentVerificationTerminalReportStatus,
   type ManagerEvent,
   type ManagerState,
 } from './domain.ts';
@@ -15,12 +16,13 @@ import type { ReviewGateLifecycleCoordinatorShape } from './review-gate-lifecycl
 import {
   projectVerificationReviewLoopDisposition,
   updateCurrentVerificationAttempt,
-} from './verification.ts';
+} from './verification/index.ts';
 import {
   applyHandoffAudit,
   boundedFailureSummary,
   isDuplicateWorkerAttention,
   type ReportArtifactPersistence,
+  verifierIdleDisposition,
   workerEventSummary,
 } from './worker-events.ts';
 
@@ -137,7 +139,14 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
   const { namespace, reporting, attachments, reviewGates, pullRequests, liveRuntimes, callbacks } =
     options;
   const semaphore = yield* Semaphore.make(1);
-  const suppressIdleWakeups = new Set<string>();
+  const suppressIdleWakeupGenerations = new Map<string, number | undefined>();
+
+  const consumeIdleWakeupSuppression = (workerEvent: WorkerSupervisorEvent): boolean => {
+    if (!suppressIdleWakeupGenerations.has(workerEvent.agentId)) return false;
+    const lifecycleGeneration = suppressIdleWakeupGenerations.get(workerEvent.agentId);
+    suppressIdleWakeupGenerations.delete(workerEvent.agentId);
+    return lifecycleGeneration === workerEvent.lifecycleGeneration;
+  };
 
   const handleUnlocked = Effect.fnUntraced(function* (workerEvent: WorkerSupervisorEvent) {
     if (callbacks.isSuppressed(workerEvent.agentId)) return;
@@ -224,15 +233,28 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       workerEvent.type === 'report' && workerEvent.status === 'completed'
         ? yield* attachments.auditHandoffBestEffort(persistedAgent, 'completion')
         : undefined;
-    if (workerEvent.type === 'report' && workerEvent.status === 'completed')
-      suppressIdleWakeups.add(workerEvent.agentId);
+    if (
+      workerEvent.type === 'report' &&
+      (workerEvent.status === 'completed' ||
+        (persistedAgent.role === 'verifier' && workerEvent.status === 'blocked'))
+    )
+      suppressIdleWakeupGenerations.set(workerEvent.agentId, workerEvent.lifecycleGeneration);
     else if (workerEvent.type !== 'status' || workerEvent.status !== 'idle')
-      suppressIdleWakeups.delete(workerEvent.agentId);
+      suppressIdleWakeupGenerations.delete(workerEvent.agentId);
     const suppressIdleWakeup =
       workerEvent.type === 'status' &&
       workerEvent.status === 'idle' &&
-      suppressIdleWakeups.delete(workerEvent.agentId);
-    const event = workerEventSummary(workerEvent, reportPersistence, audit, { suppressIdleWakeup });
+      consumeIdleWakeupSuppression(workerEvent);
+    const verifierIdle = verifierIdleDisposition(
+      workerEvent,
+      persistedAgent,
+      persistedVerification,
+      suppressIdleWakeup,
+    );
+    const event = workerEventSummary(workerEvent, reportPersistence, audit, {
+      suppressIdleWakeup,
+      ...(verifierIdle === undefined ? {} : { verifierIdleDisposition: verifierIdle }),
+    });
     const association: ManagerEventAssociation = {
       agentId: workerEvent.agentId,
       workstreamId: persistedAgent.workstreamId,
@@ -286,7 +308,9 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       );
       const verificationStatus =
         workerEvent.type === 'status'
-          ? workerEvent.status
+          ? workerEvent.status === 'idle'
+            ? (currentVerificationTerminalReportStatus(verification) ?? workerEvent.status)
+            : workerEvent.status
           : workerEvent.type === 'unexpected_exit'
             ? ('crashed' as const)
             : workerEvent.type === 'report' && workerEvent.status !== 'progress'

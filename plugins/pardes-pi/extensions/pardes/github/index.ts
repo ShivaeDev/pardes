@@ -7,6 +7,8 @@ export {
 } from './errors.ts';
 export {
   GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
+  GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT,
+  GITHUB_HOSTED_METADATA_HOSTNAME,
   GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS,
   GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST,
   GITHUB_WATCHER_RATE_LIMIT_RESERVE,
@@ -84,6 +86,7 @@ export {
   type GitHubWatcherCallbacks,
   type GitHubWatcherError,
   type GitHubWatcherShape,
+  type GitHubWatcherThrottleDiagnostic,
   makeGitHubWatcherService,
   type PullRequestDiscussionFeedback,
   type PullRequestDiscussionFeedbackKind,

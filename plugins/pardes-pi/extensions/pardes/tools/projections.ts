@@ -76,6 +76,7 @@ const PARDES_AUTHORED_INBOX_EVENT_TYPES = new Set([
   'agent_detached',
   'agent_git_audit_dirty',
   'agent_auto_stop_failed',
+  'github_rate_metadata_unavailable',
   'pull_request_auto_sync_attention',
   'verification_evidence_stale',
 ]);
@@ -688,6 +689,7 @@ function rateLimitHealthLines(
       ? 'ready'
       : `deferred (${watcher.reason}${watcher.until === undefined ? '' : ` until ${compactText(watcher.until, 32)}`})`;
   return [
+    'rate scope: GitHub.com credentials fixed for this controller lifetime · fresh controller resets cache',
     `rate budget: graphql:${rateLimitBudgetLabel(rateLimit.graphql)}`,
     `rate fallback: rest:${rateLimitBudgetLabel(rateLimit.rest)} · endpoint:${rateLimit.fallback} · watcher:${watcherLabel}`,
   ];

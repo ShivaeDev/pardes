@@ -196,6 +196,7 @@ describe('GitHub integration-health inspection', () => {
         },
       ],
       rateLimit: {
+        credentialContext: 'github_com_controller_lifetime',
         fallback: 'not_requested',
         graphql: {
           availability: 'available',
@@ -219,6 +220,11 @@ describe('GitHub integration-health inspection', () => {
     ]);
     expect(fixture.invocations[1]?.args).toContain('expression=main');
     expect(fixture.invocations[1]?.args).toContain('limit=50');
+    expect(
+      fixture.invocations
+        .filter(({ args }) => args[0] === 'api')
+        .every(({ args }) => args.includes('github.com')),
+    ).toBe(true);
     expect(fixture.invocations[1]?.args.join(' ')).toContain('pageInfo{hasNextPage}');
     expect(fixture.invocations[0]?.args.join(' ')).toContain(
       'rateLimit{cost limit remaining resetAt}',

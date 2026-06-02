@@ -12,7 +12,9 @@ import {
 import { decodeGitHubJson } from './codecs.ts';
 import { type GitHubCommandError, GitHubResponseError, GitHubWatcherInputError } from './errors.ts';
 import {
+  GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
+  type GitHubWatcherRateLimitStatus,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -109,6 +111,11 @@ export interface PullRequestWatcherHeadDivergence {
   readonly observedHeadSha: string;
 }
 
+/** Content-free adjacent diagnostic: unavailable metadata warns once durably; near-exhaustion stays quiet. */
+export interface GitHubWatcherThrottleDiagnostic {
+  readonly status: 'rate_metadata_unavailable' | 'rate_metadata_recovered';
+}
+
 export interface GitHubWatcherCallbacks {
   readonly cwd: () => string;
   readonly persistedAssociations: () => ReadonlyArray<PullRequestWatcherAssociation>;
@@ -116,6 +123,9 @@ export interface GitHubWatcherCallbacks {
   readonly onFailure: (event: PullRequestWatcherFailure) => Effect.Effect<void, unknown>;
   readonly onHeadDivergence: (
     event: PullRequestWatcherHeadDivergence,
+  ) => Effect.Effect<void, unknown>;
+  readonly onThrottleDiagnostic: (
+    event: GitHubWatcherThrottleDiagnostic,
   ) => Effect.Effect<void, unknown>;
 }
 
@@ -315,7 +325,26 @@ export function makeGitHubWatcherService(
   const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
   let active: ActiveWatcher | undefined;
+  let rateMetadataStatus: GitHubWatcherThrottleDiagnostic['status'] | undefined;
   const pollSemaphore = Semaphore.makeUnsafe(1);
+
+  const notifyThrottleDiagnostic = (
+    callbacks: GitHubWatcherCallbacks,
+    reservation: GitHubWatcherRateLimitStatus,
+  ) => {
+    const status =
+      reservation.status === 'deferred' && reservation.reason === 'rate_metadata_unavailable'
+        ? ('rate_metadata_unavailable' as const)
+        : ('rate_metadata_recovered' as const);
+    if (rateMetadataStatus === status) return Effect.void;
+    return callbacks.onThrottleDiagnostic({ status }).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          rateMetadataStatus = status;
+        }),
+      ),
+    );
+  };
 
   const inspect = Effect.fnUntraced(function* (
     cwd: string,
@@ -369,6 +398,8 @@ export function makeGitHubWatcherService(
     const discussionResponse = yield* github.run(cwd, [
       'api',
       'graphql',
+      '--hostname',
+      GITHUB_HOSTED_METADATA_HOSTNAME,
       '--raw-field',
       `query=${DISCUSSION_GRAPHQL_QUERY}`,
       '--field',
@@ -388,6 +419,8 @@ export function makeGitHubWatcherService(
     const inlineResponse = yield* github.run(cwd, [
       'api',
       `repos/{owner}/{repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
+      '--hostname',
+      GITHUB_HOSTED_METADATA_HOSTNAME,
     ]);
     const inlineComments = yield* decodeGitHubJson(
       'watch inline pull request comments',
@@ -454,70 +487,77 @@ export function makeGitHubWatcherService(
                 callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error }),
               onSuccess: () =>
                 hostedMetadata.reserveWatcherPoll(callbacks.cwd(), 1).pipe(
-                  Effect.flatMap((reservation) => {
-                    if (reservation.status === 'deferred') return Effect.void;
-                    const cwd = callbacks.cwd();
-                    return inspect(cwd, pullRequest).pipe(
-                      Effect.matchEffect({
-                        onFailure: (error) =>
-                          callbacks.onFailure({
-                            pullRequestId: pullRequest.id,
-                            ...generation,
-                            error,
-                          }),
-                        onSuccess: (inspected) => {
-                          if (inspected._tag === 'HeadDivergence') {
-                            const divergence = callbacks.onHeadDivergence({
-                              expectedHeadSha: inspected.expectedHeadSha,
-                              observedHeadSha: inspected.observedHeadSha,
-                              pullRequestId: pullRequest.id,
-                            });
-                            return inspected.terminalObservation === undefined
-                              ? divergence
-                              : divergence.pipe(
-                                  Effect.andThen(
-                                    callbacks.onObservation({
+                  Effect.flatMap((reservation) =>
+                    notifyThrottleDiagnostic(callbacks, reservation).pipe(
+                      Effect.andThen(
+                        reservation.status === 'deferred'
+                          ? Effect.void
+                          : Effect.suspend(() => {
+                              const cwd = callbacks.cwd();
+                              return inspect(cwd, pullRequest).pipe(
+                                Effect.matchEffect({
+                                  onFailure: (error) =>
+                                    callbacks.onFailure({
                                       pullRequestId: pullRequest.id,
                                       ...generation,
-                                      complete: false,
-                                      observation: inspected.terminalObservation,
+                                      error,
                                     }),
-                                  ),
-                                );
-                          }
-                          return callbacks
-                            .onObservation({
-                              pullRequestId: pullRequest.id,
-                              ...generation,
-                              complete: false,
-                              observation: inspected.observation,
-                            })
-                            .pipe(
-                              Effect.andThen(
-                                inspectDiscussion(cwd, inspected.number).pipe(
-                                  Effect.matchEffect({
-                                    onFailure: (error) =>
-                                      callbacks.onFailure({
+                                  onSuccess: (inspected) => {
+                                    if (inspected._tag === 'HeadDivergence') {
+                                      const divergence = callbacks.onHeadDivergence({
+                                        expectedHeadSha: inspected.expectedHeadSha,
+                                        observedHeadSha: inspected.observedHeadSha,
+                                        pullRequestId: pullRequest.id,
+                                      });
+                                      return inspected.terminalObservation === undefined
+                                        ? divergence
+                                        : divergence.pipe(
+                                            Effect.andThen(
+                                              callbacks.onObservation({
+                                                pullRequestId: pullRequest.id,
+                                                ...generation,
+                                                complete: false,
+                                                observation: inspected.terminalObservation,
+                                              }),
+                                            ),
+                                          );
+                                    }
+                                    return callbacks
+                                      .onObservation({
                                         pullRequestId: pullRequest.id,
                                         ...generation,
-                                        error,
-                                      }),
-                                    onSuccess: (discussion) =>
-                                      callbacks.onObservation({
-                                        pullRequestId: pullRequest.id,
-                                        ...generation,
-                                        complete: true,
-                                        discussion,
+                                        complete: false,
                                         observation: inspected.observation,
-                                      }),
-                                  }),
-                                ),
-                              ),
-                            );
-                        },
-                      }),
-                    );
-                  }),
+                                      })
+                                      .pipe(
+                                        Effect.andThen(
+                                          inspectDiscussion(cwd, inspected.number).pipe(
+                                            Effect.matchEffect({
+                                              onFailure: (error) =>
+                                                callbacks.onFailure({
+                                                  pullRequestId: pullRequest.id,
+                                                  ...generation,
+                                                  error,
+                                                }),
+                                              onSuccess: (discussion) =>
+                                                callbacks.onObservation({
+                                                  pullRequestId: pullRequest.id,
+                                                  ...generation,
+                                                  complete: true,
+                                                  discussion,
+                                                  observation: inspected.observation,
+                                                }),
+                                            }),
+                                          ),
+                                        ),
+                                      );
+                                  },
+                                }),
+                              );
+                            }),
+                      ),
+                    ),
+                  ),
                 ),
             }),
           );

@@ -651,6 +651,7 @@ describe('Pardes model-visible tools', () => {
         },
       ],
       rateLimit: {
+        credentialContext: 'github_com_controller_lifetime',
         fallback: 'available',
         graphql: {
           availability: 'available',
@@ -703,6 +704,7 @@ describe('Pardes model-visible tools', () => {
       [
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
         'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
+        'rate scope: GitHub.com credentials fixed for this controller lifetime · fresh controller resets cache',
         'rate budget: graphql:100/5000 [near_exhaustion/graphql] · reset:2026-06-01T01:00:00Z',
         'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher:deferred (near_exhaustion until 2026-06-01T01:00:00Z)',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',

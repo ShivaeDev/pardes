@@ -29,6 +29,7 @@ const PARDES_SUMMARY_EVENT_TYPES = new Set([
   'agent_detached',
   'agent_git_audit_dirty',
   'agent_idle',
+  'github_rate_metadata_unavailable',
 ]);
 const OMITTED_DIAGNOSTIC_EVENT_LABELS = new Map<string, string>([
   ['agent_auto_stop_failed', 'idle-worker auto-stop failed'],

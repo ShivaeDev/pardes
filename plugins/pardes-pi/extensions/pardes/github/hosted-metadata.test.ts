@@ -60,9 +60,14 @@ describe('GitHub hosted metadata adapter', () => {
     const health = await Effect.runPromise(adapter.snapshot());
 
     expect(fixture.invocations).toEqual([
-      { args: ['api', 'rate_limit'], command: 'gh', cwd: '/tmp/project' },
+      {
+        args: ['api', 'rate_limit', '--hostname', 'github.com'],
+        command: 'gh',
+        cwd: '/tmp/project',
+      },
     ]);
     expect(health).toEqual({
+      credentialContext: 'github_com_controller_lifetime',
       fallback: 'available',
       graphql: {
         availability: 'available',
@@ -85,6 +90,26 @@ describe('GitHub hosted metadata adapter', () => {
     });
     expect(JSON.stringify(health)).not.toContain('ignored');
     expect(JSON.stringify(health)).not.toContain('private');
+  });
+
+  test('starts a fresh bounded cache for each fixed GitHub.com controller credential context', async () => {
+    const fixture = scriptedRunner([fallbackResult()]);
+    const first = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+    await Effect.runPromise(first.refreshFallback('/tmp/project'));
+    const fresh = makeGitHubHostedMetadataAdapter();
+
+    expect(await Effect.runPromise(first.snapshot())).toMatchObject({
+      credentialContext: 'github_com_controller_lifetime',
+      fallback: 'available',
+    });
+    expect(await Effect.runPromise(fresh.snapshot())).toEqual({
+      credentialContext: 'github_com_controller_lifetime',
+      fallback: 'not_requested',
+      graphql: { availability: 'unavailable' },
+      observation: 'bounded_hosted_rate_budget',
+      rest: { availability: 'unavailable' },
+      watcherPolling: { status: 'ready' },
+    });
   });
 
   test('rejects malformed fallback metadata with a typed operation-specific response error', async () => {

@@ -470,6 +470,14 @@ function manualGithubWatcher() {
             observation,
           })
         : Effect.die('GitHub watcher fixture is not active'),
+    rateMetadataRecovered: () =>
+      callbacks
+        ? callbacks.onThrottleDiagnostic({ status: 'rate_metadata_recovered' })
+        : Effect.die('GitHub watcher fixture is not active'),
+    rateMetadataUnavailable: () =>
+      callbacks
+        ? callbacks.onThrottleDiagnostic({ status: 'rate_metadata_unavailable' })
+        : Effect.die('GitHub watcher fixture is not active'),
     reconciliations: () => reconciliations,
     starts: () => starts,
     stops: () => stops,
@@ -6219,6 +6227,53 @@ describe('manager controller', () => {
       'utf8',
     );
     expect(eventLog.match(/"type":"watcher_failed"/g)).toHaveLength(2);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('persists one bounded global rate-metadata warning until typed watcher recovery clears and rearms it', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+
+    await Effect.runPromise(watcher.rateMetadataUnavailable());
+    await Effect.runPromise(watcher.rateMetadataUnavailable());
+    expect(controller.snapshot()?.githubRateMetadataUnavailableAt).toBeDefined();
+    expect(
+      controller
+        .snapshot()
+        ?.inbox.filter(({ type }) => type === 'github_rate_metadata_unavailable'),
+    ).toHaveLength(1);
+    expect(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'github_rate_metadata_unavailable')
+        ?.summary,
+    ).toBe(
+      'GitHub.com watcher rate metadata is unavailable or invalid; polling is deferred until bounded metadata recovers.',
+    );
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+    expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
+      'github_rate_metadata_unavailable: [Pardes] GitHub.com watcher rate metadata is unavailable or invalid;',
+    );
+    expect(JSON.stringify(fixture.messages[0]?.message).length).toBeLessThan(1_200);
+
+    await Effect.runPromise(watcher.rateMetadataRecovered());
+    expect(controller.snapshot()?.githubRateMetadataUnavailableAt).toBeUndefined();
+    await Effect.runPromise(watcher.rateMetadataUnavailable());
+    expect(
+      controller
+        .snapshot()
+        ?.inbox.filter(({ type }) => type === 'github_rate_metadata_unavailable'),
+    ).toHaveLength(2);
+    const eventLog = readFileSync(
+      join(activationStateDir(fixture.entries), 'events.jsonl'),
+      'utf8',
+    );
+    expect(eventLog.match(/"type":"github_rate_metadata_unavailable"/g)).toHaveLength(2);
+    expect(eventLog.match(/"type":"github_rate_metadata_recovered"/g)).toHaveLength(1);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 

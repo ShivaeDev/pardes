@@ -13,6 +13,8 @@ export const GITHUB_WATCHER_RATE_LIMIT_RESERVE = 100;
 export const GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST = 10;
 export const GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST = 1;
 export const GITHUB_CLI_GRAPHQL_ESTIMATED_COST = 5;
+export const GITHUB_HOSTED_METADATA_HOSTNAME = 'github.com';
+export const GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT = 'github_com_controller_lifetime';
 
 export type GitHubRateLimitBudgetSource = 'graphql' | 'rest_fallback' | 'local_estimate';
 export type GitHubRateLimitPressure = 'ready' | 'near_exhaustion' | 'exhausted';
@@ -39,6 +41,8 @@ export type GitHubWatcherRateLimitStatus =
     };
 
 export interface GitHubRateLimitHealth {
+  /** One adapter belongs to one fresh controller and its fixed GitHub.com credential context. */
+  readonly credentialContext: typeof GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT;
   readonly observation: 'bounded_hosted_rate_budget';
   readonly fallback: GitHubRateLimitFallbackStatus;
   readonly graphql: GitHubRateLimitBudgetObservation;
@@ -342,7 +346,7 @@ export function makeGitHubHostedMetadataAdapter(
         )
           return;
         const response = yield* cli
-          .run(cwd, ['api', 'rate_limit'])
+          .run(cwd, ['api', 'rate_limit', '--hostname', GITHUB_HOSTED_METADATA_HOSTNAME])
           .pipe(Effect.tapError(() => Ref.update(state, metadataUnavailable)));
         const decoded = yield* decodeGitHubJson(
           'inspect GitHub rate-limit fallback',
@@ -456,6 +460,7 @@ export function makeGitHubHostedMetadataAdapter(
         const pruned = { ...value, debt };
         return [
           {
+            credentialContext: GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT,
             fallback: pruned.fallback,
             graphql: observeBudget(pruned.graphql, debt.graphql),
             observation: 'bounded_hosted_rate_budget',

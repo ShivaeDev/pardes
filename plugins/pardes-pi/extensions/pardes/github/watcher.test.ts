@@ -4,8 +4,10 @@ import type { PullRequestRecord } from '../manager/index.ts';
 import {
   DEFAULT_GITHUB_WATCHER_CADENCE,
   derivePullRequestTransitions,
+  GitHubCommandError,
   GitHubWatcher,
   type GitHubWatcherCallbacks,
+  type GitHubWatcherThrottleDiagnostic,
   makeGitHubHostedMetadataAdapter,
   makeGitHubWatcherService as makeGitHubWatcherServiceProduction,
   type PullRequestObservation,
@@ -101,6 +103,7 @@ function callbacks(associations: ReadonlyArray<PullRequestRecord>) {
   const observations: PullRequestWatcherObservation[] = [];
   const failures: PullRequestWatcherFailure[] = [];
   const divergences: PullRequestWatcherHeadDivergence[] = [];
+  const throttleDiagnostics: GitHubWatcherThrottleDiagnostic[] = [];
   const value: GitHubWatcherCallbacks = {
     cwd: () => '/tmp/project',
     onFailure: (event) =>
@@ -115,9 +118,13 @@ function callbacks(associations: ReadonlyArray<PullRequestRecord>) {
       Effect.sync(() => {
         observations.push(event);
       }),
+    onThrottleDiagnostic: (event) =>
+      Effect.sync(() => {
+        throttleDiagnostics.push(event);
+      }),
     persistedAssociations: () => associations,
   };
-  return { callbacks: value, divergences, failures, observations };
+  return { callbacks: value, divergences, failures, observations, throttleDiagnostics };
 }
 
 function observation(overrides: Partial<PullRequestObservation> = {}): PullRequestObservation {
@@ -240,9 +247,12 @@ describe('GitHub watcher service', () => {
     });
     expect(fixture.invocations[1]?.args.slice(0, 2)).toEqual(['api', 'graphql']);
     expect(fixture.invocations[1]?.args).toContain('limit=100');
+    expect(fixture.invocations[1]?.args).toContain('github.com');
     expect(fixture.invocations[2]?.args).toEqual([
       'api',
       'repos/{owner}/{repo}/pulls/42/comments?per_page=100&sort=created&direction=desc',
+      '--hostname',
+      'github.com',
     ]);
     expect(fixture.invocations.every(({ command }) => command === 'gh')).toBe(true);
     expect(fixture.invocations[0]?.args.join(',')).not.toContain('body');
@@ -571,6 +581,47 @@ describe('GitHub watcher service', () => {
     expect(persistedAssociationReads).toBe(readsBeforeReleasedReconciliation);
   });
 
+  test('emits one typed unavailable throttle diagnostic until fallback recovery clears it', async () => {
+    const recovery = scriptedRunner([
+      rateLimitFallbackResult(),
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 42,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult(),
+      inlineCommentsResult(),
+    ]);
+    let invocations = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations += 1;
+        return invocations <= 2
+          ? Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }))
+          : recovery.runner.run(invocation);
+      },
+    };
+    const service = makeGitHubWatcherServiceProduction({ runner });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+    await Effect.runPromise(service.poll(received.callbacks));
+    expect(received.throttleDiagnostics).toEqual([{ status: 'rate_metadata_unavailable' }]);
+    expect(received.observations).toEqual([]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+    expect(received.throttleDiagnostics).toEqual([
+      { status: 'rate_metadata_unavailable' },
+      { status: 'rate_metadata_recovered' },
+    ]);
+    expect(received.observations).toHaveLength(2);
+  });
+
   test('defers watcher polling before watched PR requests when the bounded fallback reports near exhaustion', async () => {
     const fixture = scriptedRunner([rateLimitFallbackResult(100)]);
     const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
@@ -581,7 +632,11 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toEqual([]);
     expect(received.failures).toEqual([]);
     expect(fixture.invocations).toEqual([
-      { args: ['api', 'rate_limit'], command: 'gh', cwd: '/tmp/project' },
+      {
+        args: ['api', 'rate_limit', '--hostname', 'github.com'],
+        command: 'gh',
+        cwd: '/tmp/project',
+      },
     ]);
   });
 
@@ -617,7 +672,7 @@ describe('GitHub watcher service', () => {
       'pr-42',
     ]);
     expect(fixture.invocations).toHaveLength(4);
-    expect(fixture.invocations[0]?.args).toEqual(['api', 'rate_limit']);
+    expect(fixture.invocations[0]?.args).toEqual(['api', 'rate_limit', '--hostname', 'github.com']);
     expect(fixture.invocations.some(({ args }) => args.includes('43'))).toBe(false);
   });
 

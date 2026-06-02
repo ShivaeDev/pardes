@@ -5,6 +5,7 @@ import {
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
   type GitHubWatcherCallbacks,
+  type GitHubWatcherThrottleDiagnostic,
   type PullRequestDiscussionFeedback,
   type PullRequestDiscussionPageCap,
   type PullRequestDiscussionSnapshot,
@@ -830,6 +831,57 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     yield* callbacks.releaseInboxWake();
   });
 
+  const handleWatcherThrottleDiagnostic = Effect.fnUntraced(function* (
+    event: GitHubWatcherThrottleDiagnostic,
+  ) {
+    if (event.status === 'rate_metadata_recovered') {
+      if (namespace.state.githubRateMetadataUnavailableAt === undefined) return;
+      const timestamp = yield* nowIso;
+      const changed = yield* namespace.store.mutate((state) => {
+        if (state.githubRateMetadataUnavailableAt === undefined)
+          return Effect.succeed([false, state] as const);
+        const {
+          githubRateMetadataUnavailableAt: _githubRateMetadataUnavailableAt,
+          ...withoutWarning
+        } = state;
+        return Effect.succeed([true, withoutWarning] as const);
+      });
+      if (!changed) return;
+      yield* callbacks.appendEventSafely(
+        makeEvent(
+          'github_rate_metadata_recovered',
+          'GitHub.com watcher rate metadata recovered; deferred polling may resume.',
+          timestamp,
+        ),
+      );
+      yield* callbacks.refresh();
+      return;
+    }
+    if (namespace.state.githubRateMetadataUnavailableAt !== undefined) return;
+    const timestamp = yield* nowIso;
+    const attention = makeEvent(
+      'github_rate_metadata_unavailable',
+      'GitHub.com watcher rate metadata is unavailable or invalid; polling is deferred until bounded metadata recovers.',
+      timestamp,
+    );
+    const changed = yield* namespace.store.mutate((state) => {
+      if (state.githubRateMetadataUnavailableAt !== undefined)
+        return Effect.succeed([false, state] as const);
+      return Effect.succeed([
+        true,
+        {
+          ...state,
+          githubRateMetadataUnavailableAt: timestamp,
+          inbox: [...state.inbox, attention],
+        },
+      ] as const);
+    });
+    if (!changed) return;
+    yield* callbacks.appendEventSafely(attention);
+    yield* callbacks.refresh();
+    yield* callbacks.releaseInboxWake();
+  });
+
   const handlePullRequestHeadDivergence = Effect.fnUntraced(function* (event: {
     readonly pullRequestId: string;
     readonly expectedHeadSha: string;
@@ -909,6 +961,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     onFailure: (event) => semaphore.withPermit(handlePullRequestWatcherFailure(event)),
     onHeadDivergence: (event) => semaphore.withPermit(handlePullRequestHeadDivergence(event)),
     onObservation: observePullRequest,
+    onThrottleDiagnostic: (event) => semaphore.withPermit(handleWatcherThrottleDiagnostic(event)),
     persistedAssociations: () =>
       Object.values(namespace.state.pullRequests).filter(
         (pullRequest) => pullRequest.status === 'open',

@@ -2,6 +2,7 @@ import { Data, type Duration, Effect, Option, Schema } from 'effect';
 import { decodeGitHubJson } from './codecs.ts';
 import { type GitHubCommandError, GitHubResponseError } from './errors.ts';
 import {
+  GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
   type GitHubRateLimitHealth,
   makeGitHubHostedMetadataAdapter,
@@ -302,6 +303,8 @@ export function makeGitHubIntegrationHealthService(
     const response = yield* run(cwd, [
       'api',
       'graphql',
+      '--hostname',
+      GITHUB_HOSTED_METADATA_HOSTNAME,
       '--raw-field',
       `query=${HOSTED_CHECKS_GRAPHQL_QUERY}`,
       '--field',
@@ -333,6 +336,8 @@ export function makeGitHubIntegrationHealthService(
     const response = yield* run(cwd, [
       'api',
       'graphql',
+      '--hostname',
+      GITHUB_HOSTED_METADATA_HOSTNAME,
       '--raw-field',
       `query=${ADVERTISED_DEFAULT_BRANCH_GRAPHQL_QUERY}`,
       '--field',

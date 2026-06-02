@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -15,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Deferred, Effect, Fiber } from 'effect';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
@@ -31,6 +30,7 @@ import {
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   makeGitHubPublicationService,
+  makeGitHubWatcherService,
   type PublishedPullRequest,
   type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
@@ -40,7 +40,12 @@ import {
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
 import { makeFileSystemStateStore } from '../storage/index.ts';
-import { requiredValue } from '../test-support.ts';
+import {
+  copyOriginGitRepositoryFixture,
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  requiredValue,
+  runGitFixture,
+} from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
@@ -54,7 +59,8 @@ import {
   type InboxHandoffStart,
   MANAGER_COMPACTION_SAFETY_EXPIRY_MS,
   type ManagerCompactionSafetyScheduler,
-  ManagerController,
+  type ManagerControllerOptions,
+  ManagerController as ProductionManagerController,
 } from './controller.ts';
 import { currentVerificationAttempt, type PullRequestObservation } from './domain.ts';
 import { AgentNotFoundError } from './errors.ts';
@@ -63,6 +69,27 @@ import { ManagerInputValidationError } from './inputs.ts';
 
 const temporaryDirectories: string[] = [];
 const originalStateDir = process.env.PARDES_PI_STATE_DIR;
+const githubWatcherFixtures: GitHubWatcherShape[] = [];
+let restoreGitProtocolEnvironment: (() => void) | undefined;
+
+beforeEach(() => {
+  // Controller fixtures intentionally use copied local file origins through production Git transport.
+  restoreGitProtocolEnvironment = normalizeControlledLocalRemoteProtocolEnvironment();
+});
+
+class ManagerController extends ProductionManagerController {
+  constructor(pi: ExtensionAPI, options: ManagerControllerOptions = {}) {
+    const githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
+    githubWatcherFixtures.push(githubWatcher);
+    super(pi, { ...options, githubWatcher });
+  }
+}
+
+async function stopGithubWatcherFixtures(): Promise<void> {
+  for (const watcher of githubWatcherFixtures.splice(0).reverse())
+    await Effect.runPromise(watcher.stop());
+}
+
 type MutableWorktreeLease = { -readonly [Key in keyof WorktreeLease]: WorktreeLease[Key] };
 type MutablePersistedAgentPaths = {
   worktree: MutableWorktreeLease;
@@ -70,15 +97,21 @@ type MutablePersistedAgentPaths = {
   sessionFile: string;
 };
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0))
-    rmSync(directory, { force: true, recursive: true });
-  if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
-  else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+afterEach(async () => {
+  try {
+    await stopGithubWatcherFixtures();
+    for (const directory of temporaryDirectories.splice(0))
+      rmSync(directory, { force: true, recursive: true });
+    if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+    else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+  } finally {
+    restoreGitProtocolEnvironment?.();
+    restoreGitProtocolEnvironment = undefined;
+  }
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 function fixturePluginSource(): string {
@@ -101,19 +134,8 @@ function fixturePluginSource(): string {
 }
 
 function fixtureRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-manager-'));
+  const { repo, root } = copyOriginGitRepositoryFixture('pardes-manager-');
   temporaryDirectories.push(root);
-  const origin = join(root, 'origin.git');
-  const repo = join(root, 'project');
-  execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-  execFileSync('git', ['init', '-b', 'main', repo]);
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
-  writeFileSync(join(repo, 'README.md'), 'fixture\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'fixture');
-  git(repo, 'remote', 'add', 'origin', origin);
-  git(repo, 'push', '-u', 'origin', 'main');
   return repo;
 }
 
@@ -951,6 +973,7 @@ describe('manager controller', () => {
     const restored = new ManagerController(fixture.pi);
     await Effect.runPromise(restored.restore(fixture.ctx));
     expect(restored.snapshot()?.workstreams[created.id]).toEqual(created);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
 
     await Effect.runPromise(controller.deactivate(fixture.ctx));
     expect(controller.isActive()).toBe(false);
@@ -5156,6 +5179,28 @@ describe('manager controller', () => {
     await Effect.runPromise(deactivated.deactivate(fixture.ctx));
     expect(deactivatedWatcher.starts()).toBe(1);
     expect(deactivatedWatcher.stops()).toBe(1);
+  });
+
+  test('test fixture cleanup stops every tracked watcher when restored controllers remain active', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const activatedWatcher = manualGithubWatcher();
+    const activated = new ManagerController(fixture.pi, {
+      githubWatcher: activatedWatcher.watcher,
+    });
+    await Effect.runPromise(activated.activate(fixture.ctx));
+    const restoredWatcher = manualGithubWatcher();
+    const restored = new ManagerController(fixture.pi, { githubWatcher: restoredWatcher.watcher });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(activatedWatcher.stops()).toBe(0);
+    expect(restoredWatcher.stops()).toBe(1);
+    await stopGithubWatcherFixtures();
+    expect(activatedWatcher.stops()).toBe(1);
+    expect(restoredWatcher.stops()).toBe(2);
   });
 
   test('reconciles after publication and treats a deduplicated merged signal as observation only', async () => {

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { Effect } from 'effect';
+import { gitEnvironmentForExplicitCwd } from './environment.ts';
 import { GitCommandError } from './errors.ts';
 
 export interface GitResult {
@@ -27,6 +28,7 @@ export function runGit(
           {
             cwd,
             encoding: 'utf8',
+            env: gitEnvironmentForExplicitCwd(),
             ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
             signal,
             ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -12,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
+import { copyLocalGitRepositoryFixture, runGitFixture } from '../test-support.ts';
 import { discoverRepository } from './repository.ts';
 import type { WorktreeLease } from './schemas.ts';
 import {
@@ -30,7 +30,7 @@ afterEach(() => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 function owner(
@@ -64,15 +64,8 @@ const provisionReview = Effect.fnUntraced(function* (
 });
 
 function fixtureRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-worktree-'));
+  const { repo, root } = copyLocalGitRepositoryFixture('pardes-worktree-');
   temporaryDirectories.push(root);
-  const repo = join(root, 'project');
-  execFileSync('git', ['init', '-b', 'main', repo]);
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
-  writeFileSync(join(repo, 'README.md'), 'fixture\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'fixture');
   return realpathSync(repo);
 }
 

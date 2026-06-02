@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { gitEnvironmentForExplicitCwd } from './git-environment';
 
 export type BumpKind = 'patch' | 'minor' | 'major';
 
@@ -141,7 +142,11 @@ export function updateManifestVersion(raw: string, current: string, next: string
 type GitResult = { status: number | null; stderr: string; stdout: string };
 
 function git(root: string, args: string[]): GitResult {
-  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  const result = spawnSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    env: gitEnvironmentForExplicitCwd(),
+  });
   if (result.error) throw new Error(`could not launch git: ${result.error.message}`);
   return { status: result.status, stderr: result.stderr ?? '', stdout: result.stdout ?? '' };
 }

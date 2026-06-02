@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -29,6 +28,7 @@ import {
   SUBMISSION_TOOL,
   strictClassification,
 } from './bump-classifier';
+import { runGitTestFixture } from './git-test-fixture';
 
 const verdict = {
   added: [],
@@ -64,7 +64,7 @@ function run(overrides: Partial<Parameters<typeof auditClassifierRun>[0]> = {}) 
 }
 
 function git(root: string, args: string[]): string {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  return runGitTestFixture(root, args);
 }
 
 function snapshotRepository(): { after: string; before: string; root: string } {
@@ -83,18 +83,14 @@ function snapshotRepository(): { after: string; before: string; root: string } {
   writeFileSync(join(root, 'source-link'), '/etc/passwd');
   git(root, ['add', '--', 'README.md']);
   git(root, ['add', '--intent-to-add', 'source-link']);
-  execFileSync(
-    'git',
-    [
-      'update-index',
-      '--add',
-      '--cacheinfo',
-      '120000',
-      git(root, ['hash-object', '-w', 'source-link']),
-      'source-link',
-    ],
-    { cwd: root },
-  );
+  git(root, [
+    'update-index',
+    '--add',
+    '--cacheinfo',
+    '120000',
+    git(root, ['hash-object', '-w', 'source-link']),
+    'source-link',
+  ]);
   git(root, ['commit', '--quiet', '-m', 'after']);
   return { after: git(root, ['rev-parse', 'HEAD']), before, root };
 }
@@ -356,12 +352,9 @@ describe('classifierEnvironment', () => {
     const sandbox = createClassifierSandbox('.', parent);
     try {
       expect(existsSync(join(sandbox.workspace, '.git'))).toBe(true);
-      expect(
-        execFileSync('git', ['rev-parse', '--show-toplevel'], {
-          cwd: sandbox.workspace,
-          encoding: 'utf8',
-        }).trim(),
-      ).toBe(realpathSync(sandbox.workspace));
+      expect(git(sandbox.workspace, ['rev-parse', '--show-toplevel'])).toBe(
+        realpathSync(sandbox.workspace),
+      );
       expect(existsSync(join(sandbox.root, '.opencode/tools/ancestor-probe.ts'))).toBe(false);
       expect(existsSync(join(sandbox.classifierConfig, 'tools/submit_verdict.ts'))).toBe(true);
     } finally {

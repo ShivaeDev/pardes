@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { gitEnvironmentForExplicitCwd } from './git-environment';
 
 export const CLASSIFIER_AGENT = 'bump';
 export const OPENCODE_PREFLIGHT_TIMEOUT_MS = 90_000;
@@ -443,7 +444,11 @@ export function createClassifierSandbox(sourceRoot = '.', parent = tmpdir()): Cl
 }
 
 function gitBuffer(sourceRoot: string, args: string[], maxBuffer: number): Buffer {
-  const result = spawnSync('git', ['-C', sourceRoot, ...args], { encoding: 'buffer', maxBuffer });
+  const result = spawnSync('git', ['-C', sourceRoot, ...args], {
+    encoding: 'buffer',
+    env: gitEnvironmentForExplicitCwd(),
+    maxBuffer,
+  });
   if (result.error)
     throw new Error(`could not launch snapshot git ${args[0]}: ${result.error.message}`);
   if (result.status !== 0) {

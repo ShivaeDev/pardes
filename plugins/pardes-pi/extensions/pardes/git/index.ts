@@ -2,6 +2,7 @@ export {
   type RemoteBaseline,
   resolveRemoteBaseline,
 } from './baselines.ts';
+export { gitEnvironmentForExplicitCwd } from './environment.ts';
 export {
   DirtyWorktreeError,
   GitCommandError,

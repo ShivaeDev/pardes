@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -14,6 +13,7 @@ import {
   updateManifestVersion,
   versionIntroductionCommit,
 } from './bump-release';
+import { runGitTestFixture } from './git-test-fixture';
 
 const roots: string[] = [];
 
@@ -28,7 +28,7 @@ function fixture(): string {
 }
 
 function git(root: string, args: string[]): string {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  return runGitTestFixture(root, args);
 }
 
 function commitFile(root: string, path: string, body: string, message: string): string {

@@ -70,9 +70,14 @@ serialization still converge through that owner.
 
 ## Extract God files by responsibility
 
-File length is a signal to inspect, not an extraction rule. Extract when a
-module contains separable responsibilities with distinct change reasons and a
-coherent seam. Good candidates include pure policy, state projection, protocol
+File length is a signal to inspect, not an extraction rule. Treat any source
+file over roughly 200 lines as a red flag that deserves active review because
+responsibilities often accumulate there. Extract only when that review finds a
+cohesive responsibility, invariant seam, or distinct change reason. The
+heuristic is not a mechanical pass/fail threshold and does not justify tiny
+wrappers solely to reduce line count.
+
+Good extraction candidates include pure policy, state projection, protocol
 interpretation, adapter mechanics, and lifecycle compensation that can be named
 and tested independently.
 
@@ -117,6 +122,8 @@ For a source-organization or maintainability refactor, verify:
 - pure projections and policies remain free of unnecessary Effect service
   ceremony;
 - lifecycle ownership, serialization, cleanup, and compensation remain clear;
+- source files over roughly 200 lines received active review without
+  threshold-driven extraction;
 - the change avoids file-type folders, generic utility bags, and tiny wrappers;
 - tests remain colocated and cover preserved invariants;
 - documentation remains boundary-level and any convention change had explicit

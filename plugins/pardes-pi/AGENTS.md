@@ -24,19 +24,19 @@ Follow the Effect repository's own patterns where applicable, especially:
 
 Read `docs/NORTH_STAR.md` before changing architecture. Follow
 `docs/ARCHITECTURE.md` for bounded-context refactors and import-direction rules.
-Implement one reviewed vertical slice at a time. Do not add daemon behavior,
-cross-manager scheduling, or speculative recovery machinery.
+Read `docs/CODE_QUALITY.md` before source-organization or maintainability
+refactors. Implement one reviewed vertical slice at a time. Do not add daemon
+behavior, cross-manager scheduling, or speculative recovery machinery.
 
-## Architecture documentation gate
+## Architecture and code-quality documentation gate
 
-Treat `docs/ARCHITECTURE.md` as closed by default. Feature, bugfix, UX, test,
-and maintenance slices must not edit it. Do not append prose because a change
-seems reusable, because a new file exists, or because a worker wants to justify
-its design.
+Treat `docs/ARCHITECTURE.md` and `docs/CODE_QUALITY.md` as closed by default.
+Feature, bugfix, UX, test, and maintenance slices must not edit them. Do not
+append prose because a change seems reusable, because a new file exists, or
+because a worker wants to justify its design.
 
-A bounded-context migration may update `docs/ARCHITECTURE.md` only when its task
-explicitly authorizes the edit, and then only to correct the factual capability
-inventory or replace an existing convention. Adding a new convention requires
+An explicitly authorized documentation slice may correct factual boundary-level
+inventory. Adding or replacing a convention in either document requires
 explicit user or coordinating-manager approval before editing. When uncertain,
-leave the file unchanged and report the proposed documentation change for
+leave the files unchanged and report the proposed documentation change for
 review.

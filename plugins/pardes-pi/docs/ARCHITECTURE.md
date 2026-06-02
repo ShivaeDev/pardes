@@ -22,53 +22,25 @@ only that entrypoint. Current boundaries are intentionally asymmetric:
 
 ```text
 extensions/pardes/
-├── manager/                      # manager aggregate and control plane
-│   ├── index.ts                  # only manager import path for outside callers
-│   ├── controller.ts             # extension-scoped lifecycle owner
-│   ├── domain.ts                 # durable schema-v1 aggregate projection
-│   ├── inputs.ts                 # model/tool input decoding
-│   ├── namespace.ts              # durable namespace and retained-path validation
-│   ├── activation-safety.ts      # pinned child-runtime snapshot and guard
-│   ├── agent-attachment-lifecycle.ts # spawn, revive, stop, and rollback lifecycle
-│   ├── inbox.ts                  # tokenized durable wake and attention-handoff policy
-│   ├── attention.ts              # pure attention classification
-│   ├── idle-disposition.ts       # pure idle-worker projection
-│   ├── worker-events.ts          # pure bounded worker-event handoff policy
-│   ├── worker-event-coordinator.ts # serialized incoming worker-event handoff
-│   ├── guidance.ts               # compact manager lifecycle guidance
-│   ├── compaction.ts             # bounded manager-compaction projection
-│   ├── publication-coordinator.ts # serialized exact-SHA publication and auto-sync
-│   ├── review-gate-lifecycle.ts  # serialized watcher and merged-retirement lifecycle
-│   ├── verification.ts           # retained advisory-verifier lifecycle
-│   └── lease-cleanup.ts          # explicit retained-lease cleanup policy
-├── tools/                        # model-visible Pi adapters and bounded projections
-│   ├── index.ts                  # registration composition
-│   ├── agents.ts                 # worker lifecycle registrations
-│   ├── control-plane.ts          # status and inbox registrations
-│   ├── workstreams.ts            # workstream registrations
-│   ├── pull-requests.ts          # publication registration
-│   ├── reports.ts                # opt-in bounded report retrieval
-│   ├── verifications.ts          # advisory verification registrations
-│   ├── attention-handoff.ts      # await_user_feedback registration
-│   ├── question.ts               # interactive decision question
-│   ├── registration.ts           # shared adapter helpers
-│   └── projections.ts            # bounded model-facing projections
-├── github/                       # GitHub publication and watcher integration
-├── git/                          # discovery, baselines, writing leases, detached review checkouts
-├── reporting/                    # durable report semantics and bounded retrieval
-├── storage/                      # manager-scoped durable filesystem adapter
-├── worker-runtime/               # retained child RPC, worker/verifier profiles, verifier evidence
-└── presentation/                 # Pi and terminal presentation adapters
-    └── attention-dialog.ts       # bounded await_user_feedback input
+├── manager/          # manager aggregate, control plane, and integrated lifecycle coordination
+├── tools/            # model-visible Pi adapters and bounded projections
+├── github/           # remote publication and watcher integration
+├── git/              # discovery, baselines, writing leases, and detached review checkouts
+├── reporting/        # durable report semantics and bounded retrieval
+├── storage/          # manager-scoped durable filesystem adapter
+├── worker-runtime/   # retained child RPC processes, profiles, and verifier evidence
+└── presentation/     # Pi UI calls and terminal rendering
 ```
 
-Do not create folders merely to mirror file types. Keep small pure helpers near
-the owning domain. A bounded context does not absorb adjacent capabilities: the
-manager owns aggregate workflow; GitHub owns remote publication and watcher
-transport; Git owns baselines and worktree mechanics; storage owns serialized
-filesystem persistence; worker runtime owns retained child processes; and
-presentation owns Pi UI calls and terminal rendering.
+Every listed boundary exposes `index.ts` as its stable public entrypoint.
+Internal layouts are deliberately omitted: they evolve as coherent capabilities
+become clearer and should not turn this document into a brittle leaf inventory.
+A nested internal capability may expose its own facade when it has a real stable
+API, but internal modules otherwise import one another directly. Follow
+[CODE_QUALITY.md](./CODE_QUALITY.md) for the maintainability rubric.
 
+Do not create folders merely to mirror file types. Keep small pure helpers near
+the owning domain. A bounded context does not absorb adjacent capabilities.
 When the manager aggregate embeds a value owned elsewhere, define its schema in
 the owning context and compose it through the public entrypoint. Keep semantic
 validation that depends on namespaces, filesystem state, or external inspection

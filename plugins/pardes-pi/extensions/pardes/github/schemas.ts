@@ -56,13 +56,6 @@ export function resolvePullRequestBrowserMode(
   return options.browserMode ?? (options.openInBrowser ? 'foreground' : 'none');
 }
 
-const PullRequestBrowserOptionsAreCompatible = Schema.makeFilter(
-  pullRequestBrowserOptionsAreCompatible,
-  {
-    description: 'browserMode agrees with the compatibility openInBrowser alias when both are set',
-  },
-);
-
 export const GitHubDiscussionSurfaceSchema = Schema.Literals([
   'issue_comment',
   'review',
@@ -254,15 +247,13 @@ export const HumanPublishedReviewBranchReservationSchema = Schema.Struct({
 export const PublishPullRequestInputSchema = Schema.Struct({
   baseBranch: PullRequestBranchSchema,
   body: PullRequestBodySchema,
-  browserMode: Schema.optionalKey(PullRequestBrowserModeSchema),
   cwd: NonEmptyStringSchema,
   headBranch: PersistedPublishedReviewBranchSchema,
   headSha: FullCommitShaSchema,
   humanHeadBranchReservation: Schema.optionalKey(HumanPublishedReviewBranchReservationSchema),
   legacyExistingPullRequestNumber: Schema.optionalKey(PositiveIntegerSchema),
-  openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
-}).check(PullRequestBrowserOptionsAreCompatible);
+});
 
 export const SyncExistingPullRequestInputSchema = Schema.Struct({
   cwd: NonEmptyStringSchema,

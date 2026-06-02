@@ -1,10 +1,5 @@
 import { createHash } from 'node:crypto';
 import { Context, Data, Effect, Layer, Schedule, Schema } from 'effect';
-import {
-  type BrowserHandoffShape,
-  makeBrowserHandoff,
-  type PullRequestBrowserHandoff,
-} from './browser-handoff.ts';
 import { decodeGitHubJson } from './codecs.ts';
 import {
   type GitHubCommandError,
@@ -27,10 +22,8 @@ import {
   isManagedPublishedReviewBranch,
   PublishedReviewBranchCandidatesInputSchema,
   PublishPullRequestInputSchema,
-  type PullRequestBrowserMode,
   ReleasePublishedReviewBranchClaimInputSchema,
   ReservePublishedReviewBranchInputSchema,
-  resolvePullRequestBrowserMode,
   SyncExistingPullRequestInputSchema,
 } from './schemas.ts';
 import {
@@ -70,9 +63,6 @@ export interface PublishPullRequestInput {
   readonly baseBranch: string;
   readonly title: string;
   readonly body: string;
-  readonly browserMode?: PullRequestBrowserMode;
-  /** Compatibility alias: true means foreground and false means none. */
-  readonly openInBrowser?: boolean;
   /** Mechanical proof for initial human-owned publication, verified against its remote ownership anchor. */
   readonly humanHeadBranchReservation?: {
     readonly claimSha: string;
@@ -126,9 +116,6 @@ export interface PublishedPullRequest {
   readonly headBranch: string;
   readonly baseBranch: string;
   readonly action: 'created' | 'updated';
-  readonly browserHandoff: PullRequestBrowserHandoff;
-  /** Compatibility projection for callers predating explicit browser handoff outcomes. */
-  readonly openedInBrowser: boolean;
 }
 
 export interface GitHubPublicationShape {
@@ -219,7 +206,6 @@ export function makeGitHubPublicationService(
   options: {
     readonly runner?: GitHubCommandRunnerShape;
     readonly hostedMetadata?: GitHubHostedMetadataShape;
-    readonly browserHandoff?: BrowserHandoffShape;
     /** Test seam: production callers may only tighten the bounded convergence window. */
     readonly pushedHeadVerificationDelayMillis?: number;
     /** Test seam: production callers may only tighten the bounded convergence window. */
@@ -231,7 +217,6 @@ export function makeGitHubPublicationService(
     runner.run({ args, command: executable, cwd });
   const github = makeGitHubCli(runner);
   const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
-  const browserHandoff = options.browserHandoff ?? makeBrowserHandoff();
   const runGitHub = (route: GitHubRepositoryIdentity, cwd: string, args: ReadonlyArray<string>) =>
     hostedMetadata.accountOpaqueRequest(
       'graphql',
@@ -731,19 +716,13 @@ export function makeGitHubPublicationService(
             'verify published pull request head and base',
           );
     const pullRequest = yield* verifyPublishedPullRequest;
-    const handoff = yield* browserHandoff.handoff(
-      pullRequest.url,
-      resolvePullRequestBrowserMode(input),
-    );
     return {
       action,
       baseBranch: pullRequest.baseRefName,
       body: input.body,
-      browserHandoff: handoff,
       draft: pullRequest.isDraft,
       headBranch: pullRequest.headRefName,
       number: pullRequest.number,
-      openedInBrowser: handoff.status === 'opened',
       status: status(pullRequest.state),
       title: input.title,
       url: pullRequest.url,

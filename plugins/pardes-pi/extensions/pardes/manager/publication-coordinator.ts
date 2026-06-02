@@ -7,10 +7,12 @@ import {
   type WorktreeServiceError,
 } from '../git/index.ts';
 import {
+  type BrowserHandoffShape,
   type GitHubPublicationError,
   type GitHubPublicationShape,
   isManagedPublishedReviewBranch,
   type PullRequestBrowserHandoff,
+  resolvePullRequestBrowserMode,
 } from '../github/index.ts';
 import type { StateStoreShape, StoreError } from '../storage/index.ts';
 import type { AgentRecord, ManagerEvent, ManagerState, PullRequestRecord } from './domain.ts';
@@ -94,6 +96,7 @@ export interface PullRequestPublicationCoordinatorCallbacks {
 export interface PullRequestPublicationCoordinatorOptions {
   readonly namespace: PullRequestPublicationNamespace;
   readonly worktrees: ManagedWorktreeShape;
+  readonly browserHandoff: BrowserHandoffShape;
   readonly github: GitHubPublicationShape;
   readonly callbacks: PullRequestPublicationCoordinatorCallbacks;
 }
@@ -140,7 +143,7 @@ export function pullRequestEventAssociation(
 export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function* (
   options: PullRequestPublicationCoordinatorOptions,
 ) {
-  const { namespace, worktrees, github, callbacks } = options;
+  const { namespace, worktrees, browserHandoff, github, callbacks } = options;
   const semaphore = yield* Semaphore.make(1);
 
   const persistAgentAudit = Effect.fnUntraced(function* (
@@ -481,8 +484,6 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       headBranch,
       headSha: inspection.headSha,
       title: input.title,
-      ...(input.browserMode === undefined ? {} : { browserMode: input.browserMode }),
-      ...(input.openInBrowser === undefined ? {} : { openInBrowser: input.openInBrowser }),
       ...(claimSha === undefined
         ? {}
         : {
@@ -612,10 +613,17 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         reason: `published review gate ${id} disappeared from durable manager state`,
       });
     }
+    // Browser launch is deliberately last: a slow or failing desktop opener must
+    // never delay durable association, claim release, event recording, terminal
+    // observation, or watcher reconciliation for an already verified remote PR.
+    const handoff = yield* browserHandoff.handoff(
+      persistedPullRequest.url,
+      resolvePullRequestBrowserMode(input),
+    );
     return {
       action: publication.action,
-      browserHandoff: publication.browserHandoff,
-      openedInBrowser: publication.openedInBrowser,
+      browserHandoff: handoff,
+      openedInBrowser: handoff.status === 'opened',
       pullRequest: persistedPullRequest,
     } satisfies PullRequestCreateResult;
   });

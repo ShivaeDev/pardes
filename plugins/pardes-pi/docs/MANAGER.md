@@ -73,7 +73,9 @@ use `'background'` for macOS `open -g` with a portable ordinary-opener fallback
 elsewhere, and use `'foreground'` for the ordinary platform opener. The legacy
 `openInBrowser` boolean remains a compatibility alias (`true` means
 `'foreground'`; `false` means `'none'`). An opener failure is surfaced as a
-safe handoff outcome without turning successful publication into failure.
+safe handoff outcome without turning successful publication into failure. Pardes
+runs the optional opener only after durable review-gate association and lifecycle
+settlement.
 
 If publication is rejected or a concrete review question remains, request one
 advisory verification. Do not reproduce publication checks with shell commands

@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import type { PullRequestRecord } from '../manager/index.ts';
 import {
   DEFAULT_GITHUB_WATCHER_CADENCE,
+  DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT,
   derivePullRequestTransitions,
   GitHubWatcher,
   type GitHubWatcherCallbacks,
@@ -533,6 +534,30 @@ describe('GitHub watcher service', () => {
 
     expect(persistedAssociationReads).toBeGreaterThan(0);
     expect(persistedAssociationReads).toBe(readsBeforeReleasedReconciliation);
+  });
+
+  test('times out and interrupts a stalled command through the typed watcher failure callback', async () => {
+    let interrupted = false;
+    const runner: GitHubCommandRunnerShape = {
+      run: () =>
+        Effect.never.pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              interrupted = true;
+            }),
+          ),
+        ),
+    };
+    const service = makeGitHubWatcherService({ commandTimeout: '5 millis', runner });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT).toBe('10 seconds');
+    expect(interrupted).toBe(true);
+    expect(received.observations).toEqual([]);
+    expect(received.failures).toHaveLength(1);
+    expect(received.failures[0]?.error._tag).toBe('GitHubWatcherTimeoutError');
   });
 
   test('reports malformed gh metadata through the typed watcher failure callback', async () => {

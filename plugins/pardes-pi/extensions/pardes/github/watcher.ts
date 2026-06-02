@@ -4,13 +4,19 @@ import {
   Effect,
   Exit,
   Layer,
+  Option,
   Schedule,
   Schema,
   Scope,
   Semaphore,
 } from 'effect';
 import { decodeGitHubJson } from './codecs.ts';
-import { type GitHubCommandError, GitHubResponseError, GitHubWatcherInputError } from './errors.ts';
+import {
+  type GitHubCommandError,
+  GitHubResponseError,
+  GitHubWatcherInputError,
+  GitHubWatcherTimeoutError,
+} from './errors.ts';
 import {
   GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH,
   type GitHubDiscussionCursor,
@@ -29,6 +35,7 @@ import {
 } from './transport.ts';
 
 export const DEFAULT_GITHUB_WATCHER_CADENCE: Duration.Input = '15 seconds';
+export const DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT: Duration.Input = '10 seconds';
 const WATCHER_JSON_FIELDS = 'number,headRefOid,state,mergeable,reviewDecision,statusCheckRollup';
 const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}}}`;
 
@@ -38,7 +45,11 @@ export type PullRequestWatcherTransition =
   | 'conflict'
   | 'merged'
   | 'closed_unmerged';
-export type GitHubWatcherError = GitHubWatcherInputError | GitHubResponseError | GitHubCommandError;
+export type GitHubWatcherError =
+  | GitHubWatcherInputError
+  | GitHubResponseError
+  | GitHubCommandError
+  | GitHubWatcherTimeoutError;
 
 /** Content-free projection emitted from the GitHub adapter into manager state. */
 export interface PullRequestObservation {
@@ -300,10 +311,25 @@ export function derivePullRequestTransitions(
 }
 
 export function makeGitHubWatcherService(
-  options: { readonly runner?: GitHubCommandRunnerShape; readonly cadence?: Duration.Input } = {},
+  options: {
+    readonly runner?: GitHubCommandRunnerShape;
+    readonly cadence?: Duration.Input;
+    readonly commandTimeout?: Duration.Input;
+  } = {},
 ): GitHubWatcherShape {
   const github = makeGitHubCli(options.runner ?? makeExecFileGitHubCommandRunner());
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
+  const commandTimeout = options.commandTimeout ?? DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT;
+  const run = (cwd: string, args: ReadonlyArray<string>) =>
+    github.run(cwd, args).pipe(
+      Effect.timeoutOption(commandTimeout),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.fail(new GitHubWatcherTimeoutError({ timeout: commandTimeout })),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
   let active: ActiveWatcher | undefined;
   const pollSemaphore = Semaphore.makeUnsafe(1);
 
@@ -316,13 +342,7 @@ export function makeGitHubWatcherService(
     ).pipe(Effect.mapError(watcherInputError));
     const identifier =
       association.number === undefined ? association.url : String(association.number);
-    const viewed = yield* github.run(cwd, [
-      'pr',
-      'view',
-      identifier,
-      '--json',
-      WATCHER_JSON_FIELDS,
-    ]);
+    const viewed = yield* run(cwd, ['pr', 'view', identifier, '--json', WATCHER_JSON_FIELDS]);
     const decoded = yield* decodeGitHubJson(
       'watch pull request',
       GitHubPullRequestObservationSchema,
@@ -356,7 +376,7 @@ export function makeGitHubWatcherService(
   });
 
   const inspectDiscussion = Effect.fnUntraced(function* (cwd: string, number: number) {
-    const discussionResponse = yield* github.run(cwd, [
+    const discussionResponse = yield* run(cwd, [
       'api',
       'graphql',
       '--raw-field',
@@ -375,7 +395,7 @@ export function makeGitHubWatcherService(
       GitHubPullRequestDiscussionGraphQLSchema,
       discussionResponse.stdout,
     );
-    const inlineResponse = yield* github.run(cwd, [
+    const inlineResponse = yield* run(cwd, [
       'api',
       `repos/{owner}/{repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
     ]);

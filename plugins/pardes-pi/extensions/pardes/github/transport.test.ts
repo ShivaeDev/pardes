@@ -12,6 +12,7 @@ import {
   makeGitHubCli,
   type ProcessInvocation,
 } from './transport.ts';
+import { classifyGitHubWatcherFailure } from './watcher-diagnostics.ts';
 
 describe('GitHub CLI transport', () => {
   test('preserves injected gh argv exactly, including a multiline body as one token', async () => {
@@ -60,7 +61,7 @@ describe('GitHub CLI transport', () => {
     }
   });
 
-  test('maps execFile failures to a typed error carrying raw structured diagnostics', async () => {
+  test('maps execFile failures to a typed error carrying only safe structured metadata', async () => {
     const runner = makeExecFileGitHubCommandRunner();
     const invocation = {
       args: ['--body', 'one argv token'],
@@ -71,9 +72,56 @@ describe('GitHub CLI transport', () => {
     const failure = await Effect.runPromise(runner.run(invocation).pipe(Effect.flip));
 
     expect(failure._tag).toBe('GitHubCommandError');
-    expect(failure.command).toBe(invocation.command);
-    expect(failure.cwd).toBe(invocation.cwd);
-    expect(failure.args).toEqual(invocation.args);
+    expect(failure.command).toBe('unrecognized-command');
+    expect(failure.cwd).toBe('[redacted]');
+    expect(failure.args).toEqual([]);
+    expect(failure.cause).toEqual({ code: 'ENOENT', kind: 'exec_file_failed' });
+    expect(JSON.stringify(failure)).not.toContain('one argv token');
+    expect(JSON.stringify(failure)).not.toContain(invocation.command);
+  });
+
+  test('retains only an allowlisted operation prefix from failed command argv', async () => {
+    const token = 'private-ref-and-body-marker';
+    const failure = await Effect.runPromise(
+      makeExecFileGitHubCommandRunner()
+        .run({ args: ['push', token], command: 'git', cwd: '/tmp' })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure.command).toBe('git');
+    expect(failure.cwd).toBe('[redacted]');
+    expect(failure.args).toEqual(['push']);
+    expect(JSON.stringify(failure)).not.toContain(token);
+  });
+
+  test('reduces stderr auth symptoms to a safe hint without carrying stderr into the typed error', async () => {
+    const token = 'ghp_private-token-marker';
+    const failure = await Effect.runPromise(
+      makeExecFileGitHubCommandRunner()
+        .run({
+          args: [
+            '-e',
+            `process.stderr.write("HTTP 401 authentication required ${token}"); process.exit(1);`,
+          ],
+          command: process.execPath,
+          cwd: '/tmp',
+        })
+        .pipe(Effect.flip),
+    );
+    const diagnostic = classifyGitHubWatcherFailure(failure);
+
+    expect(failure.diagnosticHint).toBe('authentication_likely');
+    expect(failure.command).toBe('unrecognized-command');
+    expect(failure.cwd).toBe('[redacted]');
+    expect(failure.args).toEqual([]);
+    expect(failure.cause).toEqual({ code: 1, killed: false, kind: 'exec_file_failed' });
+    expect(diagnostic).toEqual({
+      kind: 'authentication_likely',
+      summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+    });
+    expect(JSON.stringify(failure)).not.toContain(token);
+    expect(JSON.stringify(failure)).not.toContain('process.stderr.write');
+    expect(JSON.stringify(diagnostic)).not.toContain(token);
   });
 
   test('maps malformed JSON and schema mismatches to typed operation-specific response errors', async () => {

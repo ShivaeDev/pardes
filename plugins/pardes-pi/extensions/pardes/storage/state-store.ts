@@ -20,6 +20,7 @@ export interface StateStoreShape {
   readonly reportsPath: string;
   readonly initialize: (state: ManagerState) => Effect.Effect<void, StoreError>;
   readonly load: () => Effect.Effect<ManagerState, StoreError>;
+  /** Returning the supplied state object exactly is an authoritative no-op. */
   readonly mutate: <A, E>(
     mutation: (state: ManagerState) => Effect.Effect<readonly [A, ManagerState], E>,
   ) => Effect.Effect<A, StoreError | E>;
@@ -62,6 +63,7 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
       Effect.gen(function* () {
         const current = yield* loadUnlocked();
         const [result, proposed] = yield* mutation(current);
+        if (proposed === current) return result;
         const next = { ...proposed, revision: current.revision + 1 };
         yield* writeUnlocked(next);
         return result;

@@ -115,6 +115,7 @@ import {
   type PullRequestPublicationNamespace,
 } from './publication-coordinator.ts';
 import {
+  type GitHubRateLimitSymptomOwnershipPort,
   makeReviewGateLifecycleCoordinator,
   type ReviewGateLifecycleCoordinatorShape,
 } from './review-gate-lifecycle.ts';
@@ -249,6 +250,10 @@ function isSameInboxHandoff(
 
 export type { PullRequestCreateInput } from './inputs.ts';
 export type { PullRequestCreateResult } from './publication-coordinator.ts';
+export type {
+  GitHubRateLimitSymptom,
+  GitHubRateLimitSymptomOwnershipPort,
+} from './review-gate-lifecycle.ts';
 
 export interface AgentCompactResult {
   readonly agentId: string;
@@ -273,6 +278,7 @@ export interface ManagerControllerOptions {
   readonly github?: GitHubPublicationShape;
   readonly githubWatcher?: GitHubWatcherShape;
   readonly githubIntegrationHealth?: GitHubIntegrationHealthShape;
+  readonly githubRateLimitSymptomOwnership?: GitHubRateLimitSymptomOwnershipPort;
   readonly makeWorkers?: (
     onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
   ) => GuardedWorkerSupervisorShape;
@@ -336,6 +342,7 @@ export class ManagerController {
   private readonly github: GitHubPublicationShape;
   private readonly githubWatcher: GitHubWatcherShape;
   private readonly githubIntegrationHealth: GitHubIntegrationHealthShape;
+  private readonly githubRateLimitSymptomOwnership: GitHubRateLimitSymptomOwnershipPort | undefined;
   private readonly workers: GuardedWorkerSupervisorShape;
   private readonly presentation: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
   private readonly activationSafety: PluginActivationSafetyShape;
@@ -363,6 +370,7 @@ export class ManagerController {
     this.githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
     this.githubIntegrationHealth =
       options.githubIntegrationHealth ?? makeGitHubIntegrationHealthService();
+    this.githubRateLimitSymptomOwnership = options.githubRateLimitSymptomOwnership;
     this.presentation = options.presentation ?? makeManagerPresentation();
     this.compactionSafetyScheduler =
       options.compactionSafetyScheduler ?? defaultManagerCompactionSafetyScheduler;
@@ -568,6 +576,9 @@ export class ManagerController {
             ? {}
             : { lastPushedHeadSha: pullRequest.lastPushedHeadSha }),
           ...(pullRequest.headBranch === undefined ? {} : { headBranch: pullRequest.headBranch }),
+          ...(pullRequest.watcherFailure === undefined
+            ? {}
+            : { watcherFailure: pullRequest.watcherFailure }),
         })),
     });
   });
@@ -854,6 +865,7 @@ export class ManagerController {
       callbacks: {
         appendEventSafely: (event) => this.appendEventSafely(active.store, event),
         auditAutoStop: (agent) => attachments.auditHandoffBestEffort(agent, 'auto_stop'),
+        githubRateLimitSymptomOwnership: this.githubRateLimitSymptomOwnership,
         liveRuntimes: () => this.liveRuntimes,
         recordStoppedRuntime: (agentId, runtime) => {
           this.liveRuntimes.set(agentId, runtime);

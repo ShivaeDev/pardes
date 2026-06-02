@@ -23,6 +23,7 @@ export {
   type GitHubDiscussionBodyExcerptItem,
   type GitHubDiscussionBodyExcerptPage,
   type GitHubFailingCheckMetadata,
+  type GitHubFailingCheckStatus,
   type GitHubFailingChecksInspection,
   type GitHubHostedDrilldownAssociation,
   type GitHubHostedDrilldownShape,

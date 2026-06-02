@@ -56,12 +56,20 @@ export interface GitHubHostedDrilldownAssociation {
   readonly lastPushedHeadSha?: string;
 }
 
+export type GitHubFailingCheckStatus =
+  | 'COMPLETED'
+  | 'IN_PROGRESS'
+  | 'PENDING'
+  | 'QUEUED'
+  | 'REQUESTED'
+  | 'WAITING';
+
 export interface GitHubFailingCheckMetadata {
   readonly conclusion: string;
   readonly jobId: number;
   readonly name: string;
   readonly runId: number;
-  readonly status: string;
+  readonly status: GitHubFailingCheckStatus;
   readonly url: string;
 }
 
@@ -206,7 +214,7 @@ const UNSAFE_DIRECTIONAL_PATTERN = new RegExp(
   'g',
 );
 const SECRET_ASSIGNMENT_PATTERN =
-  /(^|[^a-zA-Z0-9_-])((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gim;
+  /(^|[^a-zA-Z0-9_-])((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|Bearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}|[^\s,;]+)/gim;
 const SAFE_DISCUSSION_AUTHOR_PATTERN = /^[a-zA-Z0-9-]+(?:\[bot\])?$/;
 
 function escapedCodePoint(value: string): string {
@@ -220,14 +228,14 @@ function redactHostedExcerpt(source: string): string {
     .replace(TERMINAL_CONTROL_PATTERN, '')
     .replace(UNSAFE_DIRECTIONAL_PATTERN, escapedCodePoint)
     .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g, '[REDACTED PEM]')
+    .replace(SECRET_ASSIGNMENT_PATTERN, '$1$2$3[REDACTED]')
     .replace(
       /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/g,
       '[REDACTED TOKEN]',
     )
     .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED AWS KEY]')
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED JWT]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}/gi, 'Bearer [REDACTED]')
-    .replace(SECRET_ASSIGNMENT_PATTERN, '$1$2$3[REDACTED]');
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}/gi, 'Bearer [REDACTED]');
 }
 
 function excerpt(source: string, offset: number, limit: number) {

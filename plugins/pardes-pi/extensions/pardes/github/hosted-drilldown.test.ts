@@ -36,6 +36,7 @@ function checkRun(
     readonly runId: number;
     readonly conclusion: string;
     readonly name: string;
+    readonly status: string;
   }> = {},
 ) {
   return {
@@ -50,7 +51,7 @@ function checkRun(
     databaseId: overrides.databaseId ?? 8001,
     detailsUrl: `https://github.com/acme/project/actions/runs/${overrides.runId ?? 7001}/job/${overrides.databaseId ?? 8001}`,
     name: overrides.name ?? 'lint',
-    status: 'COMPLETED',
+    status: overrides.status ?? 'COMPLETED',
   };
 }
 
@@ -138,6 +139,23 @@ describe('GitHub hosted drill-down service', () => {
     expect(argv).not.toContain('logs');
     expect(argv).not.toContain('body');
     expect(argv).not.toContain('output');
+  });
+
+  test('rejects bidi and token-bearing malformed hosted check status instead of projecting raw external text', async () => {
+    const unsafeStatus = `FUTURE_\u202e_ghp_abcdefghijklmnop`;
+    const fixture = scriptedRunner([checksResult({ nodes: [checkRun({ status: unsafeStatus })] })]);
+
+    const failure = await Effect.runPromise(
+      makeGitHubHostedDrilldownService({ runner: fixture.runner })
+        .inspectFailingChecks({ cwd: '/tmp/project', pullRequest: association() })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'inspect hosted drill-down checks',
+    });
+    expect(fixture.invocations).toHaveLength(1);
   });
 
   test('re-proves one known failing run/job before returning one paginated bounded redacted inert log excerpt', async () => {
@@ -257,6 +275,7 @@ describe('GitHub hosted drill-down service', () => {
     expect(page.items[0]?.excerpt).toContain('password=[REDACTED]');
     expect(page.items[0]?.excerpt).toContain('api_key=[REDACTED]');
     expect(page.items[0]?.excerpt).toContain('token=[REDACTED]');
+    expect(page.items[0]?.excerpt).not.toContain('[REDACTED] TOKEN]');
     expect(page.items[0]?.excerpt).not.toContain('do-not-leak');
     expect(page.items[0]?.excerpt).not.toContain('alpha beta');
     expect(page.items[0]?.excerpt).not.toContain('gamma delta');

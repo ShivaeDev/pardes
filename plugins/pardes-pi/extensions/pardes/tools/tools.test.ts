@@ -9,6 +9,7 @@ import {
   GITHUB_HOSTED_DRILLDOWN_MAX_PAGE,
   GitHubCommandError,
   type GitHubIntegrationHealthInspection,
+  GitHubResponseError,
 } from '../github/index.ts';
 import {
   type AgentRecord,
@@ -2193,6 +2194,36 @@ describe('Pardes model-visible tools', () => {
       `excerpt(JSON string): ${JSON.stringify(secretDiscussionExcerpt)}`,
     );
     expect(JSON.stringify(discussion.details)).not.toContain(secretDiscussionExcerpt);
+  });
+
+  test('keeps malformed hosted check status diagnostics out of model-visible content and details', async () => {
+    const unsafeStatus = `FUTURE_\u202e_ghp_abcdefghijklmnop`;
+    const manager = {
+      inspectPullRequestFailingChecks: () =>
+        Effect.fail(
+          new GitHubResponseError({
+            cause: { status: unsafeStatus },
+            operation: 'inspect hosted drill-down checks',
+          }),
+        ),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerHostedDrilldownTools(pi, manager);
+
+    const result = await requiredValue(tools.get('pull_request_ci_inspect')).execute(
+      'call-1',
+      { pullRequestId: 'pr-42' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+
+    expect(result.content[0]?.text).toBe(
+      'Error: Invalid GitHub CLI response: inspect hosted drill-down checks',
+    );
+    expect(result.details).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('ghp_');
+    expect(JSON.stringify(result)).not.toContain('\u202e');
   });
 
   test('redacts failed pull_request_create body content from bounded tool output', async () => {

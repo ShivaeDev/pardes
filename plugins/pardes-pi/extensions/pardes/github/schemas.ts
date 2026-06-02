@@ -458,9 +458,32 @@ export const GitHubInlineReviewCommentsSchema = Schema.Array(
   }),
 ).check(Schema.isMaxLength(MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE));
 
-const GitHubHostedDrilldownStatusMetadataSchema = NonEmptyStringSchema.check(
-  Schema.isMaxLength(100),
-);
+const GitHubHostedDrilldownCheckStatusSchema = Schema.Literals([
+  'COMPLETED',
+  'IN_PROGRESS',
+  'PENDING',
+  'QUEUED',
+  'REQUESTED',
+  'WAITING',
+]);
+const GitHubHostedDrilldownCheckConclusionSchema = Schema.Literals([
+  'ACTION_REQUIRED',
+  'CANCELLED',
+  'FAILURE',
+  'NEUTRAL',
+  'SKIPPED',
+  'STALE',
+  'STARTUP_FAILURE',
+  'SUCCESS',
+  'TIMED_OUT',
+]);
+const GitHubHostedDrilldownStatusContextStateSchema = Schema.Literals([
+  'ERROR',
+  'EXPECTED',
+  'FAILURE',
+  'PENDING',
+  'SUCCESS',
+]);
 const GitHubHostedDrilldownUrlSchema = NonEmptyStringSchema.check(
   Schema.isMaxLength(PULL_REQUEST_URL_MAX_LENGTH),
   Schema.isPattern(/^https:\/\/github\.com\/[a-zA-Z0-9._/-]+$/),
@@ -477,15 +500,15 @@ const GitHubHostedDrilldownCheckRunSchema = Schema.Struct({
     }),
     Schema.Null,
   ]),
-  conclusion: Schema.Union([GitHubHostedDrilldownStatusMetadataSchema, Schema.Null]),
+  conclusion: Schema.Union([GitHubHostedDrilldownCheckConclusionSchema, Schema.Null]),
   databaseId: PositiveIntegerSchema,
   detailsUrl: GitHubHostedDrilldownUrlSchema,
   name: NonEmptyStringSchema.check(Schema.isMaxLength(160)),
-  status: GitHubHostedDrilldownStatusMetadataSchema,
+  status: GitHubHostedDrilldownCheckStatusSchema,
 });
 const GitHubHostedDrilldownStatusContextSchema = Schema.Struct({
   __typename: Schema.Literal('StatusContext'),
-  state: GitHubHostedDrilldownStatusMetadataSchema,
+  state: GitHubHostedDrilldownStatusContextStateSchema,
 });
 export const GitHubHostedDrilldownChecksGraphQLSchema = Schema.Struct({
   data: Schema.Struct({

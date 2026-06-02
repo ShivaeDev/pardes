@@ -1,9 +1,17 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
 import { GitHubCommandError, makeGitHubPublicationService } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
-import type { GitHubCommandRunnerShape, ProcessResult } from './transport.ts';
+import {
+  type GitHubCommandRunnerShape,
+  makeExecFileGitHubCommandRunner,
+  type ProcessResult,
+} from './transport.ts';
 
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -199,6 +207,44 @@ describe('GitHub publication boundary', () => {
       ),
     ).toBe('collision');
     expect(fixture.invocations).toHaveLength(1);
+  });
+
+  test('classifies an actual bare-Git ownership-claim descendant as a bounded collision', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pardes-publication-claim-descendant-'));
+    const origin = join(root, 'origin.git');
+    const project = join(root, 'project');
+    const git = (...args: ReadonlyArray<string>) =>
+      execFileSync('git', args, { cwd: project, encoding: 'utf8' }).trim();
+    try {
+      execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
+      execFileSync('git', ['init', '-b', 'main', project]);
+      git('config', 'user.email', 'pardes@example.test');
+      git('config', 'user.name', 'Pardes Test');
+      writeFileSync(join(project, 'README.md'), 'fixture\n');
+      git('add', 'README.md');
+      git('commit', '-m', 'fixture');
+      git('remote', 'add', 'origin', origin);
+      const headSha = git('rev-parse', 'HEAD');
+      git('push', 'origin', `${headSha}:refs/heads/${HUMAN_CLAIM}/child`);
+      const service = makeGitHubPublicationService({ runner: makeExecFileGitHubCommandRunner() });
+
+      expect(
+        await Effect.runPromise(
+          service.reservePublishedReviewBranch({
+            cwd: project,
+            headBranch: 'actor/pardes/readable-branch-ux',
+            headSha,
+            ownershipId: 'manager-1-agent-1',
+          }),
+        ),
+      ).toBe('collision');
+      expect(git('ls-remote', '--heads', 'origin')).toContain(`refs/heads/${HUMAN_CLAIM}/child`);
+      expect(git('ls-remote', '--heads', 'origin')).not.toContain(
+        'refs/heads/actor/pardes/readable-branch-ux',
+      );
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 
   test('classifies an actor-root TOCTOU hierarchy conflict after failed atomic reservation', async () => {

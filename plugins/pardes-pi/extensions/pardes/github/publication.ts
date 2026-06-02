@@ -303,6 +303,9 @@ export function makeGitHubPublicationService(
     return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join('/'));
   };
 
+  const hasBranchDescendant = (heads: ReadonlyMap<string, string>, branch: string) =>
+    Array.from(heads.keys()).some((head) => head.startsWith(`${branch}/`));
+
   const publishedReviewBranchCandidates: GitHubPublicationShape['publishedReviewBranchCandidates'] =
     Effect.fnUntraced(function* (rawInput: PublishedReviewBranchCandidatesInput) {
       const input = yield* Schema.decodeUnknownEffect(PublishedReviewBranchCandidatesInputSchema)(
@@ -347,10 +350,11 @@ export function makeGitHubPublicationService(
       const before = yield* remoteHeads(
         input.cwd,
         [...ancestors, input.headBranch, claimBranch],
-        [input.headBranch],
+        [input.headBranch, claimBranch],
       );
       const head = before.get(input.headBranch);
       const claim = before.get(claimBranch);
+      if (hasBranchDescendant(before, claimBranch)) return 'collision';
       if (claim === input.headSha && head === input.headSha) return 'reserved';
       if (claim !== undefined)
         return yield* responseError('verify published review branch ownership claim', {
@@ -373,10 +377,11 @@ export function makeGitHubPublicationService(
       const after = yield* remoteHeads(
         input.cwd,
         [...ancestors, input.headBranch, claimBranch],
-        [input.headBranch],
+        [input.headBranch, claimBranch],
       );
       const reservedHead = after.get(input.headBranch);
       const reservedClaim = after.get(claimBranch);
+      if (hasBranchDescendant(after, claimBranch)) return 'collision';
       if (reservedHead === input.headSha && reservedClaim === input.headSha) return 'reserved';
       if (reservedClaim === undefined && ancestors.some((branch) => after.has(branch)))
         return 'hierarchy_collision';

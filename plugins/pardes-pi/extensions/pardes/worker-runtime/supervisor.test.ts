@@ -888,11 +888,10 @@ describe('worker supervisor', () => {
       return runtime.status === 'idle' && runtime.stats?.contextUsage?.percent === 50;
     });
     await Effect.runPromise(supervisor.send('agent-fixture', 'failed-compaction', 'prompt'));
-    await eventually(
-      async () =>
-        (await Effect.runPromise(supervisor.status('agent-fixture'))).completedCompactionCount ===
-        1,
-    );
+    await eventually(async () => {
+      const runtime = await Effect.runPromise(supervisor.status('agent-fixture'));
+      return runtime.completedCompactionCount === 1 && runtime.status === 'idle';
+    });
     expect(await Effect.runPromise(supervisor.status('agent-fixture'))).toMatchObject({
       completedCompactionCount: 1,
       lastCompaction: { errorMessage: 'quota exhausted', reason: 'overflow', succeeded: false },

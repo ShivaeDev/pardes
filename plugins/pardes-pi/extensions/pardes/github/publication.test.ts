@@ -1,10 +1,10 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
+import { runGitFixture } from '../test-support.ts';
 import { GitHubCommandError, makeGitHubPublicationService } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
 import {
@@ -213,11 +213,10 @@ describe('GitHub publication boundary', () => {
     const root = mkdtempSync(join(tmpdir(), 'pardes-publication-claim-descendant-'));
     const origin = join(root, 'origin.git');
     const project = join(root, 'project');
-    const git = (...args: ReadonlyArray<string>) =>
-      execFileSync('git', args, { cwd: project, encoding: 'utf8' }).trim();
+    const git = (...args: string[]) => runGitFixture(project, ...args);
     try {
-      execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-      execFileSync('git', ['init', '-b', 'main', project]);
+      runGitFixture(root, 'init', '--bare', '-b', 'main', origin);
+      runGitFixture(root, 'init', '-b', 'main', project);
       git('config', 'user.email', 'pardes@example.test');
       git('config', 'user.name', 'Pardes Test');
       writeFileSync(join(project, 'README.md'), 'fixture\n');

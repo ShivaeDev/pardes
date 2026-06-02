@@ -332,6 +332,8 @@ interface TerminalObservationFollowUp {
   readonly mergedWorkstreamId?: string;
 }
 
+type WorkstreamCompletionAdmission = 'already_serialized' | 'try_serialize';
+
 export interface ReviewGateLifecycleCoordinatorShape {
   readonly watcherCallbacks: GitHubWatcherCallbacks;
   readonly observePublishedTerminal: (event: {
@@ -372,7 +374,9 @@ export interface ReviewGateLifecycleCoordinatorCallbacks {
     sourceAgentId: string,
   ) => Effect.Effect<void, unknown>;
   readonly trySerializeWorkstreamCompletion: <A, E, R>(
+    retryKey: string,
     effect: Effect.Effect<A, E, R>,
+    retry: Effect.Effect<void, unknown>,
   ) => Effect.Effect<boolean, E, R>;
 }
 
@@ -612,19 +616,25 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     yield* callbacks.releaseInboxWake();
   });
 
-  const retireMergedPullRequest = Effect.fnUntraced(function* (
+  const retireMergedPullRequest: (
     pullRequestId: string,
-    completionAdmission: 'already_serialized' | 'try_serialize',
-  ) {
-    const known = namespace.state.pullRequests[pullRequestId];
-    if (!known || known.status !== 'merged') return;
-    yield* stopMergedPullRequestIdleWorker(known);
-    if (completionAdmission === 'already_serialized')
-      return yield* retireMergedPullRequestDisposition(pullRequestId);
-    yield* callbacks.trySerializeWorkstreamCompletion(
-      retireMergedPullRequestDisposition(pullRequestId),
-    );
-  });
+    completionAdmission: WorkstreamCompletionAdmission,
+  ) => Effect.Effect<void, unknown> = Effect.fnUntraced(
+    function* (pullRequestId, completionAdmission) {
+      const known = namespace.state.pullRequests[pullRequestId];
+      if (!known || known.status !== 'merged') return;
+      yield* stopMergedPullRequestIdleWorker(known);
+      if (completionAdmission === 'already_serialized')
+        return yield* retireMergedPullRequestDisposition(pullRequestId);
+      // A miss is queued once by manager/workstream/pull-request and drained
+      // after the unrelated lifecycle holder settles; watcher callbacks never wait.
+      yield* callbacks.trySerializeWorkstreamCompletion(
+        `${known.workstreamId}/${known.id}`,
+        retireMergedPullRequestDisposition(pullRequestId),
+        semaphore.withPermit(retireMergedPullRequest(pullRequestId, 'already_serialized')),
+      );
+    },
+  );
 
   const handlePullRequestObservation = Effect.fnUntraced(function* (
     event: {

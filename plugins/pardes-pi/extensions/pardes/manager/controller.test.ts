@@ -6537,6 +6537,139 @@ describe('manager controller', () => {
     ).toEqual([]);
     expect(existsSync(requiredValue(first.worktree).path)).toBe(true);
     expect(existsSync(requiredValue(publishing.worktree).path)).toBe(true);
+    await Effect.runPromise(
+      watcher.observe(gateA.pullRequest.id, observedPullRequest({ number: 42, status: 'merged' })),
+    );
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_auto_completed',
+      ),
+    ).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('dedupes skipped merge-completion retries and completes after an unrelated publication permit settles', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub((index) => ({ number: index === 0 ? 42 : 43 }));
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const mergedStream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retry skipped merged completion.', title: 'Merged retry' },
+        fixture.ctx,
+      ),
+    );
+    const publishingStream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Hold unrelated publication permit.', title: 'Unrelated publication' },
+        fixture.ctx,
+      ),
+    );
+    const mergedOwner = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Publish merged gate.', workstreamId: mergedStream.id },
+        fixture.ctx,
+      ),
+    );
+    const publishingOwner = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Publish unrelated open gate.', workstreamId: publishingStream.id },
+        fixture.ctx,
+      ),
+    );
+    for (const [agent, path] of [
+      [mergedOwner, 'merged-owner.txt'],
+      [publishingOwner, 'publishing-owner.txt'],
+    ] as const) {
+      const worktree = requiredValue(agent.worktree).path;
+      writeFileSync(join(worktree, path), `${path}\n`);
+      git(worktree, 'add', path);
+      git(worktree, 'commit', '-m', path);
+    }
+    const mergedGate = await Effect.runPromise(
+      controller.createPullRequest(
+        {
+          agentId: mergedOwner.id,
+          baseBranch: 'main',
+          body: 'Merged gate.',
+          title: 'Merged gate',
+          workstreamId: mergedStream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(controller.stopAgent(mergedOwner.id, fixture.ctx));
+    await Effect.runPromise(controller.stopAgent(publishingOwner.id, fixture.ctx));
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    github.setDuringPublish(() =>
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    );
+
+    const publicationFiber = Effect.runFork(
+      controller.createPullRequest(
+        {
+          agentId: publishingOwner.id,
+          baseBranch: 'main',
+          body: 'Unrelated open gate.',
+          title: 'Unrelated open gate',
+          workstreamId: publishingStream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+    await Effect.runPromise(
+      watcher.observe(
+        mergedGate.pullRequest.id,
+        observedPullRequest({ number: 42, status: 'merged' }),
+      ),
+    );
+    await Effect.runPromise(
+      watcher.observe(
+        mergedGate.pullRequest.id,
+        observedPullRequest({ number: 42, status: 'merged' }),
+      ),
+    );
+    expect(controller.snapshot()?.workstreams[mergedStream.id]?.status).toBe('active');
+
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    const unrelatedGate = await Effect.runPromise(Fiber.join(publicationFiber));
+
+    expect(controller.snapshot()?.workstreams[mergedStream.id]?.status).toBe('complete');
+    expect(controller.snapshot()?.workstreams[publishingStream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.pullRequests[unrelatedGate.pullRequest.id]?.status).toBe('open');
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type, workstreamId }) =>
+          type === 'workstream_auto_completed' && workstreamId === mergedStream.id,
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(
+      watcher.observe(
+        mergedGate.pullRequest.id,
+        observedPullRequest({ number: 42, status: 'merged' }),
+      ),
+    );
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type, workstreamId }) =>
+          type === 'workstream_auto_completed' && workstreamId === mergedStream.id,
+      ),
+    ).toHaveLength(1);
+    expect(existsSync(requiredValue(mergedOwner.worktree).path)).toBe(true);
+    expect(existsSync(requiredValue(publishingOwner.worktree).path)).toBe(true);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 

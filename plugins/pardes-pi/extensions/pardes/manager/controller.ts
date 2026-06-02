@@ -175,6 +175,11 @@ interface ActiveManager extends PullRequestPublicationNamespace {
   readonly workerEvents: WorkerSupervisorEventCoordinatorShape;
 }
 
+interface PendingLifecycleRetry {
+  readonly active: PullRequestPublicationNamespace;
+  readonly retry: Effect.Effect<void, unknown>;
+}
+
 export interface AgentSpawnInput {
   readonly workstreamId: string;
   readonly title?: string;
@@ -337,6 +342,7 @@ export class ManagerController {
   private readonly liveRuntimes = new Map<string, WorkerRuntimeSnapshot>();
   private readonly ignoredWorkerEvents = new Set<string>();
   private readonly lifecycleGate = Semaphore.makeUnsafe(1);
+  private readonly pendingLifecycleRetries = new Map<string, PendingLifecycleRetry>();
   private lifecycleEpoch = 0;
   private lifecycleAcceptingOperations = false;
   private lifecycleTransitioning = false;
@@ -433,32 +439,89 @@ export class ManagerController {
         const epoch = this.lifecycleEpoch;
         if (!this.lifecycleAcceptingOperations || this.lifecycleTransitioning)
           return yield* this.lifecycleUnavailable();
-        return yield* this.lifecycleGate.withPermit(
-          Effect.gen(
-            function* (this: ManagerController) {
-              if (
-                !this.lifecycleAcceptingOperations ||
-                this.lifecycleTransitioning ||
-                this.lifecycleEpoch !== epoch
-              )
-                return yield* this.lifecycleUnavailable();
-              return yield* operation();
-            }.bind(this),
-          ),
-        );
+        return yield* this.lifecycleGate
+          .withPermit(
+            Effect.gen(
+              function* (this: ManagerController) {
+                if (
+                  !this.lifecycleAcceptingOperations ||
+                  this.lifecycleTransitioning ||
+                  this.lifecycleEpoch !== epoch
+                )
+                  return yield* this.lifecycleUnavailable();
+                return yield* operation();
+              }.bind(this),
+            ),
+          )
+          .pipe(Effect.ensuring(this.drainPendingLifecycleRetries()));
       }.bind(this),
     );
   }
 
   private tryWithActiveLifecyclePermit<A, E, R>(
+    active: PullRequestPublicationNamespace,
+    retryKey: string,
     operation: Effect.Effect<A, E, R>,
+    retry: Effect.Effect<void, unknown>,
   ): Effect.Effect<boolean, E, R> {
     return Effect.suspend(() => {
       if (!this.lifecycleAcceptingOperations || this.lifecycleTransitioning)
         return Effect.succeed(false);
       return this.lifecycleGate
         .withPermitsIfAvailable(1)(operation)
-        .pipe(Effect.map(Option.isSome));
+        .pipe(
+          Effect.flatMap((result) => {
+            if (Option.isSome(result)) return Effect.succeed(true);
+            return Effect.sync(() => {
+              if (
+                this.active === active &&
+                this.lifecycleAcceptingOperations &&
+                !this.lifecycleTransitioning
+              ) {
+                this.pendingLifecycleRetries.set(`${active.managerId}/${retryKey}`, {
+                  active,
+                  retry,
+                });
+              }
+              return false;
+            });
+          }),
+        );
+    });
+  }
+
+  /** Drain each manager-local missed mechanical retirement once after the lifecycle gate is free. */
+  private drainPendingLifecycleRetries(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const active = this.active;
+      if (
+        !active ||
+        !this.lifecycleAcceptingOperations ||
+        this.lifecycleTransitioning ||
+        this.pendingLifecycleRetries.size === 0
+      )
+        return Effect.void;
+      const retries = [...this.pendingLifecycleRetries.entries()].filter(
+        ([, retry]) => retry.active === active,
+      );
+      for (const [key] of this.pendingLifecycleRetries) this.pendingLifecycleRetries.delete(key);
+      if (retries.length === 0) return Effect.void;
+      return this.lifecycleGate
+        .withPermit(
+          Effect.forEach(
+            retries,
+            ([key, retry]) =>
+              retry.retry.pipe(
+                Effect.catch((error) =>
+                  Effect.sync(() =>
+                    console.error(`Pardes failed queued lifecycle retry ${key}.`, error),
+                  ),
+                ),
+              ),
+            { discard: true },
+          ),
+        )
+        .pipe(Effect.andThen(this.drainPendingLifecycleRetries()));
     });
   }
 
@@ -467,6 +530,7 @@ export class ManagerController {
   ): Effect.Effect<A, E, R> {
     return Effect.suspend(() => {
       const epoch = ++this.lifecycleEpoch;
+      this.pendingLifecycleRetries.clear();
       this.lifecycleAcceptingOperations = false;
       this.lifecycleTransitioning = true;
       return this.lifecycleGate.withPermit(operation(epoch)).pipe(
@@ -799,7 +863,8 @@ export class ManagerController {
         retireResolvedVerificationsForSource: (sourceAgentId) =>
           verifications.retireResolvedForSource(sourceAgentId),
         stopIdleWorker: (agentId) => this.workers.stopIfIdle(agentId),
-        trySerializeWorkstreamCompletion: (effect) => this.tryWithActiveLifecyclePermit(effect),
+        trySerializeWorkstreamCompletion: (retryKey, effect, retry) =>
+          this.tryWithActiveLifecyclePermit(active, retryKey, effect, retry),
       },
       namespace: active,
     });

@@ -584,10 +584,11 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain('[Pardes manager compaction fallback]');
     expect(diagnostics[0]).toContain('stage: summarize');
-    expect(diagnostics[0]).toContain('selectedModel: fixture-provider/selected-manager-model');
     expect(diagnostics[0]).toContain('Pi built-in default compaction remains owner');
-    expect(diagnostics[0]).toContain('Authorization=[redacted]');
-    expect(diagnostics[0]).toContain('api_key=[redacted]');
+    expect(diagnostics[0]).toContain('[custom_override_cause_omitted]');
+    expect(diagnostics[0]).toContain('shown=0');
+    expect(diagnostics[0]).not.toContain('Authorization');
+    expect(diagnostics[0]).not.toContain('api_key');
     expect(diagnostics[0]).not.toContain('private-token-');
     expect(diagnostics[0]).not.toContain(`sk-${'x'.repeat(100)}`);
     expect(diagnostics[0].length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
@@ -623,7 +624,8 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(builtInCalls).toBe(1);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain('stage: register_strategy');
-    expect(diagnostics[0]).toContain('token=[redacted]');
+    expect(diagnostics[0]).toContain('[custom_override_cause_omitted]');
+    expect(diagnostics[0]).not.toContain('token=');
     expect(diagnostics[0]).not.toContain('private-registration-token');
   });
 
@@ -773,7 +775,7 @@ describe('Pardes coordinating-manager compaction', () => {
 
     expect(diagnostic).not.toContain('\u001b');
     expect(diagnostic).not.toContain('\u0007');
-    expect(diagnostic).toContain('token=[redacted]');
+    expect(diagnostic).not.toContain('token=');
     expect(diagnostic).not.toContain('private-control-token');
     expect(delivered).toHaveLength(2);
     expect(
@@ -781,17 +783,35 @@ describe('Pardes coordinating-manager compaction', () => {
     ).toBe(true);
   });
 
-  test('accounts for redacted fallback diagnostic field omissions without midpoint ellipses', () => {
-    const diagnostic = renderManagerCompactionFallbackDiagnostic(
-      'summarize',
-      new Error(`token=private-long-token ${'x'.repeat(2_000)}`),
+  test('omits arbitrary fallback cause bodies including common secret-key and quoted-value forms', () => {
+    for (const cause of [
+      'access_token=private-token-value',
+      'OPENAI_API_KEY=private-openai-value',
+      'clientSecret=private-client-value',
+      'token = "private token with spaces"',
+      'PRIVATE_UNLABELLED_CAUSE_BODY',
+    ]) {
+      const diagnostic = renderManagerCompactionFallbackDiagnostic('summarize', new Error(cause));
+
+      expect(diagnostic).toContain('[custom_override_cause_omitted]');
+      expect(diagnostic).toContain(
+        `chars(original=${cause.length}, shown=0, omitted=${cause.length})`,
+      );
+      expect(diagnostic).not.toContain(cause);
+      expect(diagnostic).not.toContain('private');
+      expect(diagnostic.length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
+    }
+  });
+
+  test('neutralizes direct carriage-return and tab delivery while preserving authored LF structure', () => {
+    const delivered: string[] = [];
+    const ctx = context({ ui: { notify: (message: string) => delivered.push(message) } as never });
+
+    reportManagerCompactionFallback(ctx, 'safe\rOVERWRITE\tTAIL\nnext', (message) =>
+      delivered.push(message),
     );
 
-    expect(diagnostic).toContain('token=[redacted]');
-    expect(diagnostic).toContain('omitted reason=diagnostic_field_limit');
-    expect(diagnostic).toMatch(/originalChars=\d+ shownChars=\d+ omittedChars=\d+/);
-    expect(diagnostic).not.toContain('private-long-token');
-    expect(diagnostic.length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
+    expect(delivered).toEqual(['safe OVERWRITE TAIL\nnext', 'safe OVERWRITE TAIL\nnext']);
   });
 
   test('keeps fallback safe when the UI diagnostic surface itself throws', () => {
@@ -812,7 +832,8 @@ describe('Pardes coordinating-manager compaction', () => {
       reportManagerCompactionFallback(ctx, diagnostic, (message) => logs.push(message)),
     ).not.toThrow();
     expect(logs).toEqual([diagnostic]);
-    expect(diagnostic).toContain('token=[redacted]');
+    expect(diagnostic).toContain('[custom_override_cause_omitted]');
+    expect(diagnostic).not.toContain('token=');
     expect(diagnostic).not.toContain('private-ui-token');
   });
 });

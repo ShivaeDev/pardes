@@ -1,12 +1,13 @@
 import { Effect, Exit, Option } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
-import { renderWorkerProtocolDiagnostic, type WorkerProtocolDiagnostic } from '../diagnostics.ts';
 import {
-  rpcPayloadDiagnostic,
-  WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS,
-  WorkerRpcWire,
-} from './codecs.ts';
+  renderWorkerCompactionFailure,
+  renderWorkerProtocolDiagnostic,
+  type WorkerCompactionFailure,
+  type WorkerProtocolDiagnostic,
+} from '../diagnostics.ts';
+import { rpcPayloadDiagnostic, WorkerRpcWire } from './codecs.ts';
 
 describe('worker RPC wire schema', () => {
   test('keeps tolerant envelope dispatch separate from targeted response decoding', () => {
@@ -87,25 +88,41 @@ describe('worker RPC wire schema', () => {
     ).toBe(true);
   });
 
-  test('bounds child compaction error fields at the wire codec boundary', () => {
-    const bounded = {
+  test('reduces oversized child compaction error fields without dropping the completion edge', () => {
+    const decoded = WorkerRpcWire.decodeCompactionEndEvent({
       aborted: true,
-      errorMessage: 'x'.repeat(WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS),
+      errorMessage: 'x'.repeat(4_097),
       reason: 'overflow',
       result: null,
       type: 'compaction_end',
       willRetry: false,
-    } as const;
+    });
 
-    expect(Option.isSome(WorkerRpcWire.decodeCompactionEndEvent(bounded))).toBe(true);
-    expect(
-      Option.isNone(
-        WorkerRpcWire.decodeCompactionEndEvent({
-          ...bounded,
-          errorMessage: `${bounded.errorMessage}x`,
-        }),
-      ),
-    ).toBe(true);
+    expect(Option.isSome(decoded)).toBe(true);
+    if (Option.isNone(decoded)) throw new Error('Expected decoded compaction completion');
+    expect(decoded.value).toMatchObject({
+      failure: {
+        omittedChars: 4_097,
+        originalChars: 4_097,
+        reason: 'child_compaction_error_message_omitted',
+        shownChars: 0,
+      },
+      type: 'compaction_end',
+    });
+    expect(decoded.value).not.toHaveProperty('errorMessage');
+  });
+
+  test('degrades malformed compaction failure counts to unknown accounting at render time', () => {
+    const malformed = {
+      omittedChars: -1,
+      originalChars: -1,
+      reason: 'child_compaction_error_message_omitted',
+      shownChars: 99,
+    } as unknown as WorkerCompactionFailure;
+
+    expect(renderWorkerCompactionFailure(malformed)).toContain(
+      'chars(original=unknown, shown=0, omitted=unknown)',
+    );
   });
 
   test('codes targeted payload failures without clipping software-authored labels', () => {
@@ -129,17 +146,29 @@ describe('worker RPC wire schema', () => {
     });
   });
 
-  test('degrades incoherent counted diagnostics to unknown accounting at render time', () => {
-    const incoherent = {
-      countAccuracy: 'exact',
-      message: 'Fixed software label.',
-      reason: 'invalid_json',
-      shownChars: 0,
-    } as unknown as WorkerProtocolDiagnostic;
+  test('degrades malformed counted diagnostics to unknown accounting at render time', () => {
+    for (const counts of [
+      { omittedChars: undefined, originalChars: undefined, shownChars: 0 },
+      { omittedChars: 1, originalChars: 1, shownChars: 99 },
+      { omittedChars: -1, originalChars: -1, shownChars: 0 },
+      { omittedChars: 1.5, originalChars: 1.5, shownChars: 0 },
+      {
+        omittedChars: Number.POSITIVE_INFINITY,
+        originalChars: Number.POSITIVE_INFINITY,
+        shownChars: 0,
+      },
+    ]) {
+      const incoherent = {
+        countAccuracy: 'exact',
+        message: 'Fixed software label.',
+        reason: 'invalid_json',
+        ...counts,
+      } as unknown as WorkerProtocolDiagnostic;
+      const rendered = renderWorkerProtocolDiagnostic(incoherent);
 
-    expect(renderWorkerProtocolDiagnostic(incoherent)).toContain(
-      'chars(original=unknown, shown=0, omitted=unknown)',
-    );
-    expect(renderWorkerProtocolDiagnostic(incoherent)).not.toContain('undefined');
+      expect(rendered).toContain('chars(original=unknown, shown=0, omitted=unknown)');
+      expect(rendered).not.toContain('undefined');
+      expect(rendered).not.toContain('Infinity');
+    }
   });
 });

@@ -207,6 +207,11 @@ function handle(command) {
       end();
       return;
     }
+    if (command.message === "oversized-failed-compaction") {
+      startCompaction("manual");
+      endCompaction("manual", null, true, false, "x".repeat(4097));
+      return;
+    }
     if (command.message === "compacting-only") {
       start();
       startCompaction("threshold");
@@ -920,11 +925,10 @@ describe('worker supervisor', () => {
       return runtime.status === 'idle' && runtime.stats?.contextUsage?.percent === 50;
     });
     await Effect.runPromise(supervisor.send('agent-fixture', 'failed-compaction', 'prompt'));
-    await eventually(
-      async () =>
-        (await Effect.runPromise(supervisor.status('agent-fixture'))).completedCompactionCount ===
-        1,
-    );
+    await eventually(async () => {
+      const runtime = await Effect.runPromise(supervisor.status('agent-fixture'));
+      return runtime.completedCompactionCount === 1 && runtime.status === 'idle';
+    });
     expect(await Effect.runPromise(supervisor.status('agent-fixture'))).toMatchObject({
       completedCompactionCount: 1,
       lastCompaction: {
@@ -943,6 +947,58 @@ describe('worker supervisor', () => {
     expect(
       JSON.stringify(await Effect.runPromise(supervisor.status('agent-fixture'))),
     ).not.toContain('private-compaction-secret');
+    await Effect.runPromise(supervisor.shutdown());
+  });
+
+  test('reduces oversized compaction failure text while completing and resetting lifecycle state', async () => {
+    const fixture = fakeRpcWorker();
+    const events: WorkerSupervisorEvent[] = [];
+    const supervisor = makeWorkerSupervisor({
+      args: () => [fixture.script],
+      command: process.execPath,
+      onEvent: (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      telemetryInterval: '1 hour',
+    });
+
+    await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'quiet')));
+    await Effect.runPromise(
+      supervisor.send('agent-fixture', 'oversized-failed-compaction', 'prompt'),
+    );
+    await eventually(async () => {
+      const runtime = await Effect.runPromise(supervisor.status('agent-fixture'));
+      return runtime.completedCompactionCount === 1 && runtime.isCompacting === false;
+    });
+
+    expect(await Effect.runPromise(supervisor.status('agent-fixture'))).toMatchObject({
+      compactionReason: undefined,
+      compactionStartedAt: undefined,
+      completedCompactionCount: 1,
+      isCompacting: false,
+      lastCompaction: {
+        aborted: true,
+        failure: {
+          omittedChars: 4_097,
+          originalChars: 4_097,
+          reason: 'child_compaction_error_message_omitted',
+          shownChars: 0,
+        },
+        reason: 'manual',
+      },
+    });
+    await eventually(() => events.some((event) => event.type === 'compaction_completed'));
+    expect(events.some((event) => event.type === 'protocol_error')).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        compaction: expect.objectContaining({
+          failure: expect.objectContaining({ originalChars: 4_097 }),
+          reason: 'manual',
+        }),
+        type: 'compaction_completed',
+      }),
+    );
     await Effect.runPromise(supervisor.shutdown());
   });
 

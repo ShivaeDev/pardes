@@ -68,18 +68,24 @@ export function workerProtocolDiagnostic(
     : { countAccuracy, message, omittedChars: originalChars, originalChars, reason, shownChars: 0 };
 }
 
+function coherentBodyFreeCounts(counts: Partial<WorkerTextCounts>): counts is WorkerTextCounts {
+  return (
+    Number.isSafeInteger(counts.originalChars) &&
+    (counts.originalChars ?? -1) >= 0 &&
+    Number.isSafeInteger(counts.omittedChars) &&
+    (counts.omittedChars ?? -1) >= 0 &&
+    counts.shownChars === 0 &&
+    counts.originalChars === (counts.shownChars ?? 0) + (counts.omittedChars ?? 0)
+  );
+}
+
 function coherentCountedDiagnostic(
   diagnostic: WorkerProtocolDiagnostic,
 ): diagnostic is Extract<
   WorkerProtocolDiagnostic,
   { readonly countAccuracy: 'exact' | 'lower_bound' }
 > {
-  return (
-    diagnostic.countAccuracy !== 'unknown' &&
-    typeof diagnostic.originalChars === 'number' &&
-    typeof diagnostic.omittedChars === 'number' &&
-    diagnostic.omittedChars === diagnostic.originalChars
-  );
+  return diagnostic.countAccuracy !== 'unknown' && coherentBodyFreeCounts(diagnostic);
 }
 
 export function renderWorkerProtocolDiagnostic(diagnostic: WorkerProtocolDiagnostic): string {
@@ -90,7 +96,7 @@ export function renderWorkerProtocolDiagnostic(diagnostic: WorkerProtocolDiagnos
   const omitted = counted
     ? `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.omittedChars)}`
     : 'unknown';
-  return `[${diagnostic.reason}] ${diagnostic.message} chars(original=${original}, shown=${diagnostic.shownChars}, omitted=${omitted}).`;
+  return `[${diagnostic.reason}] ${diagnostic.message} chars(original=${original}, shown=${counted ? diagnostic.shownChars : 0}, omitted=${omitted}).`;
 }
 
 export function workerCompactionFailure(originalChars: number): WorkerCompactionFailure {
@@ -103,7 +109,8 @@ export function workerCompactionFailure(originalChars: number): WorkerCompaction
 }
 
 export function renderWorkerCompactionFailure(failure: WorkerCompactionFailure): string {
-  return `[${failure.reason}] Child-authored compaction diagnostic text omitted. chars(original=${failure.originalChars}, shown=${failure.shownChars}, omitted=${failure.omittedChars}).`;
+  const counted = coherentBodyFreeCounts(failure);
+  return `[${failure.reason}] Child-authored compaction diagnostic text omitted. chars(original=${counted ? failure.originalChars : 'unknown'}, shown=0, omitted=${counted ? failure.omittedChars : 'unknown'}).`;
 }
 
 export function appendWorkerStderrTail(current: WorkerStderrTail, chunk: string): WorkerStderrTail {

@@ -442,9 +442,7 @@ function safeString(value: unknown): string {
 function terminalInertManagerCompactionText(value: string): string {
   return Array.from(value, (character) => {
     const code = character.charCodeAt(0);
-    return (code <= 31 && code !== 9 && code !== 10 && code !== 13) || (code >= 127 && code <= 159)
-      ? ' '
-      : character;
+    return (code <= 31 && code !== 10) || (code >= 127 && code <= 159) ? ' ' : character;
   }).join('');
 }
 
@@ -464,7 +462,7 @@ function redactManagerCompactionDiagnostic(value: unknown): string {
 function omissionAwareDiagnosticText(
   text: string,
   maxChars: number,
-  reason: 'diagnostic_field_limit' | 'fallback_output_limit' | 'projection_field_limit',
+  reason: 'diagnostic_field_limit' | 'projection_field_limit',
 ): string {
   if (text.length <= maxChars) return text;
   let shownChars = Math.max(0, maxChars - 120);
@@ -477,7 +475,7 @@ function omissionAwareDiagnosticText(
   return `${text.slice(0, shownChars)}${suffix}`;
 }
 
-/** Keep fallback output useful while redacting first and accounting for every omitted safe character. */
+/** Bound one terminal-inert redacted utility value; fallback cause delivery remains body-free. */
 export function sanitizeManagerCompactionDiagnostic(
   value: unknown,
   maxChars = MANAGER_COMPACTION_FALLBACK_REASON_MAX_CHARS,
@@ -489,46 +487,33 @@ export function sanitizeManagerCompactionDiagnostic(
   );
 }
 
-function modelDiagnosticLabel(model: ManagerModel | undefined): string {
-  if (!model) return 'none';
+function causeOmissionMetadata(cause: unknown): string {
   try {
-    return `${sanitizeManagerCompactionDiagnostic(model.provider, 120)}/${sanitizeManagerCompactionDiagnostic(model.id, 120)}`;
+    const text = cause instanceof Error ? cause.message : String(cause);
+    return `chars(original=${text.length}, shown=0, omitted=${text.length})`;
   } catch {
-    return '<unrenderable selected model>';
+    return 'chars(original=unknown, shown=0, omitted=unknown)';
   }
 }
 
-function causeDiagnosticText(cause: unknown): string {
-  try {
-    return cause instanceof Error
-      ? `${sanitizeManagerCompactionDiagnostic(cause.name)}: ${sanitizeManagerCompactionDiagnostic(cause.message)}`
-      : sanitizeManagerCompactionDiagnostic(cause);
-  } catch {
-    return '<unrenderable diagnostic>';
-  }
-}
-
-/** Render one bounded, credential-redacted operator diagnostic for safe Pi fallback. */
+/** Render one bounded body-free operator diagnostic for safe Pi fallback. */
 export function renderManagerCompactionFallbackDiagnostic(
   stage: ManagerCompactionFallbackStage,
   cause: unknown,
-  model?: ManagerModel,
+  _model?: ManagerModel,
 ): string {
   const diagnostic = [
     '[Pardes manager compaction fallback]',
     `stage: ${stage}`,
-    `selectedModel: ${modelDiagnosticLabel(model)}`,
     'action: declining custom manager override; Pi built-in default compaction remains owner',
-    `reason: ${causeDiagnosticText(cause)}`,
+    `reason: [custom_override_cause_omitted] Arbitrary custom manager-compaction failure text omitted. ${causeOmissionMetadata(cause)}`,
   ].join('\n');
   if (diagnostic.length <= MANAGER_COMPACTION_FALLBACK_MAX_CHARS) return diagnostic;
-  const omittedReason = `[omitted reason=fallback_output_limit originalChars=${diagnostic.length} shownChars=0 omittedChars=${diagnostic.length}]`;
   return [
     '[Pardes manager compaction fallback]',
     `stage: ${stage}`,
-    `selectedModel: ${modelDiagnosticLabel(model)}`,
     'action: declining custom manager override; Pi built-in default compaction remains owner',
-    `reason: ${omittedReason}`,
+    'reason: [custom_override_cause_omitted] Arbitrary custom manager-compaction failure text omitted. chars(original=unknown, shown=0, omitted=unknown)',
   ].join('\n');
 }
 

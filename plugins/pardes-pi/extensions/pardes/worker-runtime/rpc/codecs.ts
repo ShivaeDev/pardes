@@ -1,6 +1,10 @@
-import { Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
-import { type WorkerProtocolDiagnostic, workerProtocolDiagnostic } from '../diagnostics.ts';
+import {
+  type WorkerProtocolDiagnostic,
+  workerCompactionFailure,
+  workerProtocolDiagnostic,
+} from '../diagnostics.ts';
 
 export interface WorkerRpcResponse {
   readonly type: 'response';
@@ -118,12 +122,9 @@ const WorkerCompactionResultSchema = Schema.Struct({
   summary: Schema.String,
   tokensBefore: Schema.Number,
 });
-export const WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS = 4_096;
 const WorkerCompactionEndEventSchema = Schema.Struct({
   aborted: Schema.Boolean,
-  errorMessage: Schema.optionalKey(
-    Schema.String.check(Schema.isMaxLength(WORKER_COMPACTION_ERROR_MESSAGE_MAX_CHARS)),
-  ),
+  errorMessage: Schema.optionalKey(Schema.String),
   reason: WorkerCompactionReasonSchema,
   result: Schema.optionalKey(Schema.Union([WorkerCompactionResultSchema, Schema.Null])),
   type: Schema.Literal('compaction_end'),
@@ -169,6 +170,18 @@ const WorkerSessionStatsSchema = Schema.Struct({
 export type WorkerRpcState = typeof WorkerRpcStateSchema.Type;
 export type WorkerAssistantMessage = typeof WorkerAssistantMessageSchema.Type;
 
+const decodeRawCompactionEndEvent = Schema.decodeUnknownOption(WorkerCompactionEndEventSchema);
+
+/** Reduce child-authored failure text immediately while preserving the lifecycle completion edge. */
+function decodeCompactionEndEvent(input: unknown) {
+  return Option.map(decodeRawCompactionEndEvent(input), ({ errorMessage, ...event }) => ({
+    ...event,
+    ...(errorMessage === undefined
+      ? {}
+      : { failure: workerCompactionFailure(errorMessage.length) }),
+  }));
+}
+
 /** Non-throwing wire codecs for the supervisor's tolerant event dispatcher. */
 export const WorkerRpcWire = {
   decodeAgentEndEvent: Schema.decodeUnknownOption(WorkerAgentEndEventSchema),
@@ -181,7 +194,7 @@ export const WorkerRpcWire = {
   decodeAssistantTextDeltaEvent: Schema.decodeUnknownOption(WorkerAssistantTextDeltaEventSchema),
   decodeAssistantTextEndEvent: Schema.decodeUnknownOption(WorkerAssistantTextEndEventSchema),
   decodeAssistantTextStartEvent: Schema.decodeUnknownOption(WorkerAssistantTextStartEventSchema),
-  decodeCompactionEndEvent: Schema.decodeUnknownOption(WorkerCompactionEndEventSchema),
+  decodeCompactionEndEvent,
   decodeCompactionStartEvent: Schema.decodeUnknownOption(WorkerCompactionStartEventSchema),
   decodeEnvelope: Schema.decodeUnknownOption(WorkerRpcEnvelopeSchema),
   decodeMessageEndEvent: Schema.decodeUnknownOption(WorkerMessageEndEventSchema),

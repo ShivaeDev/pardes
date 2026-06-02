@@ -419,15 +419,20 @@ function manualGithubWatcher() {
             }),
           })
         : Effect.die('GitHub watcher fixture is not active'),
-    failCaptured: (pullRequestId: string, capturedHeadSha: string, cwd: string) =>
+    failCaptured: (
+      pullRequestId: string,
+      capturedHeadSha: string,
+      cwd: string,
+      error = new GitHubCommandError({
+        args: ['pr', 'view'],
+        cause: 'fixture delayed outage',
+        command: 'gh',
+        cwd,
+      }),
+    ) =>
       callbacks
         ? callbacks.onFailure({
-            error: new GitHubCommandError({
-              args: ['pr', 'view'],
-              cause: 'fixture delayed outage',
-              command: 'gh',
-              cwd,
-            }),
+            error,
             expectedHeadSha: capturedHeadSha,
             pullRequestId,
           })
@@ -6773,7 +6778,14 @@ describe('manager controller', () => {
         },
       ),
     );
-    await Effect.runPromise(watcher.failCaptured(pullRequestId, capturedHeadSha, repo));
+    const hostileStaleError = new Proxy({} as GitHubCommandError, {
+      get: () => {
+        throw new Error('stale watcher error must not be inspected');
+      },
+    });
+    await Effect.runPromise(
+      watcher.failCaptured(pullRequestId, capturedHeadSha, repo, hostileStaleError),
+    );
 
     expect(controller.snapshot()?.pullRequests[pullRequestId]).not.toHaveProperty('observation');
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.discussionCursor).toEqual({});

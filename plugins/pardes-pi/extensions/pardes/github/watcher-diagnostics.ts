@@ -1,10 +1,5 @@
 import { Schema } from 'effect';
-import type {
-  GitHubCommandError,
-  GitHubResponseError,
-  GitHubWatcherInputError,
-  GitHubWatcherTimeoutError,
-} from './errors.ts';
+import type { GitHubCommandError } from './errors.ts';
 
 export const GITHUB_WATCHER_DIAGNOSTIC_SCAN_MAX_CHARS = 4_096;
 
@@ -58,11 +53,14 @@ export const GitHubWatcherFailureDiagnosticSchema = Schema.Union([
 ]);
 export type GitHubWatcherFailureDiagnostic = typeof GitHubWatcherFailureDiagnosticSchema.Type;
 
-type KnownGitHubWatcherError =
-  | GitHubWatcherInputError
-  | GitHubResponseError
-  | GitHubCommandError
-  | GitHubWatcherTimeoutError;
+function safeUnknownProperty(value: unknown, key: string): unknown {
+  if (!value || typeof value !== 'object') return undefined;
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+}
 
 function diagnostic(kind: GitHubWatcherFailureKind): GitHubWatcherFailureDiagnostic {
   return {
@@ -78,26 +76,33 @@ function appendScanText(values: string[], value: unknown): void {
   if (remaining > 0) values.push(String(value).slice(0, remaining));
 }
 
+function appendLabeledScanText(values: string[], label: string, value: unknown): void {
+  if (typeof value !== 'string' && typeof value !== 'number') return;
+  appendScanText(values, `${label}:${value}`);
+}
+
 /** Inspect only a bounded shallow diagnostic subset for symptom classification; never return it. */
 function diagnosticScanText(cause: unknown): string {
   const values: string[] = [];
   appendScanText(values, cause);
-  if (cause && typeof cause === 'object') {
-    const record = cause as Readonly<Record<string, unknown>>;
-    appendScanText(values, record.message);
-    appendScanText(values, record.stderr);
-    appendScanText(values, record.code);
-    appendScanText(values, record.status);
-    appendScanText(values, record.statusCode);
-    appendScanText(values, record.cause);
-  }
+  appendScanText(values, safeUnknownProperty(cause, 'message'));
+  appendScanText(values, safeUnknownProperty(cause, 'stderr'));
+  appendScanText(values, safeUnknownProperty(cause, 'code'));
+  appendLabeledScanText(values, 'status', safeUnknownProperty(cause, 'status'));
+  appendLabeledScanText(values, 'statusCode', safeUnknownProperty(cause, 'statusCode'));
+  appendScanText(values, safeUnknownProperty(cause, 'cause'));
   return values.join(' ').slice(0, GITHUB_WATCHER_DIAGNOSTIC_SCAN_MAX_CHARS).toLowerCase();
 }
 
 export function githubCommandFailureDiagnosticHint(
   cause: unknown,
 ): GitHubCommandError['diagnosticHint'] {
-  const text = diagnosticScanText(cause);
+  let text = '';
+  try {
+    text = diagnosticScanText(cause);
+  } catch {
+    return undefined;
+  }
   if (
     /rate[ -]?limit|secondary rate|abuse detection|too many requests|http\s*429|status(?:code)?\s*[:=]?\s*429/.test(
       text,
@@ -114,21 +119,20 @@ export function githubCommandFailureDiagnosticHint(
 }
 
 function commandFailureKind(error: GitHubCommandError): GitHubWatcherFailureKind {
-  const hint = error.diagnosticHint;
+  const hint = safeUnknownProperty(error, 'diagnosticHint');
   return hint === 'authentication_likely' || hint === 'rate_limit_likely'
     ? hint
-    : (githubCommandFailureDiagnosticHint(error.cause) ?? 'command_failed');
+    : (githubCommandFailureDiagnosticHint(safeUnknownProperty(error, 'cause')) ?? 'command_failed');
 }
 
 /** Reduce watcher failures to bounded canonical diagnostics safe for durable and model-facing state. */
 export function classifyGitHubWatcherFailure(error: unknown): GitHubWatcherFailureDiagnostic {
-  if (!error || typeof error !== 'object' || !('_tag' in error))
-    return diagnostic('unexpected_error');
-  const tagged = error as KnownGitHubWatcherError | { readonly _tag: string };
-  if (tagged._tag === 'GitHubWatcherTimeoutError') return diagnostic('command_timed_out');
-  if (tagged._tag === 'GitHubWatcherInputError') return diagnostic('association_invalid');
-  if (tagged._tag === 'GitHubResponseError') return diagnostic('metadata_invalid');
-  if (tagged._tag === 'GitHubCommandError')
-    return diagnostic(commandFailureKind(tagged as GitHubCommandError));
+  const tag = safeUnknownProperty(error, '_tag');
+  if (typeof tag !== 'string') return diagnostic('unexpected_error');
+  if (tag === 'GitHubWatcherTimeoutError') return diagnostic('command_timed_out');
+  if (tag === 'GitHubWatcherInputError') return diagnostic('association_invalid');
+  if (tag === 'GitHubResponseError') return diagnostic('metadata_invalid');
+  if (tag === 'GitHubCommandError')
+    return diagnostic(commandFailureKind(error as GitHubCommandError));
   return diagnostic('unexpected_typed_error');
 }

@@ -22,11 +22,71 @@ export interface GitHubCommandRunnerShape {
   readonly run: (invocation: ProcessInvocation) => Effect.Effect<ProcessResult, GitHubCommandError>;
 }
 
+interface SafeGitHubProcessFailureMetadata {
+  readonly kind: 'exec_file_failed';
+  readonly code?: string | number;
+  readonly signal?: string;
+  readonly killed?: boolean;
+}
+
 class GitHubProcessFailure {
   constructor(
-    readonly error: unknown,
+    readonly metadata: SafeGitHubProcessFailureMetadata,
     readonly diagnosticHint: GitHubCommandError['diagnosticHint'],
   ) {}
+}
+
+function safeUnknownProperty(value: unknown, key: string): unknown {
+  if (!value || typeof value !== 'object') return undefined;
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeProcessFailureMetadata(error: unknown): SafeGitHubProcessFailureMetadata {
+  const code = safeUnknownProperty(error, 'code');
+  const signal = safeUnknownProperty(error, 'signal');
+  const killed = safeUnknownProperty(error, 'killed');
+  return {
+    kind: 'exec_file_failed',
+    ...(typeof code === 'number' && Number.isSafeInteger(code)
+      ? { code }
+      : typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code)
+        ? { code }
+        : {}),
+    ...(typeof signal === 'string' && /^[A-Z0-9_]{1,40}$/.test(signal) ? { signal } : {}),
+    ...(typeof killed === 'boolean' ? { killed } : {}),
+  };
+}
+
+function safeCommand(command: string): string {
+  return command === 'gh' || command === 'git' ? command : 'unrecognized-command';
+}
+
+function safeArg(args: ReadonlyArray<string>, index: number): string | undefined {
+  try {
+    const value = args[index];
+    return typeof value === 'string' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Retain only the operation prefix needed by bounded error rendering; never payload argv. */
+function safeArgs(command: string, args: ReadonlyArray<string>): ReadonlyArray<string> {
+  const first = safeArg(args, 0);
+  const second = safeArg(args, 1);
+  if (
+    command === 'gh' &&
+    first === 'pr' &&
+    ['create', 'edit', 'list', 'view'].includes(second ?? '')
+  )
+    return ['pr', second as string];
+  if (command === 'gh' && first === 'api') return ['api'];
+  if (command === 'git' && first === 'push') return ['push'];
+  return [];
 }
 
 export interface GitHubCliShape {
@@ -43,10 +103,13 @@ export function makeExecFileGitHubCommandRunner(): GitHubCommandRunnerShape {
       Effect.tryPromise({
         catch: (cause) =>
           new GitHubCommandError({
-            args,
-            cause: cause instanceof GitHubProcessFailure ? cause.error : cause,
-            command,
-            cwd,
+            args: safeArgs(command, args),
+            cause:
+              cause instanceof GitHubProcessFailure
+                ? cause.metadata
+                : safeProcessFailureMetadata(cause),
+            command: safeCommand(command),
+            cwd: '[redacted]',
             ...(cause instanceof GitHubProcessFailure && cause.diagnosticHint !== undefined
               ? { diagnosticHint: cause.diagnosticHint }
               : {}),
@@ -60,7 +123,10 @@ export function makeExecFileGitHubCommandRunner(): GitHubCommandRunnerShape {
               (error, stdout, stderr) => {
                 if (error) {
                   reject(
-                    new GitHubProcessFailure(error, githubCommandFailureDiagnosticHint(stderr)),
+                    new GitHubProcessFailure(
+                      safeProcessFailureMetadata(error),
+                      githubCommandFailureDiagnosticHint(stderr),
+                    ),
                   );
                   return;
                 }

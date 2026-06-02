@@ -31,6 +31,12 @@ describe('GitHub watcher diagnostics', () => {
         commandFailure({ stderr: 'HTTP 403: secondary rate limit exceeded' }),
       ),
     ).toMatchObject({ kind: 'rate_limit_likely' });
+    expect(classifyGitHubWatcherFailure(commandFailure({ status: 401 }))).toMatchObject({
+      kind: 'authentication_likely',
+    });
+    expect(classifyGitHubWatcherFailure(commandFailure({ statusCode: 429 }))).toMatchObject({
+      kind: 'rate_limit_likely',
+    });
     expect(
       classifyGitHubWatcherFailure(new GitHubResponseError({ cause: {}, operation: 'view' })),
     ).toMatchObject({ kind: 'metadata_invalid' });
@@ -49,6 +55,35 @@ describe('GitHub watcher diagnostics', () => {
     });
     expect(classifyGitHubWatcherFailure(new Error('untyped'))).toMatchObject({
       kind: 'unexpected_error',
+    });
+  });
+
+  test('degrades throwing getters and proxies without letting unknown diagnostics escape reduction', () => {
+    const throwing = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('private getter diagnostic');
+        },
+      },
+    );
+    const throwingCommand = {
+      _tag: 'GitHubCommandError',
+      get cause() {
+        throw new Error('private cause getter diagnostic');
+      },
+      get diagnosticHint() {
+        throw new Error('private hint getter diagnostic');
+      },
+    };
+
+    expect(classifyGitHubWatcherFailure(throwing)).toEqual({
+      kind: 'unexpected_error',
+      summary: 'GitHub watcher failed unexpectedly; inspect local diagnostics.',
+    });
+    expect(classifyGitHubWatcherFailure(throwingCommand)).toEqual({
+      kind: 'command_failed',
+      summary: 'GitHub CLI command failed; check gh connectivity.',
     });
   });
 

@@ -795,14 +795,15 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     readonly expectedHeadSha?: string;
     readonly error: unknown;
   }) {
-    const diagnostic = classifyGitHubWatcherFailure(event.error);
     const known = namespace.state.pullRequests[event.pullRequestId];
     if (
       !known ||
       !watcherEventMatchesAssociation(known, event.expectedHeadSha) ||
-      known.status !== 'open' ||
-      (known.watcherFailedAt !== undefined && known.watcherFailure?.kind === diagnostic.kind)
+      known.status !== 'open'
     )
+      return;
+    const diagnostic = classifyGitHubWatcherFailure(event.error);
+    if (known.watcherFailedAt !== undefined && known.watcherFailure?.kind === diagnostic.kind)
       return;
     const timestamp = yield* nowIso;
     const attention = makeEvent(

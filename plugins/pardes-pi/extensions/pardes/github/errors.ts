@@ -1,6 +1,6 @@
 import { Data, type Duration } from 'effect';
 
-/** Raw argv diagnostics stay structured here; model-facing rendering must redact them. */
+/** Adapter diagnostics stay structured here; production exec failures retain only safe metadata. */
 export class GitHubCommandError extends Data.TaggedError('GitHubCommandError')<{
   readonly command: string;
   readonly cwd: string;

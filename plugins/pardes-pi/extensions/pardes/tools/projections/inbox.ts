@@ -187,7 +187,9 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
     metadata.trust === 'external_feedback'
       ? 'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.'
       : metadata.trust === 'external_metadata'
-        ? 'external GitHub metadata remains observation-only; no worker message was sent.'
+        ? event.type === 'merged'
+          ? 'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.'
+          : 'external GitHub metadata remains observation-only; no worker message was sent.'
         : undefined;
   const text = [
     `[${inboxEventTrustLabel(metadata)}]`,

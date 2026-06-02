@@ -2117,6 +2117,14 @@ describe('Pardes model-visible tools', () => {
         summary: '\u0000'.repeat(5_000),
         type: 'forward_compatible_event',
       },
+      'event-merged': {
+        createdAt,
+        id: 'event-merged',
+        pullRequestId: 'pr-42',
+        summary:
+          '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge.',
+        type: 'merged',
+      },
       'event-metadata': {
         createdAt,
         id: 'event-metadata',
@@ -2211,6 +2219,21 @@ describe('Pardes model-visible tools', () => {
       pullRequestId: 'pr-42',
       trust: 'external_metadata',
     });
+
+    const merged = await inboxGet.execute(
+      'call-merged',
+      { eventId: 'event-merged' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(merged.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
+    expect(merged.content[0]?.text).toContain(
+      '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+    );
+    expect(merged.content[0]?.text).toContain(
+      'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.',
+    );
 
     const report = await inboxGet.execute(
       'call-3',

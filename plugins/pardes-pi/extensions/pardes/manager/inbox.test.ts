@@ -237,6 +237,22 @@ describe('manager inbox notification projection', () => {
     expect(row.endsWith('…')).toBe(true);
   });
 
+  test('keeps a routine merge retirement outcome self-contained in one bounded external-metadata row', () => {
+    const message = render([
+      event(
+        'event-merge',
+        'merged',
+        '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge.',
+      ),
+    ]);
+    const row = requiredValue(message.content.split('\n')[1]);
+
+    expect(row).toContain(
+      '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+    );
+    expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
+  });
+
   test('normalizes and truncates each digest row predictably', () => {
     const message = render([
       event('event-1', 'agent_report_blocked', `agent-1:\n${'x'.repeat(400)}`),

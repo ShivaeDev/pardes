@@ -5639,7 +5639,13 @@ describe('manager controller', () => {
     const mergeAttention = controller.snapshot()?.inbox[0];
     expect(controller.snapshot()?.inboxWake?.cursor).toBe(mergeAttention?.id);
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(wakesBeforeMerge + 1);
+    expect(mergeAttention?.summary).toContain(
+      '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+    );
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+      ),
       details: { cursor: mergeAttention?.id, pendingCount: 1, type: 'manager_inbox_wake' },
     });
 
@@ -5728,6 +5734,17 @@ describe('manager controller', () => {
       'merged',
       'agent_git_audit_dirty',
     ]);
+    expect(controller.snapshot()?.inbox[0]?.summary).toContain(
+      '#42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
+    );
+    expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
+      ),
+    });
+    expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
+      content: expect.stringContaining('- agent_git_audit_dirty: [Pardes]'),
+    });
     expect(agent.worktree && existsSync(agent.worktree.path)).toBe(true);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });

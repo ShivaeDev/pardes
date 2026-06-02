@@ -141,7 +141,13 @@ export const ReservePublishedReviewBranchInputSchema = Schema.Struct({
 
 export const ReleasePublishedReviewBranchClaimInputSchema = Schema.Struct({
   cwd: NonEmptyStringSchema,
+  headBranch: HumanPublishedReviewBranchSchema,
   headSha: FullCommitShaSchema,
+  ownershipId: NonEmptyStringSchema,
+});
+
+export const HumanPublishedReviewBranchReservationSchema = Schema.Struct({
+  claimSha: FullCommitShaSchema,
   ownershipId: NonEmptyStringSchema,
 });
 
@@ -151,6 +157,7 @@ export const PublishPullRequestInputSchema = Schema.Struct({
   cwd: NonEmptyStringSchema,
   headBranch: PersistedPublishedReviewBranchSchema,
   headSha: FullCommitShaSchema,
+  humanHeadBranchReservation: Schema.optionalKey(HumanPublishedReviewBranchReservationSchema),
   legacyExistingPullRequestNumber: Schema.optionalKey(PositiveIntegerSchema),
   openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,

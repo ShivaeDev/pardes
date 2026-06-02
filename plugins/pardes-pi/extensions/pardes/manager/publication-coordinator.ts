@@ -152,17 +152,21 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     if (persisted) yield* callbacks.refresh(ctx);
   });
 
-  const reservePublishedReviewBranch = Effect.fnUntraced(function* (
+  const releasePublishedReviewBranchClaimSafely = (
     agentId: string,
-    workstreamTitle: string,
     cwd: string,
-    headSha: string,
+    headBranch: string,
+    claimSha: string,
     ctx?: ExtensionContext,
-  ) {
-    const ownershipId = `${namespace.managerId}-${agentId}`;
-
-    const releaseClaimSafely = (claimSha: string) =>
-      github.releasePublishedReviewBranchClaim({ cwd, headSha: claimSha, ownershipId }).pipe(
+  ) =>
+    github
+      .releasePublishedReviewBranchClaim({
+        cwd,
+        headBranch,
+        headSha: claimSha,
+        ownershipId: `${namespace.managerId}-${agentId}`,
+      })
+      .pipe(
         Effect.flatMap(() =>
           namespace.store.mutate((state) => {
             const agent = state.agents[agentId];
@@ -182,7 +186,16 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         Effect.catch(() => Effect.void),
       );
 
-    const finalize = Effect.fnUntraced(function* (branch: string, claimSha: string) {
+  const reservePublishedReviewBranch = Effect.fnUntraced(function* (
+    agentId: string,
+    workstreamTitle: string,
+    cwd: string,
+    headSha: string,
+    ctx?: ExtensionContext,
+  ) {
+    const ownershipId = `${namespace.managerId}-${agentId}`;
+
+    const finalize = Effect.fnUntraced(function* (branch: string) {
       const timestamp = yield* nowIso;
       yield* namespace.store.mutate<void, InvalidManagedStateError>((state) => {
         const agent = state.agents[agentId];
@@ -208,7 +221,6 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         ] as const);
       });
       yield* callbacks.refresh(ctx);
-      yield* releaseClaimSafely(claimSha);
       return branch;
     });
 
@@ -244,11 +256,12 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         headSha: claimSha,
         ownershipId,
       });
-      if (result === 'collision') {
+      if (result !== 'reserved') {
         yield* clearPending(branch);
-        return undefined;
+        return result;
       }
-      return yield* finalize(branch, claimSha);
+      yield* finalize(branch);
+      return result;
     });
 
     const known = namespace.state.agents[agentId];
@@ -260,60 +273,69 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
             reason: `pending published review branch for ${agentId} has no claim SHA`,
           });
         const recovered = yield* claim(known.publishedReviewBranch, claimSha);
-        if (recovered !== undefined) return recovered;
+        if (recovered === 'reserved') return known.publishedReviewBranch;
       } else {
-        if (known.publishedReviewBranchClaimSha)
-          yield* releaseClaimSafely(known.publishedReviewBranchClaimSha);
         return known.publishedReviewBranch;
       }
     }
 
-    const candidates = yield* github.publishedReviewBranchCandidates({
-      cwd,
-      disambiguator: agentId,
-      fallbackDisambiguator: namespace.managerId,
-      workstreamTitle,
-    });
-    for (const branch of candidates) {
-      const timestamp = yield* nowIso;
-      const reservation = yield* namespace.store.mutate<
-        PublishedReviewBranchReservation,
-        InvalidManagedStateError
-      >((state) => {
-        const agent = state.agents[agentId];
-        if (!agent)
-          return Effect.fail(
-            new InvalidManagedStateError({
-              reason: `cannot reserve a published review branch for missing agent ${agentId}`,
-            }),
-          );
-        if (agent.publishedReviewBranch !== undefined) {
+    const attempted = new Set<string>();
+    for (let plan = 0; plan < 2; plan++) {
+      const candidates = yield* github.publishedReviewBranchCandidates({
+        cwd,
+        disambiguator: agentId,
+        fallbackDisambiguator: namespace.managerId,
+        workstreamTitle,
+      });
+      let replan = false;
+      for (const branch of candidates) {
+        if (attempted.has(branch)) continue;
+        attempted.add(branch);
+        const timestamp = yield* nowIso;
+        const reservation = yield* namespace.store.mutate<
+          PublishedReviewBranchReservation,
+          InvalidManagedStateError
+        >((state) => {
+          const agent = state.agents[agentId];
+          if (!agent)
+            return Effect.fail(
+              new InvalidManagedStateError({
+                reason: `cannot reserve a published review branch for missing agent ${agentId}`,
+              }),
+            );
+          if (agent.publishedReviewBranch !== undefined) {
+            return Effect.succeed([
+              { branch: agent.publishedReviewBranch, changed: false },
+              state,
+            ] as const);
+          }
           return Effect.succeed([
-            { branch: agent.publishedReviewBranch, changed: false },
-            state,
-          ] as const);
-        }
-        return Effect.succeed([
-          { branch, changed: true },
-          {
-            ...state,
-            agents: {
-              ...state.agents,
-              [agentId]: {
-                ...agent,
-                publishedReviewBranch: branch,
-                publishedReviewBranchClaimSha: headSha,
-                publishedReviewBranchPending: true,
-                updatedAt: timestamp,
+            { branch, changed: true },
+            {
+              ...state,
+              agents: {
+                ...state.agents,
+                [agentId]: {
+                  ...agent,
+                  publishedReviewBranch: branch,
+                  publishedReviewBranchClaimSha: headSha,
+                  publishedReviewBranchPending: true,
+                  updatedAt: timestamp,
+                },
               },
             },
-          },
-        ] as const);
-      });
-      if (reservation.changed) yield* callbacks.refresh(ctx);
-      if (reservation.branch !== branch) return reservation.branch;
-      const reserved = yield* claim(branch, headSha);
-      if (reserved !== undefined) return reserved;
+          ] as const);
+        });
+        if (reservation.changed) yield* callbacks.refresh(ctx);
+        if (reservation.branch !== branch) return reservation.branch;
+        const reserved = yield* claim(branch, headSha);
+        if (reserved === 'reserved') return branch;
+        if (reserved === 'hierarchy_collision') {
+          replan = true;
+          break;
+        }
+      }
+      if (!replan) break;
     }
     return yield* new PullRequestPublicationValidationError({
       reason: `could not allocate a unique published review branch for ${agentId}`,
@@ -438,9 +460,8 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         inspection.headSha,
         ctx,
       ));
-    const hasManagedReservation =
-      namespace.state.agents[agent.id]?.publishedReviewBranch === headBranch &&
-      isManagedPublishedReviewBranch(headBranch);
+    const persistedAgent = namespace.state.agents[agent.id];
+    const claimSha = persistedAgent?.publishedReviewBranchClaimSha;
     const publication = yield* github.publish({
       baseBranch: input.baseBranch,
       body: input.body,
@@ -449,9 +470,17 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       headSha: inspection.headSha,
       title: input.title,
       ...(input.openInBrowser === undefined ? {} : { openInBrowser: input.openInBrowser }),
-      ...(existingAssociation?.number !== undefined && !hasManagedReservation
-        ? { legacyExistingPullRequestNumber: existingAssociation.number }
-        : {}),
+      ...(claimSha === undefined
+        ? {}
+        : {
+            humanHeadBranchReservation: {
+              claimSha,
+              ownershipId: `${namespace.managerId}-${agent.id}`,
+            },
+          }),
+      ...(existingAssociation?.number === undefined
+        ? {}
+        : { legacyExistingPullRequestNumber: existingAssociation.number }),
     });
     const timestamp = yield* nowIso;
     const id = `pr-${publication.number}`;
@@ -503,6 +532,14 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         },
       ] as const);
     });
+    if (claimSha !== undefined)
+      yield* releasePublishedReviewBranchClaimSafely(
+        agent.id,
+        worktree.path,
+        headBranch,
+        claimSha,
+        ctx,
+      );
     yield* callbacks.appendEventSafely(
       makeEvent(
         'pull_request_published',

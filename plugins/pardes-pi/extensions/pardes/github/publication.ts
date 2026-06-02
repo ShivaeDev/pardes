@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Context, Data, Effect, Layer, Schedule, Schema } from 'effect';
 import { decodeGitHubJson } from './codecs.ts';
 import {
@@ -57,6 +58,11 @@ export interface PublishPullRequestInput {
   readonly title: string;
   readonly body: string;
   readonly openInBrowser?: boolean;
+  /** Mechanical proof for initial human-owned publication, verified against its remote ownership anchor. */
+  readonly humanHeadBranchReservation?: {
+    readonly claimSha: string;
+    readonly ownershipId: string;
+  };
   /** Required update-only proof when the caller cannot prove a durable manager-owned reservation. */
   readonly legacyExistingPullRequestNumber?: number;
 }
@@ -77,11 +83,12 @@ export interface ReservePublishedReviewBranchInput {
 
 export interface ReleasePublishedReviewBranchClaimInput {
   readonly cwd: string;
+  readonly headBranch: string;
   readonly headSha: string;
   readonly ownershipId: string;
 }
 
-export type ReservePublishedReviewBranchResult = 'collision' | 'reserved';
+export type ReservePublishedReviewBranchResult = 'collision' | 'hierarchy_collision' | 'reserved';
 
 export interface SyncExistingPullRequestInput {
   readonly cwd: string;
@@ -260,13 +267,16 @@ export function makeGitHubPublicationService(
     return login ?? (yield* fallbackActor(cwd));
   });
 
-  const remoteHeads = Effect.fnUntraced(function* (cwd: string, branches: ReadonlyArray<string>) {
-    const listed = yield* command(cwd, 'git', [
-      'ls-remote',
-      '--heads',
-      'origin',
-      ...branches.flatMap((branch) => [`refs/heads/${branch}`, `refs/heads/${branch}/*`]),
-    ]);
+  const remoteHeads = Effect.fnUntraced(function* (
+    cwd: string,
+    exactBranches: ReadonlyArray<string>,
+    descendantRoots: ReadonlyArray<string> = [],
+  ) {
+    const patterns = [
+      ...exactBranches.map((branch) => `refs/heads/${branch}`),
+      ...descendantRoots.map((branch) => `refs/heads/${branch}/*`),
+    ];
+    const listed = yield* command(cwd, 'git', ['ls-remote', '--heads', 'origin', ...patterns]);
     const heads = new Map<string, string>();
     for (const line of listed.stdout.trim().split(/\r?\n/)) {
       if (!line) continue;
@@ -283,8 +293,15 @@ export function makeGitHubPublicationService(
     return (yield* remoteHeads(cwd, [branch])).get(branch);
   });
 
-  const reservationClaimBranch = (ownershipId: string) =>
-    `pardes-reservation-${publishedBranchSlug(ownershipId, 'owner', 96)}`;
+  const reservationClaimBranch = (ownershipId: string, headBranch: string) => {
+    const digest = createHash('sha256').update(headBranch).digest('hex').slice(0, 12);
+    return `pardes-reservation-${publishedBranchSlug(ownershipId, 'owner', 80)}-${digest}`;
+  };
+
+  const branchAncestors = (branch: string): ReadonlyArray<string> => {
+    const segments = branch.split('/');
+    return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join('/'));
+  };
 
   const publishedReviewBranchCandidates: GitHubPublicationShape['publishedReviewBranchCandidates'] =
     Effect.fnUntraced(function* (rawInput: PublishedReviewBranchCandidatesInput) {
@@ -325,8 +342,13 @@ export function makeGitHubPublicationService(
       const input = yield* Schema.decodeUnknownEffect(ReservePublishedReviewBranchInputSchema)(
         rawInput,
       ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
-      const claimBranch = reservationClaimBranch(input.ownershipId);
-      const before = yield* remoteHeads(input.cwd, [input.headBranch, claimBranch]);
+      const claimBranch = reservationClaimBranch(input.ownershipId, input.headBranch);
+      const ancestors = branchAncestors(input.headBranch);
+      const before = yield* remoteHeads(
+        input.cwd,
+        [...ancestors, input.headBranch, claimBranch],
+        [input.headBranch],
+      );
       const head = before.get(input.headBranch);
       const claim = before.get(claimBranch);
       if (claim === input.headSha && head === input.headSha) return 'reserved';
@@ -337,6 +359,7 @@ export function makeGitHubPublicationService(
           expected: input.headSha,
           head,
         });
+      if (ancestors.some((branch) => before.has(branch))) return 'hierarchy_collision';
       if (before.size > 0) return 'collision';
       const reservation = yield* command(input.cwd, 'git', [
         'push',
@@ -347,10 +370,16 @@ export function makeGitHubPublicationService(
         `${input.headSha}:refs/heads/${input.headBranch}`,
         `${input.headSha}:refs/heads/${claimBranch}`,
       ]).pipe(Effect.exit);
-      const after = yield* remoteHeads(input.cwd, [input.headBranch, claimBranch]);
+      const after = yield* remoteHeads(
+        input.cwd,
+        [...ancestors, input.headBranch, claimBranch],
+        [input.headBranch],
+      );
       const reservedHead = after.get(input.headBranch);
       const reservedClaim = after.get(claimBranch);
       if (reservedHead === input.headSha && reservedClaim === input.headSha) return 'reserved';
+      if (reservedClaim === undefined && ancestors.some((branch) => after.has(branch)))
+        return 'hierarchy_collision';
       if (reservedClaim === undefined && after.size > 0) return 'collision';
       if (reservation._tag === 'Failure') return yield* Effect.failCause(reservation.cause);
       return yield* responseError('verify reserved published review branch', {
@@ -366,7 +395,7 @@ export function makeGitHubPublicationService(
       const input = yield* Schema.decodeUnknownEffect(ReleasePublishedReviewBranchClaimInputSchema)(
         rawInput,
       ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
-      const claimBranch = reservationClaimBranch(input.ownershipId);
+      const claimBranch = reservationClaimBranch(input.ownershipId, input.headBranch);
       const claim = yield* remoteBranchHead(input.cwd, claimBranch);
       if (claim === undefined) return;
       if (claim !== input.headSha)
@@ -456,12 +485,27 @@ export function makeGitHubPublicationService(
       isManagedPublishedReviewBranch(input.headBranch);
     if (
       isHumanPublishedReviewBranch(input.headBranch) &&
-      input.legacyExistingPullRequestNumber === undefined &&
-      (yield* remoteBranchHead(input.cwd, input.headBranch)) === undefined
+      input.legacyExistingPullRequestNumber === undefined
     ) {
-      return yield* new GitHubPublicationInputError({
-        cause: 'human-owned published review branch requires an existing remote reservation',
-      });
+      const reservation = input.humanHeadBranchReservation;
+      if (!reservation) {
+        return yield* new GitHubPublicationInputError({
+          cause: 'human-owned published review branch requires durable ownership evidence',
+        });
+      }
+      const claimBranch = reservationClaimBranch(reservation.ownershipId, input.headBranch);
+      const proof = yield* remoteHeads(input.cwd, [input.headBranch, claimBranch]);
+      if (
+        proof.get(input.headBranch) !== reservation.claimSha ||
+        proof.get(claimBranch) !== reservation.claimSha
+      ) {
+        return yield* responseError('verify human-owned published review branch reservation', {
+          claimBranch,
+          expected: reservation.claimSha,
+          headBranch: input.headBranch,
+          proof: Object.fromEntries(proof),
+        });
+      }
     }
     let existing: { readonly number: number } | undefined;
     if (!managedHeadBranch) {

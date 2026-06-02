@@ -504,7 +504,8 @@ function stubGithub(
   const syncs: SyncExistingPullRequestInput[] = [];
   let duringPublish: (() => Effect.Effect<void, unknown>) | undefined;
   let duringSync: (() => Effect.Effect<void, unknown>) | undefined;
-  let reserveResults: Array<'collision' | 'reserved'> = [];
+  let candidateResults: Array<ReadonlyArray<string>> = [];
+  let reserveResults: Array<'collision' | 'hierarchy_collision' | 'reserved'> = [];
   let syncResult: SyncExistingPullRequestResult = { status: 'synced' };
   let syncFailure: GitHubCommandError | undefined;
   const github: GitHubPublicationShape = {
@@ -536,7 +537,13 @@ function stubGithub(
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-+|-+$/g, '')}`;
-        return [preferred, `${preferred}-worker`, `${preferred}-worker-manager`];
+        return (
+          candidateResults.shift() ?? [
+            preferred,
+            `${preferred}-worker`,
+            `${preferred}-worker-manager`,
+          ]
+        );
       }),
     releasePublishedReviewBranchClaim: () => Effect.void,
     reservePublishedReviewBranch: (input) =>
@@ -557,13 +564,16 @@ function stubGithub(
     github,
     publications,
     reservations,
+    setCandidateResults: (results: ReadonlyArray<ReadonlyArray<string>>) => {
+      candidateResults = [...results];
+    },
     setDuringPublish: (effect: () => Effect.Effect<void, unknown>) => {
       duringPublish = effect;
     },
     setDuringSync: (effect: () => Effect.Effect<void, unknown>) => {
       duringSync = effect;
     },
-    setReserveResults: (results: Array<'collision' | 'reserved'>) => {
+    setReserveResults: (results: Array<'collision' | 'hierarchy_collision' | 'reserved'>) => {
       reserveResults = results;
     },
     setSyncFailure: (failure: GitHubCommandError) => {
@@ -6394,6 +6404,10 @@ describe('manager controller', () => {
       cwd: requiredValue(agent.worktree).path,
       headBranch: publishedHeadBranch,
       headSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
+      humanHeadBranchReservation: {
+        claimSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
+        ownershipId: `${requiredValue(controller.snapshot()).managerId}-${agent.id}`,
+      },
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
@@ -6465,6 +6479,38 @@ describe('manager controller', () => {
     expect(published.pullRequest.headBranch).toBe('fixture-user/pardes/watched-pr-worker');
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBe(
       'fixture-user/pardes/watched-pr-worker',
+    );
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+  });
+
+  test('replans to a flat readable candidate when an actor-root leaf races reservation', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    github.setCandidateResults([
+      ['fixture-user/pardes/watched-pr'],
+      ['fixture-user-pardes-watched-pr'],
+    ]);
+    github.setReserveResults(['hierarchy_collision', 'reserved']);
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+
+    expect(github.candidateRequests).toHaveLength(2);
+    expect(github.reservations.map(({ headBranch }) => headBranch)).toEqual([
+      'fixture-user/pardes/watched-pr',
+      'fixture-user-pardes-watched-pr',
+    ]);
+    expect(published.pullRequest.headBranch).toBe('fixture-user-pardes-watched-pr');
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBe(
+      'fixture-user-pardes-watched-pr',
     );
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
   });

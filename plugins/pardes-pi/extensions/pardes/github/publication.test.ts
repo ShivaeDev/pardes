@@ -21,6 +21,8 @@ function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const HUMAN_CLAIM = 'pardes-reservation-manager-1-agent-1-c36cc3ff4f6b';
+
 const input = {
   baseBranch: 'main',
   body: 'Summary and validation.',
@@ -89,7 +91,7 @@ describe('GitHub publication boundary', () => {
 
   test('transfers and reserves an exact local-only audited SHA with a create-only atomic push', async () => {
     const branch = 'actor/pardes/readable-branch-ux';
-    const claim = 'pardes-reservation-manager-1-agent-1';
+    const claim = HUMAN_CLAIM;
     const advertised = `${input.headSha}\trefs/heads/${branch}\n${input.headSha}\trefs/heads/${claim}\n`;
     const fixture = scriptedRunner([result(), result(), result(advertised)]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
@@ -120,13 +122,14 @@ describe('GitHub publication boundary', () => {
   });
 
   test('removes only the exact transient ownership anchor after durable finalization', async () => {
-    const claim = 'pardes-reservation-manager-1-agent-1';
+    const claim = HUMAN_CLAIM;
     const fixture = scriptedRunner([result(`${input.headSha}\trefs/heads/${claim}\n`), result()]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
 
     await Effect.runPromise(
       service.releasePublishedReviewBranchClaim({
         cwd: input.cwd,
+        headBranch: 'actor/pardes/readable-branch-ux',
         headSha: input.headSha,
         ownershipId: 'manager-1-agent-1',
       }),
@@ -142,7 +145,7 @@ describe('GitHub publication boundary', () => {
 
   test('recovers a lost create response only when the exact SHA and ownership anchor are advertised', async () => {
     const branch = 'actor/pardes/readable-branch-ux';
-    const claim = 'pardes-reservation-manager-1-agent-1';
+    const claim = HUMAN_CLAIM;
     const advertised = `${input.headSha}\trefs/heads/${branch}\n${input.headSha}\trefs/heads/${claim}\n`;
     const invocations: Array<{
       readonly args: ReadonlyArray<string>;
@@ -198,10 +201,55 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(1);
   });
 
+  test('classifies an actor-root TOCTOU hierarchy conflict after failed atomic reservation', async () => {
+    const branch = 'actor/pardes/readable-branch-ux';
+    const outputs: Array<ProcessResult | 'race'> = [
+      result(),
+      'race',
+      result(`${input.headSha}\trefs/heads/actor\n`),
+    ];
+    const invocations: Array<{
+      readonly args: ReadonlyArray<string>;
+      readonly command: string;
+      readonly cwd: string;
+    }> = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        const output = outputs.shift();
+        return output === 'race'
+          ? Effect.fail(
+              new GitHubCommandError({
+                args: invocation.args,
+                cause: 'fixture actor-root race',
+                command: invocation.command,
+                cwd: invocation.cwd,
+              }),
+            )
+          : Effect.succeed(output ?? result());
+      },
+    };
+    const service = makeGitHubPublicationService({ runner });
+
+    expect(
+      await Effect.runPromise(
+        service.reservePublishedReviewBranch({
+          cwd: input.cwd,
+          headBranch: branch,
+          headSha: input.headSha,
+          ownershipId: 'manager-1-agent-1',
+        }),
+      ),
+    ).toBe('hierarchy_collision');
+    expect(invocations).toHaveLength(3);
+  });
+
   test('allows create-capable human publication only after mechanical remote reservation proof', async () => {
     const headBranch = 'actor/pardes/readable-branch-ux';
     const fixture = scriptedRunner([
-      result(`${input.headSha}\trefs/heads/${headBranch}\n`),
+      result(
+        `${input.headSha}\trefs/heads/${headBranch}\n${input.headSha}\trefs/heads/${HUMAN_CLAIM}\n`,
+      ),
       result(),
       result('[]'),
       result(),
@@ -209,7 +257,13 @@ describe('GitHub publication boundary', () => {
     ]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
 
-    const published = await Effect.runPromise(service.publish({ ...input, headBranch }));
+    const published = await Effect.runPromise(
+      service.publish({
+        ...input,
+        headBranch,
+        humanHeadBranchReservation: { claimSha: input.headSha, ownershipId: 'manager-1-agent-1' },
+      }),
+    );
 
     expect(published).toMatchObject({ action: 'created', headBranch });
     expect(fixture.invocations[0]?.args).toEqual([
@@ -217,13 +271,34 @@ describe('GitHub publication boundary', () => {
       '--heads',
       'origin',
       `refs/heads/${headBranch}`,
-      `refs/heads/${headBranch}/*`,
+      `refs/heads/${HUMAN_CLAIM}`,
     ]);
     expect(fixture.invocations[1]?.args).toEqual([
       'push',
       'origin',
       `${input.headSha}:refs/heads/${headBranch}`,
     ]);
+  });
+
+  test('rejects unrelated pre-existing human refs when their claimed ownership anchor is absent', async () => {
+    const headBranch = 'actor/pardes/unrelated';
+    const fixture = scriptedRunner([result(`${input.headSha}\trefs/heads/${headBranch}\n`)]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(
+      service
+        .publish({
+          ...input,
+          headBranch,
+          humanHeadBranchReservation: { claimSha: input.headSha, ownershipId: 'manager-1-agent-1' },
+        })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    if (failure._tag !== 'GitHubResponseError') throw failure;
+    expect(failure.operation).toBe('verify human-owned published review branch reservation');
+    expect(fixture.invocations).toHaveLength(1);
   });
 
   test('pushes exactly the audited SHA with an explicit branch refspec before creating a ready-for-review PR', async () => {
@@ -488,7 +563,7 @@ describe('GitHub publication boundary', () => {
         .pipe(Effect.flip),
     );
     expect(readableLocalHeadFailure._tag).toBe('GitHubPublicationInputError');
-    expect(unreserved.invocations).toHaveLength(1);
+    expect(unreserved.invocations).toHaveLength(0);
   });
 
   test('rejects invalid Git ref forms in pre-hardening branch compatibility before invoking a child process', async () => {

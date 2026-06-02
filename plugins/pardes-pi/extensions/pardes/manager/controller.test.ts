@@ -6256,7 +6256,7 @@ describe('manager controller', () => {
     );
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
-      'github_rate_metadata_unavailable: [Pardes] GitHub.com watcher rate metadata is unavailable or invalid;',
+      'github_rate_metadata_unavailable: [GitHub metadata] GitHub.com watcher rate metadata is unavailable or invalid;',
     );
     expect(JSON.stringify(fixture.messages[0]?.message).length).toBeLessThan(1_200);
 

@@ -60,7 +60,8 @@ export type GitHubIntegrationHealthIssue =
   | 'timed_out'
   | 'default_branch_missing'
   | 'checks_ref_missing'
-  | 'association_invalid';
+  | 'association_invalid'
+  | 'unsupported_route';
 export type GitHubHostedCheckCi = CheckState;
 export type GitHubHostedCheckRelation = 'current' | 'stale';
 export type GitHubHostedCheckCompleteness = 'complete' | 'partial';
@@ -155,6 +156,11 @@ type GitHubIntegrationHealthCommandError =
 
 function issue(error: GitHubIntegrationHealthCommandError): GitHubIntegrationHealthIssue {
   if (error._tag === 'GitHubIntegrationHealthTimeoutError') return 'timed_out';
+  if (
+    error._tag === 'GitHubResponseError' &&
+    error.operation.startsWith('enforce fixed github.com route')
+  )
+    return 'unsupported_route';
   return error._tag === 'GitHubCommandError' ? 'command_failed' : 'response_invalid';
 }
 
@@ -300,6 +306,7 @@ export function makeGitHubIntegrationHealthService(
     expression: string,
     referenceHeadSha: string,
   ) {
+    const reservation = yield* hostedMetadata.reserveGraphQLRequest();
     const response = yield* run(cwd, [
       'api',
       'graphql',
@@ -320,6 +327,7 @@ export function makeGitHubIntegrationHealthService(
       'inspect hosted checks',
       GitHubHostedChecksGraphQLSchema,
       response.stdout,
+      reservation.id,
     );
     return projectHostedChecks(decoded, referenceHeadSha);
   });
@@ -333,6 +341,7 @@ export function makeGitHubIntegrationHealthService(
     );
 
   const inspectDefaultBranch = Effect.fnUntraced(function* (cwd: string) {
+    const reservation = yield* hostedMetadata.reserveGraphQLRequest();
     const response = yield* run(cwd, [
       'api',
       'graphql',
@@ -349,6 +358,7 @@ export function makeGitHubIntegrationHealthService(
       'inspect advertised default branch head',
       GitHubAdvertisedDefaultBranchGraphQLSchema,
       response.stdout,
+      reservation.id,
     );
     const defaultBranch = decoded.data.repository.defaultBranchRef;
     if (defaultBranch === null) {
@@ -463,17 +473,30 @@ export function makeGitHubIntegrationHealthService(
       0,
       MAX_GITHUB_INTEGRATION_HEALTH_PULL_REQUESTS,
     );
-    const defaultBranch =
+    const routeFailure =
       input.cwd.trim().length === 0
+        ? ('command_failed' as const)
+        : yield* hostedMetadata
+            .ensureFixedGitHubComRepository(input.cwd)
+            .pipe(
+              Effect.andThen(
+                Effect.forEach(selectedPullRequests, ({ url }) =>
+                  hostedMetadata.ensureFixedGitHubComUrl(url),
+                ),
+              ),
+              Effect.match({ onFailure: issue, onSuccess: () => undefined }),
+            );
+    const defaultBranch =
+      routeFailure !== undefined
         ? ({
             failingWorkflowIds: new Set<number>(),
-            projection: { availability: 'unavailable', issue: 'command_failed' },
+            projection: { availability: 'unavailable', issue: routeFailure },
           } satisfies InternalDefaultBranchIntegrationHealth)
         : yield* observeDefaultBranch(input.cwd);
     const pullRequests =
-      input.cwd.trim().length === 0
+      routeFailure !== undefined
         ? selectedPullRequests.map((association) =>
-            unavailablePullRequest(association, 'command_failed'),
+            unavailablePullRequest(association, routeFailure),
           )
         : yield* Effect.forEach(selectedPullRequests, (association) =>
             observePullRequest(input.cwd, association, defaultBranch),

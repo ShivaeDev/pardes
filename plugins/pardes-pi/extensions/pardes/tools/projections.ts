@@ -67,6 +67,7 @@ const EXTERNAL_METADATA_INBOX_EVENT_TYPES = new Set([
   'merged',
   'closed_unmerged',
   'watcher_failed',
+  'github_rate_metadata_unavailable',
   'pull_request_head_diverged',
   'discussion_pagination_gap',
 ]);
@@ -76,7 +77,6 @@ const PARDES_AUTHORED_INBOX_EVENT_TYPES = new Set([
   'agent_detached',
   'agent_git_audit_dirty',
   'agent_auto_stop_failed',
-  'github_rate_metadata_unavailable',
   'pull_request_auto_sync_attention',
   'verification_evidence_stale',
 ]);
@@ -296,6 +296,11 @@ export function reviewLines(state: ManagerState, filter: ReviewFilter, maxRows?:
   });
   const lines = [
     `review gates: ${openCount} open · ${attentionCount} attention · ${pullRequests.length} total (${matching.length} ${filter})`,
+    ...(state.githubRateMetadataUnavailableAt === undefined
+      ? []
+      : [
+          'global GitHub warning [external-metadata]: rate metadata unavailable or invalid · watcher polling deferred',
+        ]),
     ...matching.map((pullRequest) => {
       const label = pullRequest.number === undefined ? pullRequest.id : `#${pullRequest.number}`;
       const draft = pullRequest.draft ? 'draft' : pullRequest.status;
@@ -684,14 +689,11 @@ function rateLimitHealthLines(
 ): ReadonlyArray<string> {
   const rateLimit = inspection.rateLimit;
   const watcher = rateLimit.watcherPolling;
-  const watcherLabel =
-    watcher.status === 'ready'
-      ? 'ready'
-      : `deferred (${watcher.reason}${watcher.until === undefined ? '' : ` until ${compactText(watcher.until, 32)}`})`;
+  const watcherLabel = watcher.status === 'ready' ? 'ready' : `deferred(${watcher.reason})`;
   return [
-    'rate scope: GitHub.com credentials fixed for this controller lifetime · fresh controller resets cache',
+    'rate scope: GitHub.com credentials fixed/controller lifetime · gh credential switch unsupported · reload manager for fresh cache',
     `rate budget: graphql:${rateLimitBudgetLabel(rateLimit.graphql)}`,
-    `rate fallback: rest:${rateLimitBudgetLabel(rateLimit.rest)} · endpoint:${rateLimit.fallback} · watcher:${watcherLabel}`,
+    `rate fallback: rest:${rateLimitBudgetLabel(rateLimit.rest)} · endpoint:${rateLimit.fallback} · watcher-last-disposition:${watcherLabel}`,
   ];
 }
 

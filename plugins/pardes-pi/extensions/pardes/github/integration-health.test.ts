@@ -1,8 +1,9 @@
-import { Effect } from 'effect';
+import { Deferred, Effect, Fiber } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
   GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS,
   GitHubCommandError,
+  makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
 } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
@@ -25,6 +26,17 @@ function defaultBranchResult(sha = MAIN_SHA) {
       data: {
         rateLimit: RATE_LIMIT,
         repository: { defaultBranchRef: { name: 'main', target: { oid: sha } } },
+      },
+    }),
+  );
+}
+
+function rateLimitFallbackResult() {
+  return result(
+    JSON.stringify({
+      resources: {
+        core: { limit: 5_000, remaining: 3_000, reset: 1_800_000_000 },
+        graphql: { limit: 5_000, remaining: 4_000, reset: 1_800_000_000 },
       },
     }),
   );
@@ -94,7 +106,7 @@ function association(
     id: 'pr-42',
     lastPushedHeadSha: AUDITED_PR_SHA,
     number: 42,
-    url: 'https://github.test/acme/project/pull/42',
+    url: 'https://github.com/acme/project/pull/42',
     ...overrides,
   };
 }
@@ -104,7 +116,9 @@ describe('GitHub integration-health inspection', () => {
     let invocations = 0;
     let interrupted = false;
     const runner: GitHubCommandRunnerShape = {
-      run: () => {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
         invocations += 1;
         return invocations === 1
           ? Effect.succeed(defaultBranchResult())
@@ -392,10 +406,56 @@ describe('GitHub integration-health inspection', () => {
     expect(JSON.stringify(inspection)).not.toContain('private diagnostics');
   });
 
+  test('rejects unsupported association routes before mixing opt-in health metadata', async () => {
+    const fixture = scriptedRunner([]);
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association({ url: 'https://github.enterprise.test/acme/project/pull/42' })],
+      }),
+    );
+
+    expect(fixture.invocations).toEqual([]);
+    expect(inspection.defaultBranch).toEqual({
+      availability: 'unavailable',
+      issue: 'unsupported_route',
+    });
+    expect(inspection.pullRequests[0]).toMatchObject({
+      hostedChecks: { availability: 'unavailable', issue: 'unsupported_route' },
+      pullRequestHead: 'unavailable',
+    });
+  });
+
+  test('reserves opt-in health GraphQL spend before launch so watcher admission sees in-flight debt', async () => {
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        if (invocation.args[1] === 'graphql')
+          return Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never));
+        if (invocation.args[1] === 'rate_limit') return Effect.succeed(rateLimitFallbackResult());
+        return Effect.die(`Unexpected command: ${invocation.args.join(' ')}`);
+      },
+    };
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner });
+    const service = makeGitHubIntegrationHealthService({ hostedMetadata, runner });
+    const fiber = Effect.runFork(service.inspect({ cwd: '/tmp/project', pullRequests: [] }));
+    await Effect.runPromise(Deferred.await(entered));
+
+    await Effect.runPromise(hostedMetadata.refreshFallback('/tmp/project'));
+    expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
+      graphql: { remaining: 3_995, source: 'local_estimate' },
+    });
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
   test('continues bounded PR observation when default-branch metadata is unavailable', async () => {
     let invocationCount = 0;
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
         invocationCount += 1;
         if (invocationCount === 1)
           return Effect.fail(

@@ -16,7 +16,7 @@ import {
   type PullRequestWatcherObservation,
 } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
-import type { GitHubCommandRunnerShape, ProcessResult } from './transport.ts';
+import type { GitHubCommandRunnerShape, ProcessInvocation, ProcessResult } from './transport.ts';
 
 const HEAD_SHA = 'a'.repeat(40);
 const PREVIOUS_HEAD_SHA = 'b'.repeat(40);
@@ -45,7 +45,14 @@ function makeGitHubWatcherService(
     hostedMetadata:
       options.hostedMetadata ??
       makeGitHubHostedMetadataAdapter({
-        runner: { run: () => Effect.succeed(rateLimitFallbackResult()) },
+        runner: {
+          run: ({ command }) =>
+            Effect.succeed(
+              command === 'git'
+                ? result('git@github.com:acme/project.git\n')
+                : rateLimitFallbackResult(),
+            ),
+        },
       }),
     ...options,
   });
@@ -93,7 +100,7 @@ function pullRequest(overrides: Partial<PullRequestRecord> = {}): PullRequestRec
     number: 42,
     status: 'open',
     updatedAt: '2026-06-01T00:00:00.000Z',
-    url: 'https://github.test/acme/project/pull/42',
+    url: 'https://github.com/acme/project/pull/42',
     workstreamId: 'ws-1',
     ...overrides,
   };
@@ -154,7 +161,7 @@ describe('GitHub watcher service', () => {
           statusCheckRollup: [
             {
               conclusion: 'FAILURE',
-              detailsUrl: 'https://github.test/logs',
+              detailsUrl: 'https://github.com/logs',
               name: 'untrusted check name',
               status: 'COMPLETED',
             },
@@ -600,6 +607,8 @@ describe('GitHub watcher service', () => {
     let invocations = 0;
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
         invocations += 1;
         return invocations <= 2
           ? Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }))
@@ -612,6 +621,7 @@ describe('GitHub watcher service', () => {
     await Effect.runPromise(service.poll(received.callbacks));
     await Effect.runPromise(service.poll(received.callbacks));
     expect(received.throttleDiagnostics).toEqual([{ status: 'rate_metadata_unavailable' }]);
+    expect(received.failures).toEqual([]);
     expect(received.observations).toEqual([]);
 
     await Effect.runPromise(service.poll(received.callbacks));
@@ -661,7 +671,7 @@ describe('GitHub watcher service', () => {
     const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
     const received = callbacks([
       pullRequest(),
-      pullRequest({ id: 'pr-43', number: 43, url: 'https://github.test/acme/project/pull/43' }),
+      pullRequest({ id: 'pr-43', number: 43, url: 'https://github.com/acme/project/pull/43' }),
     ]);
 
     await Effect.runPromise(service.poll(received.callbacks));
@@ -674,6 +684,65 @@ describe('GitHub watcher service', () => {
     expect(fixture.invocations).toHaveLength(4);
     expect(fixture.invocations[0]?.args).toEqual(['api', 'rate_limit', '--hostname', 'github.com']);
     expect(fixture.invocations.some(({ args }) => args.includes('43'))).toBe(false);
+  });
+
+  test('settles each healthy watcher GraphQL reservation after its exact decoded observation', async () => {
+    const metadata = result(
+      JSON.stringify({
+        headRefOid: HEAD_SHA,
+        mergeable: 'MERGEABLE',
+        number: 42,
+        reviewDecision: 'APPROVED',
+        state: 'OPEN',
+        statusCheckRollup: [],
+      }),
+    );
+    const fixture = scriptedRunner([
+      rateLimitFallbackResult(),
+      metadata,
+      discussionResult({ rateLimit: { ...RATE_LIMIT, resetAt: '2027-01-15T08:00:00Z' } }),
+      inlineCommentsResult(),
+      metadata,
+      discussionResult({
+        rateLimit: { ...RATE_LIMIT, remaining: 4_998, resetAt: '2027-01-15T08:00:00Z' },
+      }),
+      inlineCommentsResult(),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+    const service = makeGitHubWatcherServiceProduction({ hostedMetadata, runner: fixture.runner });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.observations).toHaveLength(4);
+    expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
+      graphql: { remaining: 4_988, source: 'local_estimate' },
+      rest: { remaining: 4_998, source: 'local_estimate' },
+    });
+  });
+
+  test('rejects a non-github.com watcher association before route or hosted requests', async () => {
+    const invocations: ProcessInvocation[] = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        return Effect.die('unsupported association route must fail before command invocation');
+      },
+    };
+    const service = makeGitHubWatcherServiceProduction({ runner });
+    const received = callbacks([
+      pullRequest({ url: 'https://github.enterprise.test/acme/project/pull/42' }),
+    ]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(invocations).toEqual([]);
+    expect(received.failures).toHaveLength(1);
+    expect(received.failures[0]?.error).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for association URL',
+    });
   });
 
   test('reports malformed gh metadata through the typed watcher failure callback', async () => {

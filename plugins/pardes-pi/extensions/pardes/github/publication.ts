@@ -202,6 +202,7 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(SyncExistingPullRequestInputSchema)(
       rawInput,
     ).pipe(Effect.mapError((cause) => new GitHubSyncInputError({ cause })));
+    yield* hostedMetadata.ensureFixedGitHubComRepository(input.cwd);
     const viewed = yield* runGitHub(input.cwd, [
       'pr',
       'view',
@@ -264,6 +265,7 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(PublishPullRequestInputSchema)(rawInput).pipe(
       Effect.mapError((cause) => new GitHubPublicationInputError({ cause })),
     );
+    yield* hostedMetadata.ensureFixedGitHubComRepository(input.cwd);
     const opaqueHeadBranch = isOpaquePublishedReviewBranch(input.headBranch);
     let existing: { readonly number: number } | undefined;
     if (!opaqueHeadBranch) {
@@ -284,6 +286,7 @@ export function makeGitHubPublicationService(
         GitHubPublicationMetadataSchema,
         viewed.stdout,
       );
+      yield* hostedMetadata.ensureFixedGitHubComUrl(pullRequest.url);
       if (
         pullRequest.number !== input.legacyExistingPullRequestNumber ||
         status(pullRequest.state) !== 'open' ||
@@ -368,6 +371,7 @@ export function makeGitHubPublicationService(
       GitHubPublicationMetadataSchema,
       viewed.stdout,
     );
+    yield* hostedMetadata.ensureFixedGitHubComUrl(pullRequest.url);
     if (
       pullRequest.headRefName !== input.headBranch ||
       pullRequest.headRefOid !== input.headSha ||

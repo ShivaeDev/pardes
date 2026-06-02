@@ -7,6 +7,7 @@ import {
   makeGitHubPublicationService,
 } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
+import type { GitHubCommandRunnerShape, ProcessInvocation } from './transport.ts';
 
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -18,7 +19,7 @@ function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
     number: 42,
     state: 'OPEN',
     title: 'Publish the bounded slice',
-    url: 'https://github.test/acme/project/pull/42',
+    url: 'https://github.com/acme/project/pull/42',
     ...overrides,
   };
 }
@@ -37,7 +38,7 @@ describe('GitHub publication boundary', () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
-      result('https://github.test/acme/project/pull/42\n'),
+      result('https://github.com/acme/project/pull/42\n'),
       result(JSON.stringify(pullRequest())),
       result(),
     ]);
@@ -55,7 +56,7 @@ describe('GitHub publication boundary', () => {
       openedInBrowser: true,
       status: 'open',
       title: input.title,
-      url: 'https://github.test/acme/project/pull/42',
+      url: 'https://github.com/acme/project/pull/42',
     });
     expect(fixture.invocations[0]).toEqual({
       args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
@@ -130,7 +131,7 @@ describe('GitHub publication boundary', () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
-      result('https://github.test/acme/project/pull/42\n'),
+      result('https://github.com/acme/project/pull/42\n'),
       result(JSON.stringify(pullRequest())),
     ]);
     const service = makeGitHubPublicationService({ hostedMetadata, runner: fixture.runner });
@@ -259,6 +260,27 @@ describe('GitHub publication boundary', () => {
     expect(shaFailure._tag).toBe('GitHubPublicationInputError');
     expect(localHeadFailure._tag).toBe('GitHubPublicationInputError');
     expect(fixture.invocations).toEqual([]);
+  });
+
+  test('rejects a non-github.com repository origin before push or hosted publication requests', async () => {
+    const invocations: ProcessInvocation[] = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        return Effect.succeed(result('git@github.enterprise.test:acme/project.git\n'));
+      },
+    };
+    const service = makeGitHubPublicationService({ runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+    expect(invocations).toEqual([
+      { args: ['remote', 'get-url', 'origin'], command: 'git', cwd: input.cwd },
+    ]);
   });
 
   test('updates an exactly matching open pre-hardening review gate only after remote proof and without creating or force-pushing', async () => {
@@ -715,7 +737,7 @@ describe('GitHub publication boundary', () => {
   });
 
   test('rejects oversized final publication URLs instead of projecting them', async () => {
-    const oversizedUrl = `https://github.test/${'a'.repeat(2_048)}`;
+    const oversizedUrl = `https://github.com/${'a'.repeat(2_048)}`;
     const fixture = scriptedRunner([
       result(),
       result('[]'),
@@ -735,7 +757,7 @@ describe('GitHub publication boundary', () => {
   test('rejects option-like or newline payloads in final publication URLs instead of projecting them', async () => {
     for (const unsafeUrl of [
       '--repo=attacker/project',
-      'https://github.test/acme/project/pull/42\n--repo=attacker/project',
+      'https://github.com/acme/project/pull/42\n--repo=attacker/project',
     ]) {
       const fixture = scriptedRunner([
         result(),
@@ -767,7 +789,7 @@ describe('GitHub publication boundary', () => {
       id: 'pr-legacy',
       status: 'open' as const,
       updatedAt: '2026-06-01T00:00:00.000Z',
-      url: 'https://github.test/acme/project/pull/1',
+      url: 'https://github.com/acme/project/pull/1',
       workstreamId: 'ws-1',
     };
 

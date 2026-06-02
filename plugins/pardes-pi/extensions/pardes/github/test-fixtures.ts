@@ -11,6 +11,10 @@ export function scriptedRunner(outputs: ReadonlyArray<ProcessResult>) {
   const runner: GitHubCommandRunnerShape = {
     run: (invocation) =>
       Effect.sync(() => {
+        // Shared production services validate one fixed GitHub.com origin before hosted calls.
+        // Keep ordinary scripted fixtures focused on hosted argv; route regressions use explicit runners.
+        if (invocation.command === 'git' && invocation.args.join(' ') === 'remote get-url origin')
+          return result('git@github.com:acme/project.git\n');
         invocations.push(invocation);
         const next = queue.shift();
         if (!next)

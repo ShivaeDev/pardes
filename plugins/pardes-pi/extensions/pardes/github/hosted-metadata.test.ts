@@ -7,6 +7,7 @@ import {
 } from './index.ts';
 import { GitHubAdvertisedDefaultBranchGraphQLSchema } from './schemas.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
+import type { GitHubCommandRunnerShape, ProcessInvocation } from './transport.ts';
 
 function fallbackResult(
   graphqlRemaining = 4_000,
@@ -112,6 +113,29 @@ describe('GitHub hosted metadata adapter', () => {
     });
   });
 
+  test('rejects a non-github.com origin before fallback metadata requests', async () => {
+    const invocations: ProcessInvocation[] = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        return Effect.succeed(result('git@github.enterprise.test:acme/project.git\n'));
+      },
+    };
+    const adapter = makeGitHubHostedMetadataAdapter({ runner });
+
+    const failure = await Effect.runPromise(
+      adapter.refreshFallback('/tmp/project').pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+    expect(invocations).toEqual([
+      { args: ['remote', 'get-url', 'origin'], command: 'git', cwd: '/tmp/project' },
+    ]);
+  });
+
   test('rejects malformed fallback metadata with a typed operation-specific response error', async () => {
     const fixture = scriptedRunner([
       result(JSON.stringify({ resources: { core: { remaining: 'credential-shaped-secret' } } })),
@@ -156,6 +180,8 @@ describe('GitHub hosted metadata adapter', () => {
       nowMillis: Effect.sync(() => now),
       runner: {
         run: (invocation) => {
+          if (invocation.command === 'git')
+            return Effect.succeed(result('git@github.com:acme/project.git\n'));
           invocations += 1;
           return invocations === 1
             ? Effect.succeed(fallbackResult())
@@ -164,7 +190,7 @@ describe('GitHub hosted metadata adapter', () => {
       },
     });
 
-    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toEqual({
+    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
       status: 'ready',
     });
     now += GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS;
@@ -202,7 +228,7 @@ describe('GitHub hosted metadata adapter', () => {
       runner: fixture.runner,
     });
 
-    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toEqual({
+    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
       status: 'ready',
     });
     await Effect.runPromise(
@@ -215,14 +241,14 @@ describe('GitHub hosted metadata adapter', () => {
     await Effect.runPromise(adapter.noteUnmeteredGraphQLRequest());
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 3_985, source: 'local_estimate' },
-      rest: { remaining: 2_999, source: 'local_estimate' },
+      rest: { remaining: 3_000, source: 'rest_fallback' },
     });
 
     now += GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS;
     await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 3_985, source: 'local_estimate' },
-      rest: { remaining: 2_999, source: 'local_estimate' },
+      rest: { remaining: 3_000, source: 'rest_fallback' },
     });
   });
 
@@ -242,13 +268,13 @@ describe('GitHub hosted metadata adapter', () => {
       status: 'deferred',
     });
     now = 1_700_000_002_000;
-    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toEqual({
+    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
       status: 'ready',
     });
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       fallback: 'available',
       graphql: { remaining: 3_990, source: 'local_estimate' },
-      rest: { remaining: 2_999, source: 'local_estimate' },
+      rest: { remaining: 3_000, source: 'rest_fallback' },
       watcherPolling: { status: 'ready' },
     });
     expect(fixture.invocations).toHaveLength(2);

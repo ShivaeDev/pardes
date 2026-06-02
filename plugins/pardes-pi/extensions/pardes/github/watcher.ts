@@ -394,7 +394,11 @@ export function makeGitHubWatcherService(
     };
   });
 
-  const inspectDiscussion = Effect.fnUntraced(function* (cwd: string, number: number) {
+  const inspectDiscussion = Effect.fnUntraced(function* (
+    cwd: string,
+    number: number,
+    graphqlReservationId: string,
+  ) {
     const discussionResponse = yield* github.run(cwd, [
       'api',
       'graphql',
@@ -415,7 +419,9 @@ export function makeGitHubWatcherService(
       'watch pull request discussion',
       GitHubPullRequestDiscussionGraphQLSchema,
       discussionResponse.stdout,
+      graphqlReservationId,
     );
+    yield* hostedMetadata.noteUnmeteredRestRequest();
     const inlineResponse = yield* github.run(cwd, [
       'api',
       `repos/{owner}/{repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
@@ -479,85 +485,100 @@ export function makeGitHubWatcherService(
       Effect.forEach(
         callbacks.persistedAssociations(),
         (pullRequest) => {
+          const cwd = callbacks.cwd();
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
+          const failure = (error: GitHubWatcherError) =>
+            callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error });
           return Schema.decodeUnknownEffect(PullRequestAssociationSchema)(pullRequest).pipe(
             Effect.mapError(watcherInputError),
             Effect.matchEffect({
-              onFailure: (error) =>
-                callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error }),
-              onSuccess: () =>
-                hostedMetadata.reserveWatcherPoll(callbacks.cwd(), 1).pipe(
-                  Effect.flatMap((reservation) =>
-                    notifyThrottleDiagnostic(callbacks, reservation).pipe(
-                      Effect.andThen(
-                        reservation.status === 'deferred'
-                          ? Effect.void
-                          : Effect.suspend(() => {
-                              const cwd = callbacks.cwd();
-                              return inspect(cwd, pullRequest).pipe(
-                                Effect.matchEffect({
-                                  onFailure: (error) =>
-                                    callbacks.onFailure({
-                                      pullRequestId: pullRequest.id,
-                                      ...generation,
-                                      error,
-                                    }),
-                                  onSuccess: (inspected) => {
-                                    if (inspected._tag === 'HeadDivergence') {
-                                      const divergence = callbacks.onHeadDivergence({
-                                        expectedHeadSha: inspected.expectedHeadSha,
-                                        observedHeadSha: inspected.observedHeadSha,
-                                        pullRequestId: pullRequest.id,
-                                      });
-                                      return inspected.terminalObservation === undefined
-                                        ? divergence
-                                        : divergence.pipe(
+              onFailure: failure,
+              onSuccess: (association) =>
+                hostedMetadata.ensureFixedGitHubComUrl(association.url).pipe(
+                  Effect.andThen(
+                    Effect.suspend(() => hostedMetadata.ensureFixedGitHubComRepository(cwd)),
+                  ),
+                  Effect.matchEffect({
+                    onFailure: failure,
+                    onSuccess: () =>
+                      hostedMetadata.reserveWatcherPoll(cwd, 1).pipe(
+                        Effect.flatMap((reservation) =>
+                          notifyThrottleDiagnostic(callbacks, reservation).pipe(
+                            Effect.andThen(
+                              Effect.suspend(() => {
+                                if (
+                                  reservation.status === 'deferred' ||
+                                  reservation.graphqlReservationId === undefined
+                                )
+                                  return Effect.void;
+                                const reservationId = reservation.graphqlReservationId;
+                                return hostedMetadata.noteUnmeteredGraphQLRequest().pipe(
+                                  Effect.andThen(inspect(cwd, pullRequest)),
+                                  Effect.matchEffect({
+                                    onFailure: (error) =>
+                                      hostedMetadata
+                                        .cancelGraphQLReservation(reservationId)
+                                        .pipe(Effect.andThen(failure(error))),
+                                    onSuccess: (inspected) => {
+                                      if (inspected._tag === 'HeadDivergence') {
+                                        const divergence = callbacks.onHeadDivergence({
+                                          expectedHeadSha: inspected.expectedHeadSha,
+                                          observedHeadSha: inspected.observedHeadSha,
+                                          pullRequestId: pullRequest.id,
+                                        });
+                                        return hostedMetadata
+                                          .cancelGraphQLReservation(reservationId)
+                                          .pipe(
+                                            Effect.andThen(divergence),
                                             Effect.andThen(
-                                              callbacks.onObservation({
-                                                pullRequestId: pullRequest.id,
-                                                ...generation,
-                                                complete: false,
-                                                observation: inspected.terminalObservation,
-                                              }),
+                                              inspected.terminalObservation === undefined
+                                                ? Effect.void
+                                                : callbacks.onObservation({
+                                                    pullRequestId: pullRequest.id,
+                                                    ...generation,
+                                                    complete: false,
+                                                    observation: inspected.terminalObservation,
+                                                  }),
                                             ),
                                           );
-                                    }
-                                    return callbacks
-                                      .onObservation({
-                                        pullRequestId: pullRequest.id,
-                                        ...generation,
-                                        complete: false,
-                                        observation: inspected.observation,
-                                      })
-                                      .pipe(
-                                        Effect.andThen(
-                                          inspectDiscussion(cwd, inspected.number).pipe(
-                                            Effect.matchEffect({
-                                              onFailure: (error) =>
-                                                callbacks.onFailure({
-                                                  pullRequestId: pullRequest.id,
-                                                  ...generation,
-                                                  error,
-                                                }),
-                                              onSuccess: (discussion) =>
-                                                callbacks.onObservation({
-                                                  pullRequestId: pullRequest.id,
-                                                  ...generation,
-                                                  complete: true,
-                                                  discussion,
-                                                  observation: inspected.observation,
-                                                }),
-                                            }),
+                                      }
+                                      return callbacks
+                                        .onObservation({
+                                          pullRequestId: pullRequest.id,
+                                          ...generation,
+                                          complete: false,
+                                          observation: inspected.observation,
+                                        })
+                                        .pipe(
+                                          Effect.andThen(
+                                            inspectDiscussion(
+                                              cwd,
+                                              inspected.number,
+                                              reservationId,
+                                            ).pipe(
+                                              Effect.matchEffect({
+                                                onFailure: failure,
+                                                onSuccess: (discussion) =>
+                                                  callbacks.onObservation({
+                                                    pullRequestId: pullRequest.id,
+                                                    ...generation,
+                                                    complete: true,
+                                                    discussion,
+                                                    observation: inspected.observation,
+                                                  }),
+                                              }),
+                                            ),
                                           ),
-                                        ),
-                                      );
-                                  },
-                                }),
-                              );
-                            }),
+                                        );
+                                    },
+                                  }),
+                                );
+                              }),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
+                  }),
                 ),
             }),
           );

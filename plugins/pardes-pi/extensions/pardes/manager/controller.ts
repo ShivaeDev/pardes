@@ -353,8 +353,9 @@ export class ManagerController {
     options: ManagerControllerOptions = {},
   ) {
     this.worktrees = options.worktrees ?? makeManagedWorktreeService();
-    // One fresh controller owns one fixed GitHub.com credential context. Constructing
-    // another controller naturally drops this bounded hosted-metadata cache and debt ledger.
+    // One fresh controller owns one fixed GitHub.com credential context. Switching `gh`
+    // credentials in place is unsupported; reload the manager so a fresh controller naturally
+    // drops this bounded hosted-metadata cache and debt ledger.
     const githubHostedMetadata = makeGitHubHostedMetadataAdapter();
     this.github =
       options.github ?? makeGitHubPublicationService({ hostedMetadata: githubHostedMetadata });

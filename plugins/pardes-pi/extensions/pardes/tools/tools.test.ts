@@ -704,9 +704,9 @@ describe('Pardes model-visible tools', () => {
       [
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
         'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
-        'rate scope: GitHub.com credentials fixed for this controller lifetime · fresh controller resets cache',
+        'rate scope: GitHub.com credentials fixed/controller lifetime · gh credential switch unsupported · reload manager for fresh cache',
         'rate budget: graphql:100/5000 [near_exhaustion/graphql] · reset:2026-06-01T01:00:00Z',
-        'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher:deferred (near_exhaustion until 2026-06-01T01:00:00Z)',
+        'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher-last-disposition:deferred(near_exhaustion)',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
       ].join('\n'),
@@ -1172,6 +1172,7 @@ describe('Pardes model-visible tools', () => {
     ];
     const state = {
       ...base,
+      githubRateMetadataUnavailableAt: createdAt,
       inbox,
       inboxWake: { createdAt, cursor: 'event-1', pendingCount: 1, token: 'wake-fixture' },
       pullRequests: { [calm.id]: calm, [attention.id]: attention },
@@ -1194,6 +1195,9 @@ describe('Pardes model-visible tools', () => {
     );
     expect(reviews.content[0]?.text).toContain(
       'review gates: 2 open · 1 attention · 2 total (1 attention)',
+    );
+    expect(reviews.content[0]?.text).toContain(
+      'global GitHub warning [external-metadata]: rate metadata unavailable or invalid · watcher polling deferred',
     );
     expect(reviews.content[0]?.text).toContain('#42 [open]');
     expect(reviews.content[0]?.text).not.toContain('#41 [open]');
@@ -2143,6 +2147,12 @@ describe('Pardes model-visible tools', () => {
         type: 'discussion_feedback',
         workstreamId: 'ws-1',
       },
+      'event-global-metadata': {
+        createdAt,
+        id: 'event-global-metadata',
+        summary: 'GitHub.com watcher rate metadata is unavailable or invalid.',
+        type: 'github_rate_metadata_unavailable',
+      },
       'event-hostile': {
         createdAt,
         id: 'event-hostile',
@@ -2241,6 +2251,21 @@ describe('Pardes model-visible tools', () => {
     expect(metadata.details).toMatchObject({
       eventId: 'event-metadata',
       pullRequestId: 'pr-42',
+      trust: 'external_metadata',
+    });
+
+    const globalMetadata = await inboxGet.execute(
+      'call-global-metadata',
+      { eventId: 'event-global-metadata' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(globalMetadata.content[0]?.text).toContain(
+      `[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`,
+    );
+    expect(globalMetadata.details).toMatchObject({
+      eventId: 'event-global-metadata',
       trust: 'external_metadata',
     });
 

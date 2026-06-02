@@ -13,6 +13,7 @@ export {
   GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST,
   GITHUB_WATCHER_RATE_LIMIT_RESERVE,
   GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
+  type GitHubGraphQLRequestReservation,
   type GitHubHostedMetadataShape,
   type GitHubRateLimitBudget,
   type GitHubRateLimitBudgetObservation,

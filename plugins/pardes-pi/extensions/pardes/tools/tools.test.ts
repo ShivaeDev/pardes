@@ -460,6 +460,12 @@ describe('Pardes model-visible tools', () => {
 
     const status = requiredValue(tools.get('pardes_status'));
     expect(status.parameters.properties.maxRows?.maximum).toBe(CONTROL_PLANE_MAX_ROWS);
+    expect(status.parameters.properties.maxRows?.description).toContain(
+      'Maximum returned rows for views other than inbox',
+    );
+    expect(status.parameters.properties.maxRows?.description).toContain(
+      'Inbox preserves its fixed authored orientation rows and omission metadata even when they exceed this target.',
+    );
     const result = await status.execute('call-1', {}, signal, onUpdate, ctx);
     expect(result.content[0]?.text).toBe(
       [
@@ -1120,6 +1126,7 @@ describe('Pardes model-visible tools', () => {
     expect(tinyInbox.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
     expect(tinyInbox.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
     expect(tinyInbox.content[0]?.text).toContain('… +11 more inbox index rows omitted');
+    expect(tinyInbox.content[0]?.text.split('\n').length).toBeGreaterThan(1);
     expect(tinyInbox.content[0]?.text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
   });
 

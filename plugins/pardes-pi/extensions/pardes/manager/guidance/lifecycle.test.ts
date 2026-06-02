@@ -198,11 +198,12 @@ Situational reset:
 - Persisted manager state and the coordinating suffix are authoritative. Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`, before deciding what changed.
 - Keep open-review owners attached for CI or review feedback. Use \`pardes_status(view="cleanup")\` only for explicit resolved-artifact guidance.
 - Continue from current durable state; do not poll workers, repeat already-handled work, or widen detail retrieval without a concrete decision need.`,
-  reloaded: `Pardes manager plugin reloaded. The plugin version changed and retained workers disconnected from this runtime; their managed worktrees and retained conversations remain preserved. The manager conversation already retains its context.
+  reloaded: `Pardes manager plugin reloaded and rebound loaded code, which may have changed. Retained workers disconnected from this runtime while their managed worktrees and conversations remain.
 Reload continuation:
-- Inspect retained workers with \`pardes_status(view="agents", agentFilter="all")\`.
-- For each retained session that should continue, inspect \`agent_status({ agentId })\`, then reconnect it with \`agent_revive({ agentId, message })\` and a current briefing.
-- Continue from retained conversation context after the appropriate sessions are reconnected.`,
+1. Inspect \`pardes_status(view="agents", agentFilter="all")\`.
+2. For each retained session that should continue, inspect \`agent_status({ agentId })\`.
+3. Reconnect it with \`agent_revive({ agentId, message })\`.
+4. Continue.`,
   restored: `Pardes manager restored. Durable state was restored, but prior process-scoped child RPC attachment is not assumed to have survived. Reconnect and reinspect before continuing.
 Reconnect/check pass:
 - Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`; account for open review gates and warnings before taking lifecycle actions.
@@ -270,9 +271,9 @@ describe('Pardes manager lifecycle guidance', () => {
     expect(restored).toContain('Revive only detached retained conversations that should continue');
 
     expect(reloaded).toBe(expectedAuthoredGuidance.reloaded);
-    expect(reloaded).toContain('The plugin version changed');
-    expect(reloaded).toContain('retained workers disconnected from this runtime');
-    expect(reloaded).toContain('The manager conversation already retains its context');
+    expect(reloaded).toContain('reloaded and rebound loaded code, which may have changed');
+    expect(reloaded).toContain('Retained workers disconnected from this runtime');
+    expect(reloaded).not.toContain('version changed');
     expect(reloaded).toContain('pardes_status(view="agents", agentFilter="all")');
     expect(reloaded).toContain('agent_status({ agentId })');
     expect(reloaded).toContain('agent_revive({ agentId, message })');

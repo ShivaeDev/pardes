@@ -62,11 +62,12 @@ Situational reset:
 - Continue from current durable state; do not poll workers, repeat already-handled work, or widen detail retrieval without a concrete decision need.
 `.trim(),
     reloaded: `
-Pardes manager plugin reloaded. The plugin version changed and retained workers disconnected from this runtime; their managed worktrees and retained conversations remain preserved. The manager conversation already retains its context.
+Pardes manager plugin reloaded and rebound loaded code, which may have changed. Retained workers disconnected from this runtime while their managed worktrees and conversations remain.
 Reload continuation:
-- Inspect retained workers with \`pardes_status(view="agents", agentFilter="all")\`.
-- For each retained session that should continue, inspect \`agent_status({ agentId })\`, then reconnect it with \`agent_revive({ agentId, message })\` and a current briefing.
-- Continue from retained conversation context after the appropriate sessions are reconnected.
+1. Inspect \`pardes_status(view="agents", agentFilter="all")\`.
+2. For each retained session that should continue, inspect \`agent_status({ agentId })\`.
+3. Reconnect it with \`agent_revive({ agentId, message })\`.
+4. Continue.
 `.trim(),
     restored: `
 Pardes manager restored. Durable state was restored, but prior process-scoped child RPC attachment is not assumed to have survived. Reconnect and reinspect before continuing.

@@ -14,8 +14,8 @@ import {
 } from './report-artifacts.ts';
 import {
   readBoundedStateSource,
+  validateSerializedCurrentStateRead,
   validateSerializedEventWrite,
-  validateSerializedLegacyStateShrinkWrite,
   validateSerializedStateWrite,
 } from './state-limits.ts';
 
@@ -26,11 +26,6 @@ export interface StateStoreShape {
   readonly reportsPath: string;
   readonly initialize: (state: ManagerState) => Effect.Effect<void, StoreError>;
   readonly load: () => Effect.Effect<ManagerState, StoreError>;
-  /** Restore-only recovery: remove stale cursor metadata without discarding inbox prose. */
-  readonly dropStaleInboxCursorsForRestore: (options: {
-    readonly dropInboxHandoff: boolean;
-    readonly dropInboxWake: boolean;
-  }) => Effect.Effect<boolean, StoreError>;
   /** Returning the supplied state object exactly is an authoritative no-op. */
   readonly mutate: <A, E>(
     mutation: (state: ManagerState) => Effect.Effect<readonly [A, ManagerState], E>,
@@ -55,14 +50,12 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
   const ensureManagerDirectory = () => ensureDirectory('create manager directory', directory);
   const ensureReportsDirectory = () => ensureDirectReportsDirectory(directory, reportsPath);
 
-  const loadStateSourceUnlocked = Effect.fnUntraced(function* () {
+  const loadUnlocked = Effect.fnUntraced(function* () {
     const source = yield* readBoundedStateSource(statePath);
+    yield* validateSerializedCurrentStateRead(statePath, source);
     const json = yield* parseStateJson(statePath, source);
-    const state = yield* decodeState(statePath, json);
-    return { source, state };
+    return yield* decodeState(statePath, json);
   });
-
-  const loadUnlocked = () => loadStateSourceUnlocked().pipe(Effect.map(({ state }) => state));
 
   const encodeStateSource = Effect.fnUntraced(function* (state: ManagerState) {
     const encoded = yield* encodeState(statePath, state);
@@ -78,40 +71,6 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
 
   const initialize = (state: ManagerState) => semaphore.withPermit(writeUnlocked(state));
   const load = () => semaphore.withPermit(loadUnlocked());
-  const dropStaleInboxCursorsForRestore: StateStoreShape['dropStaleInboxCursorsForRestore'] = (
-    options,
-  ) =>
-    semaphore.withPermit(
-      Effect.gen(function* () {
-        const { source: previousSource, state: current } = yield* loadStateSourceUnlocked();
-        const dropInboxHandoff = options.dropInboxHandoff || options.dropInboxWake;
-        if (
-          (!options.dropInboxWake || current.inboxWake === undefined) &&
-          (!dropInboxHandoff || current.inboxHandoff === undefined)
-        )
-          return false;
-        const {
-          inboxHandoff: _inboxHandoff,
-          inboxWake: _inboxWake,
-          ...withoutInboxCursors
-        } = current;
-        const proposed: ManagerState = {
-          ...withoutInboxCursors,
-          ...(options.dropInboxWake || current.inboxWake === undefined
-            ? {}
-            : { inboxWake: current.inboxWake }),
-          ...(dropInboxHandoff || current.inboxHandoff === undefined
-            ? {}
-            : { inboxHandoff: current.inboxHandoff }),
-          revision: current.revision + 1,
-        };
-        yield* ensureManagerDirectory();
-        const nextSource = yield* encodeStateSource(proposed);
-        yield* validateSerializedLegacyStateShrinkWrite(statePath, previousSource, nextSource);
-        yield* writeJsonAtomically(statePath, nextSource, 'state');
-        return true;
-      }),
-    );
   const mutate: StateStoreShape['mutate'] = (mutation) =>
     semaphore.withPermit(
       Effect.gen(function* () {
@@ -155,7 +114,6 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
   return StateStore.of({
     appendEvent: appendEventToLog,
     directory,
-    dropStaleInboxCursorsForRestore,
     eventPath,
     initialize,
     inspectStorage,

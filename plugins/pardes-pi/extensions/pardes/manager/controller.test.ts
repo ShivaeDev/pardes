@@ -56,7 +56,7 @@ import {
   ManagerController,
 } from './controller.ts';
 import { currentVerificationAttempt, type PullRequestObservation } from './domain.ts';
-import { AgentNotFoundError } from './errors.ts';
+import { AgentNotFoundError, formatPardesError } from './errors.ts';
 import { MANAGER_INBOX_WAKE_MAX_ROWS } from './inbox.ts';
 import { ManagerInputValidationError } from './inputs.ts';
 
@@ -3297,14 +3297,13 @@ describe('manager controller', () => {
     await Effect.runPromise(restored.shutdown(fixture.ctx));
   });
 
-  test('restores an admitted oversized legacy state after shrink-only stale cursor normalization', async () => {
+  test('fails closed before lifecycle mutation when legacy state exceeds the current write cap', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
     process.env.PARDES_PI_STATE_DIR = stateRoot;
     const fixture = harness(repo);
-    const watcher = manualGithubWatcher();
-    const controller = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
+    const controller = new ManagerController(fixture.pi);
     await Effect.runPromise(controller.activate(fixture.ctx));
     const stateDir = activationStateDir(fixture.entries);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
@@ -3327,19 +3326,26 @@ describe('manager controller', () => {
       pendingCount: 1,
       token: 'wake-stale-cursor',
     };
-    writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+    const before = `${JSON.stringify(persisted, null, 2)}\n`;
+    writeFileSync(statePath, before);
     expect(readFileSync(statePath).byteLength).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
+    const restoredWatcher = manualGithubWatcher();
+    const restored = new ManagerController(fixture.pi, { githubWatcher: restoredWatcher.watcher });
 
-    const restored = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
-    await Effect.runPromise(restored.restore(fixture.ctx));
+    const failure = await Effect.runPromise(restored.restore(fixture.ctx).pipe(Effect.flip));
 
-    expect(restored.snapshot()?.inbox).toHaveLength(1);
-    expect(restored.snapshot()?.inbox[0]?.summary).toBe(summary);
-    expect(restored.snapshot()).not.toHaveProperty('inboxWake');
-    const normalized = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown>;
-    expect(normalized).not.toHaveProperty('inboxWake');
-    expect(readFileSync(statePath).byteLength).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
-    await Effect.runPromise(restored.shutdown(fixture.ctx));
+    expect(failure).toMatchObject({
+      _tag: 'StoreError',
+      operation: 'reject oversized current state: operator storage recovery required',
+      path: statePath,
+    });
+    expect(formatPardesError(failure)).toBe(
+      'StoreError: reject oversized current state: operator storage recovery required',
+    );
+    expect(restored.isActive()).toBe(false);
+    expect(restoredWatcher.starts()).toBe(0);
+    expect(readFileSync(statePath, 'utf8')).toBe(before);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).inbox[0].summary).toBe(summary);
   });
 
   test('scopes feedback-tool and next-normal-user-message handoffs to the surfaced cursor', async () => {

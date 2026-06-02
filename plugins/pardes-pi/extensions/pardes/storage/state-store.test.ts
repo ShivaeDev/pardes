@@ -30,6 +30,7 @@ import {
   STORAGE_STATE_ARTIFACT_MAX_BYTES,
   STORAGE_STATE_WRITE_MAX_BYTES,
 } from './index.ts';
+import { readBoundedStateSource } from './state-limits.ts';
 
 const temporaryDirectories: string[] = [];
 
@@ -178,7 +179,7 @@ describe('filesystem state store', () => {
     expect(existsSync(aggregateStore.statePath)).toBe(false);
   });
 
-  test('allows restore-only stale cursor cleanup to strictly shrink admitted legacy state above the current write cap', async () => {
+  test('admits a bounded oversized legacy artifact read but rejects read-mostly current state explicitly', async () => {
     const directory = await temporaryDirectory();
     const store = await Effect.runPromise(makeFileSystemStateStore(directory));
     await Effect.runPromise(store.initialize(initialState()));
@@ -189,53 +190,58 @@ describe('filesystem state store', () => {
       summary,
       type: 'legacy_attention',
     };
+    const legacy = { ...initialState(), inbox: [event] };
+    const before = `${JSON.stringify(legacy, null, 2)}\n`;
+    await writeFile(store.statePath, before, 'utf8');
+    expect(Buffer.byteLength(before)).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
+    expect(Buffer.byteLength(before)).toBeLessThan(STORAGE_STATE_ARTIFACT_MAX_BYTES);
+
+    expect(await Effect.runPromise(readBoundedStateSource(store.statePath))).toBe(before);
+    expect(await Effect.runPromise(store.load().pipe(Effect.flip))).toMatchObject({
+      _tag: 'StoreError',
+      operation: 'reject oversized current state: operator storage recovery required',
+      path: store.statePath,
+    });
+    expect(await readFile(store.statePath, 'utf8')).toBe(before);
+  });
+
+  test('cleans stale cursors through ordinary safe mutation below the current-state cap without prose loss', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    const summary = `legacy cursor prose ${'x'.repeat(5_000)} tail`;
+    const event: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-stale-cursor',
+      summary,
+      type: 'legacy_attention',
+    };
     const inboxWake = {
       createdAt: event.createdAt,
       cursor: 'event-stale-cursor',
       pendingCount: 1,
       token: 'wake-stale-cursor',
     };
-    const legacy = { ...initialState(), inbox: [event], inboxWake };
-    await writeFile(store.statePath, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8');
-    const before = await readFile(store.statePath, 'utf8');
-    expect(Buffer.byteLength(before)).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
-    expect(Buffer.byteLength(before)).toBeLessThan(STORAGE_STATE_ARTIFACT_MAX_BYTES);
-    expect(await Effect.runPromise(store.load())).toEqual(legacy);
+    const inboxHandoff = { cursor: inboxWake.cursor, surfacedAt: event.createdAt };
+    await Effect.runPromise(
+      store.initialize({ ...initialState(), inbox: [event], inboxHandoff, inboxWake }),
+    );
 
-    expect(
-      await Effect.runPromise(
-        store
-          .mutate((current) => {
-            const { inboxWake: _inboxWake, ...withoutWake } = current;
-            return Effect.succeed([undefined, withoutWake] as const);
-          })
-          .pipe(Effect.flip),
-      ),
-    ).toMatchObject({ _tag: 'StoreError', operation: 'validate serialized state size' });
-    expect(
-      await Effect.runPromise(
-        store.dropStaleInboxCursorsForRestore({
-          dropInboxHandoff: false,
-          dropInboxWake: true,
-        }),
-      ),
-    ).toBe(true);
+    await Effect.runPromise(
+      store.mutate((current) => {
+        const {
+          inboxHandoff: _inboxHandoff,
+          inboxWake: _inboxWake,
+          ...withoutInboxCursors
+        } = current;
+        return Effect.succeed([undefined, withoutInboxCursors] as const);
+      }),
+    );
 
-    const after = await readFile(store.statePath, 'utf8');
-    expect(Buffer.byteLength(after)).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
-    expect(Buffer.byteLength(after)).toBeLessThan(Buffer.byteLength(before));
     const restored = await Effect.runPromise(store.load());
     expect(restored.inbox).toEqual([event]);
+    expect(restored.inbox[0]?.summary).toBe(summary);
     expect(restored).not.toHaveProperty('inboxWake');
-    expect(restored.revision).toBe(1);
-    expect(
-      await Effect.runPromise(
-        store.dropStaleInboxCursorsForRestore({
-          dropInboxHandoff: false,
-          dropInboxWake: true,
-        }),
-      ),
-    ).toBe(false);
+    expect(restored).not.toHaveProperty('inboxHandoff');
   });
 
   test('refuses an oversized restored state artifact before reading its contents', async () => {

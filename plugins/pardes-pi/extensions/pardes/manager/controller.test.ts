@@ -34,6 +34,7 @@ import {
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
+import { makeFileSystemStateStore } from '../storage/index.ts';
 import { requiredValue } from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
@@ -6200,8 +6201,13 @@ describe('manager controller', () => {
 
     await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
     const rateRevision = controller.snapshot()?.revision;
+    const durableStore = await Effect.runPromise(makeFileSystemStateStore(stateDir));
+    const durableRateState = await Effect.runPromise(durableStore.load());
     await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
+    const repeatedDurableRateState = await Effect.runPromise(durableStore.load());
     expect(controller.snapshot()?.revision).toBe(rateRevision);
+    expect(repeatedDurableRateState.revision).toBe(durableRateState.revision);
+    expect(repeatedDurableRateState).toEqual(durableRateState);
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
       kind: 'rate_limit_likely',
       summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',

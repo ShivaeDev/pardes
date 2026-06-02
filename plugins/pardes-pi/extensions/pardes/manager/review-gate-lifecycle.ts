@@ -853,6 +853,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       timestamp,
       pullRequestEventAssociation(known),
     );
+    // This handler already owns the coordinator permit. Avoid entering the
+    // filesystem store at all while the equivalent canonical warning is pending;
+    // retain the in-mutation check below for defense against stale namespace state.
+    if (hasPendingWatcherFailureAttention(namespace.state.inbox, attention)) return;
     const outcome = yield* namespace.store.mutate<WatcherFailurePersistence, never>((state) => {
       const pullRequest = state.pullRequests[event.pullRequestId];
       if (

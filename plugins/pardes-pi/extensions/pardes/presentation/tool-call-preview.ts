@@ -21,6 +21,7 @@ const RESET_FOREGROUND = '\u001b[39m';
 // Preserve line feeds for verbose rendering while removing terminal-active content.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Terminal rendering intentionally strips control ranges.
 const TERMINAL_CONTROL_CHARACTERS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
+const BIDI_CONTROL_CHARACTERS = /\p{Bidi_Control}/gu;
 
 type PreviewMode = 'value' | 'length' | 'redacted';
 
@@ -56,11 +57,18 @@ function truncatePreview(text: string, maxChars: number): string {
   return characters.length <= maxChars ? text : `${characters.slice(0, maxChars - 1).join('')}…`;
 }
 
+function escapedUnicodeCharacter(character: string): string {
+  return `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`;
+}
+
+function escapeBidiControls(text: string): string {
+  return text.replace(BIDI_CONTROL_CHARACTERS, escapedUnicodeCharacter);
+}
+
 function escapedString(value: string): string {
   const escaped = JSON.stringify(truncatePreview(value, PARDES_TOOL_CALL_VALUE_MAX_CHARS));
-  return escaped.replace(
-    /[\u007f-\u009f\u2028\u2029]/g,
-    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  return escapeBidiControls(
+    escaped.replace(/[\u007f-\u009f\u2028\u2029]/g, escapedUnicodeCharacter),
   );
 }
 
@@ -94,9 +102,11 @@ function resultText(result: AgentToolResult<unknown>): string {
 }
 
 function sanitizedResultText(result: AgentToolResult<unknown>): string {
-  return stripVTControlCharacters(resultText(result))
-    .replace(/\r\n?/g, '\n')
-    .replace(TERMINAL_CONTROL_CHARACTERS, ' ');
+  return escapeBidiControls(
+    stripVTControlCharacters(resultText(result))
+      .replace(/\r\n?/g, '\n')
+      .replace(TERMINAL_CONTROL_CHARACTERS, ' '),
+  );
 }
 
 function compactResultSummary(result: AgentToolResult<unknown>): string {

@@ -256,10 +256,18 @@ describe('verifier child profile', () => {
 describe('worker child reporting tool rendering', () => {
   test('uses bounded self-shell call and result renderers with length-only previews', () => {
     const { worktree } = createFixture();
-    const previousRoot = process.env.PARDES_WORKTREE_ROOT;
-    const previousStateDir = process.env.PARDES_PI_STATE_DIR;
+    const previous = {
+      baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+      profile: process.env.PARDES_AGENT_PROFILE,
+      reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
+      root: process.env.PARDES_WORKTREE_ROOT,
+      stateDir: process.env.PARDES_PI_STATE_DIR,
+    };
     process.env.PARDES_WORKTREE_ROOT = worktree;
     process.env.PARDES_PI_STATE_DIR = join(worktree, 'pardes-state');
+    process.env.PARDES_AGENT_PROFILE = 'worker';
+    delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+    delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
     try {
       const tools: ToolDefinition[] = [];
       pardesWorker({
@@ -335,10 +343,16 @@ describe('worker child reporting tool rendering', () => {
         ['result', 'first line', 'second line'],
       );
     } finally {
-      if (previousRoot === undefined) delete process.env.PARDES_WORKTREE_ROOT;
-      else process.env.PARDES_WORKTREE_ROOT = previousRoot;
-      if (previousStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
-      else process.env.PARDES_PI_STATE_DIR = previousStateDir;
+      if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
+      else process.env.PARDES_WORKTREE_ROOT = previous.root;
+      if (previous.stateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+      else process.env.PARDES_PI_STATE_DIR = previous.stateDir;
+      if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
+      else process.env.PARDES_AGENT_PROFILE = previous.profile;
+      if (previous.baseline === undefined) delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+      else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
+      if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+      else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
     }
   });
 });

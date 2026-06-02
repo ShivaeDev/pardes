@@ -7,7 +7,7 @@ import type {
   Theme,
   ToolRenderResultOptions,
 } from '@earendil-works/pi-coding-agent';
-import { type Component, truncateToWidth } from '@earendil-works/pi-tui';
+import { type Component, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
 
 const CHILD_TOOL_CALL_PREVIEW_MAX_CHARS = 180;
 const CHILD_TOOL_CALL_VALUE_MAX_CHARS = 48;
@@ -160,6 +160,16 @@ function styledCall(theme: Theme, toolName: string, preview: string): string {
   return `${rowPalette.call(theme.bold(toolName))}${rowPalette.parameter(preview.slice(toolName.length))}`;
 }
 
+function boundedToolLine(line: string, width: number): string {
+  const ellipsis = `${DEEP_SEA_BACKGROUND}${rowPalette.muted('…')}`;
+  return `${DEEP_SEA_BACKGROUND}${truncateToWidth(line, width, ellipsis, true)}${RESET_BACKGROUND}`;
+}
+
+function truncateToolSegment(text: string, width: number): string {
+  const ellipsis = `${DEEP_SEA_BACKGROUND}${rowPalette.muted('…')}`;
+  return `${truncateToWidth(text, width, ellipsis)}${DEEP_SEA_BACKGROUND}`;
+}
+
 class ChildToolText implements Component {
   constructor(private readonly lines: ReadonlyArray<string>) {}
 
@@ -168,11 +178,46 @@ class ChildToolText implements Component {
   render(width: number): string[] {
     const renderWidth = Math.max(0, Math.floor(width));
     if (renderWidth === 0 || this.lines.length === 0) return [];
-    const ellipsis = `${DEEP_SEA_BACKGROUND}${rowPalette.muted('…')}`;
-    return this.lines.map(
-      (line) =>
-        `${DEEP_SEA_BACKGROUND}${truncateToWidth(line, renderWidth, ellipsis, true)}${RESET_BACKGROUND}`,
-    );
+    return this.lines.map((line) => boundedToolLine(line, renderWidth));
+  }
+}
+
+/** Independently bound settled call and result segments so one dense row keeps result orientation. */
+class ChildCompactToolText implements Component {
+  constructor(
+    private readonly call: string,
+    private readonly result: string,
+  ) {}
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const renderWidth = Math.max(0, Math.floor(width));
+    if (renderWidth === 0) return [];
+    const separator = rowPalette.muted(' → ');
+    const separatorWidth = visibleWidth(separator);
+    if (renderWidth <= separatorWidth)
+      return [boundedToolLine(`${this.call}${separator}${this.result}`, renderWidth)];
+
+    const availableWidth = renderWidth - separatorWidth;
+    let callWidth = Math.floor(availableWidth / 2);
+    let resultWidth = availableWidth - callWidth;
+    const callVisibleWidth = visibleWidth(this.call);
+    const resultVisibleWidth = visibleWidth(this.result);
+    if (callVisibleWidth < callWidth) {
+      resultWidth += callWidth - callVisibleWidth;
+      callWidth = callVisibleWidth;
+    }
+    if (resultVisibleWidth < resultWidth) {
+      callWidth += resultWidth - resultVisibleWidth;
+      resultWidth = resultVisibleWidth;
+    }
+    return [
+      boundedToolLine(
+        `${truncateToolSegment(this.call, callWidth)}${separator}${truncateToolSegment(this.result, resultWidth)}`,
+        renderWidth,
+      ),
+    ];
   }
 }
 
@@ -202,7 +247,7 @@ export function renderChildToolResult(
   const isError = context.isError || /^error\b/i.test(summary);
   const resultStyle = isError ? rowPalette.error : rowPalette.result;
   if (!verboseResultsEnabled() && !options.expanded) {
-    return new ChildToolText([`${call}${rowPalette.muted(' → ')}${resultStyle(summary)}`]);
+    return new ChildCompactToolText(call, resultStyle(summary));
   }
   return new ChildToolText([
     call,

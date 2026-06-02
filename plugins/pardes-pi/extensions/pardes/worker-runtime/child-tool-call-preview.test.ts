@@ -56,4 +56,33 @@ describe('child Pardes terminal rendering', () => {
     expect(visibleWidth(renderedResult)).toBeLessThanOrEqual(240);
     expect(result.content[0].text).toBe(source);
   });
+
+  test('reserves narrow settled compact space for a long report call error suffix', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pardes-child-renderer-'));
+    temporaryDirectories.push(root);
+    process.env.PARDES_PI_STATE_DIR = root;
+    const width = 76;
+    const line = requiredValue(
+      renderChildToolResult(
+        theme,
+        'report_to_manager',
+        [
+          { name: 'status', value: 'blocked' },
+          { mode: 'length', name: 'summary', value: 'summary'.repeat(100) },
+          { mode: 'length', name: 'details', value: 'details'.repeat(1_000) },
+        ],
+        {
+          content: [{ text: 'Error: owning manager report delivery failed', type: 'text' }],
+          details: undefined,
+        },
+        { expanded: false, isPartial: false },
+        { isError: false },
+      ).render(width)[0],
+    );
+    const visible = stripVTControlCharacters(line);
+
+    expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    expect(visible).toContain('report_to_manager(');
+    expect(visible).toContain(' → Error: owning manager');
+  });
 });

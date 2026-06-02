@@ -419,6 +419,7 @@ export function makeGitHubWatcherService(
     number: number,
     graphqlReservationId: string,
     route: GitHubRepositoryIdentity,
+    watcherRestReservationId: string,
   ) {
     yield* hostedMetadata.launchGraphQLRequest(graphqlReservationId);
     const discussionResponse = yield* github.run(cwd, [
@@ -443,8 +444,9 @@ export function makeGitHubWatcherService(
       discussionResponse.stdout,
       graphqlReservationId,
     );
-    const inlineResponse = yield* hostedMetadata.accountOpaqueRequest(
+    const inlineResponse = yield* hostedMetadata.accountReservedOpaqueRequest(
       'rest',
+      watcherRestReservationId,
       github.run(cwd, [
         'api',
         `repos/${route.owner}/${route.repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
@@ -560,10 +562,13 @@ export function makeGitHubWatcherService(
                                   if (
                                     reservation.status === 'deferred' ||
                                     reservation.graphqlReservationId === undefined ||
-                                    reservation.watcherCliReservationId === undefined
+                                    reservation.watcherCliReservationId === undefined ||
+                                    reservation.watcherRestReservationId === undefined
                                   )
                                     return Effect.void;
                                   const reservationId = reservation.graphqlReservationId;
+                                  const watcherRestReservationId =
+                                    reservation.watcherRestReservationId;
                                   return inspect(
                                     cwd,
                                     pullRequest,
@@ -606,6 +611,7 @@ export function makeGitHubWatcherService(
                                                 inspected.number,
                                                 reservationId,
                                                 route,
+                                                watcherRestReservationId,
                                               ).pipe(
                                                 Effect.matchEffect({
                                                   onFailure: failure,
@@ -632,6 +638,7 @@ export function makeGitHubWatcherService(
                                       [
                                         reservation.graphqlReservationId,
                                         reservation.watcherCliReservationId,
+                                        reservation.watcherRestReservationId,
                                       ].flatMap((reservationId) =>
                                         reservationId === undefined
                                           ? []

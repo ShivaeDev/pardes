@@ -65,6 +65,7 @@ export type GitHubWatcherRateLimitStatus =
       readonly effectiveRemaining: number;
       readonly graphqlReservationId?: string;
       readonly watcherCliReservationId?: string;
+      readonly watcherRestReservationId?: string;
     }
   | {
       readonly status: 'deferred';
@@ -199,6 +200,7 @@ function projectWatcherPolling(
   const {
     graphqlReservationId: _graphqlReservationId,
     watcherCliReservationId: _watcherCliReservationId,
+    watcherRestReservationId: _watcherRestReservationId,
     ...projected
   } = watcherPolling;
   return projected;
@@ -1071,9 +1073,9 @@ export function makeGitHubHostedMetadataAdapter(
               { ...pruned, nextWatcherAdmissionAtMillis: untilMillis, watcherPolling },
             ] as const;
           }
-          // A ready watcher cycle immediately needs both its discussion identity and the
-          // pre-discussion CLI inspection identity. Preserve capacity for that mandatory pair.
-          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 1) {
+          // A ready watcher cycle needs discussion, pre-discussion CLI, and inline REST identities.
+          // Lease capacity for the mandatory trio before any watched request can launch.
+          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2) {
             const watcherPolling = proactiveWatcherThrottle(
               'paused',
               remaining,
@@ -1090,12 +1092,14 @@ export function makeGitHubHostedMetadataAdapter(
           }
           const graphqlReservationId = `request-${pruned.nextReservation}`;
           const watcherCliReservationId = `request-${pruned.nextReservation + 1}`;
+          const watcherRestReservationId = `request-${pruned.nextReservation + 2}`;
           const watcherPolling = {
             effectiveRemaining: remaining,
             graphqlReservationId,
             status: 'ready',
             tier,
             watcherCliReservationId,
+            watcherRestReservationId,
           } as const;
           const { nextWatcherAdmissionAtMillis: _nextWatcherAdmissionAtMillis, ...withoutNext } =
             pruned;
@@ -1104,7 +1108,6 @@ export function makeGitHubHostedMetadataAdapter(
             {
               ...withoutNext,
               debt: {
-                ...debt,
                 graphql: addDebt(
                   addDebt(debt.graphql, graphqlCost, debtResetAt(pruned.graphql, now), {
                     id: graphqlReservationId,
@@ -1114,8 +1117,12 @@ export function makeGitHubHostedMetadataAdapter(
                   debtResetAt(pruned.graphql, now),
                   { id: watcherCliReservationId, phase: 'reserved' },
                 ),
+                rest: addDebt(debt.rest, restCost, debtResetAt(pruned.rest, now), {
+                  id: watcherRestReservationId,
+                  phase: 'reserved',
+                }),
               },
-              nextReservation: pruned.nextReservation + 2,
+              nextReservation: pruned.nextReservation + 3,
               ...(interval === 0 ? {} : { nextWatcherAdmissionAtMillis: now + interval }),
               watcherPolling,
             },

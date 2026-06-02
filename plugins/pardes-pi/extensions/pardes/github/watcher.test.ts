@@ -5,6 +5,7 @@ import {
   DEFAULT_GITHUB_WATCHER_CADENCE,
   derivePullRequestTransitions,
   GitHubCommandError,
+  type GitHubHostedMetadataShape,
   GitHubWatcher,
   type GitHubWatcherCallbacks,
   type GitHubWatcherThrottleDiagnostic,
@@ -714,10 +715,10 @@ describe('GitHub watcher service', () => {
     }
   });
 
-  test('defers before ready when 63 identities leave no slot for the mandatory CLI inspection', async () => {
+  test('defers before ready when 62 identities leave no capacity for the mandatory trio', async () => {
     const fixture = scriptedRunner([rateLimitFallbackResult()]);
     const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
-    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 1; index += 1) {
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2; index += 1) {
       const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
       await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
     }
@@ -746,7 +747,7 @@ describe('GitHub watcher service', () => {
     });
   });
 
-  test('atomically leases both watcher identities so a foreground overlap cannot steal the CLI slot', async () => {
+  test('atomically leases every watcher identity so a foreground overlap cannot steal a mandatory slot', async () => {
     const fixture = scriptedRunner([
       rateLimitFallbackResult(),
       result(
@@ -763,7 +764,7 @@ describe('GitHub watcher service', () => {
       inlineCommentsResult(),
     ]);
     const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
-    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2; index += 1) {
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 3; index += 1) {
       const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
       await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
     }
@@ -803,6 +804,71 @@ describe('GitHub watcher service', () => {
     expect(received.failures).toEqual([]);
     expect(received.observations).toHaveLength(2);
     expect(fixture.invocations).toHaveLength(4);
+  });
+
+  test('consumes the pre-leased inline REST placeholder after discussion decode despite concurrent fill', async () => {
+    const fixture = scriptedRunner([
+      rateLimitFallbackResult(),
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 42,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult(),
+      inlineCommentsResult(),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+    const concurrentReservations: string[] = [];
+    const watcherMetadata: GitHubHostedMetadataShape = {
+      ...hostedMetadata,
+      accountReservedOpaqueRequest: (resource, reservationId, request) =>
+        resource !== 'rest'
+          ? hostedMetadata.accountReservedOpaqueRequest(resource, reservationId, request)
+          : Effect.gen(function* () {
+              for (let index = 0; index < 3; index += 1) {
+                const reservation = yield* hostedMetadata
+                  .reserveGraphQLRequest()
+                  .pipe(Effect.orDie);
+                yield* hostedMetadata.launchGraphQLRequest(reservation.id);
+                concurrentReservations.push(reservation.id);
+              }
+              return yield* hostedMetadata.accountReservedOpaqueRequest(
+                resource,
+                reservationId,
+                request,
+              );
+            }),
+    };
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 4; index += 1) {
+      const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
+      await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
+    }
+    const service = makeGitHubWatcherServiceProduction({
+      hostedMetadata: watcherMetadata,
+      runner: fixture.runner,
+    });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.failures).toEqual([]);
+    expect(received.observations).toHaveLength(2);
+    expect(fixture.invocations).toHaveLength(4);
+    expect(concurrentReservations).toHaveLength(3);
+    const finalCapacity = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
+    expect(finalCapacity.id).toBe('request-67');
+    expect(
+      await Effect.runPromise(hostedMetadata.reserveGraphQLRequest().pipe(Effect.flip)),
+    ).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'reserve hosted GitHub request',
+    });
+    await Effect.runPromise(hostedMetadata.cancelUnlaunchedGraphQLReservation(finalCapacity.id));
   });
 
   test('rechecks the bounded budget between review gates and defers later gates after a low GraphQL observation', async () => {
@@ -1037,7 +1103,7 @@ describe('GitHub watcher service', () => {
     expect(fixture.invocations).toHaveLength(1 + 2 * 12 * 3);
   });
 
-  test('cancels an unlaunched watcher GraphQL reservation when an observation callback fails', async () => {
+  test('cancels unlaunched watcher placeholders when an observation callback fails', async () => {
     const fixture = scriptedRunner([
       rateLimitFallbackResult(),
       result(
@@ -1065,11 +1131,12 @@ describe('GitHub watcher service', () => {
     expect(failure).toBe(callbackFailure);
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
       graphql: { remaining: 4_995, source: 'local_estimate' },
+      rest: { remaining: 5_000, source: 'rest_fallback' },
     });
     expect(fixture.invocations).toHaveLength(2);
   });
 
-  test('cancels an unlaunched watcher GraphQL reservation when a fiber interrupts during callback handoff', async () => {
+  test('cancels unlaunched watcher placeholders when a fiber interrupts during callback handoff', async () => {
     const entered = await Effect.runPromise(Deferred.make<void>());
     const fixture = scriptedRunner([
       rateLimitFallbackResult(),
@@ -1100,6 +1167,7 @@ describe('GitHub watcher service', () => {
 
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
       graphql: { remaining: 4_995, source: 'local_estimate' },
+      rest: { remaining: 5_000, source: 'rest_fallback' },
     });
     expect(fixture.invocations).toHaveLength(2);
   });

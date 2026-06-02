@@ -8,6 +8,8 @@ import {
   PULL_REQUEST_BODY_MAX_LENGTH,
   PULL_REQUEST_BRANCH_PATTERN,
   PULL_REQUEST_TITLE_MAX_LENGTH,
+  PullRequestBrowserModeSchema,
+  pullRequestBrowserOptionsAreCompatible,
   PullRequestBodySchema as SharedPullRequestBodySchema,
   PullRequestBranchSchema as SharedPullRequestBranchSchema,
   PullRequestTitleSchema as SharedPullRequestTitleSchema,
@@ -23,6 +25,10 @@ export const MANAGER_INPUT_ID_PATTERN = '^[a-zA-Z0-9._-]+$';
 export const MANAGER_INPUT_BASELINE_BRANCH_MAX_LENGTH = REMOTE_BASELINE_BRANCH_MAX_LENGTH;
 export const MANAGER_INPUT_BASELINE_BRANCH_PATTERN = REMOTE_BASELINE_BRANCH_PATTERN;
 export const MANAGER_INPUT_PULL_REQUEST_BRANCH_PATTERN = PULL_REQUEST_BRANCH_PATTERN;
+export const INBOX_EVENT_EXCERPT_DEFAULT_MAX_CHARS = 4_000;
+export const INBOX_EVENT_EXCERPT_MAX_CHARS = 12_000;
+/** Calibrated to the wider restored-state allocation breaker for legacy summary-only rows. */
+export const INBOX_EVENT_EXCERPT_MAX_OFFSET = 64 * 1_024 * 1_024;
 
 const NonEmptyStringSchema = Schema.String.check(Schema.isMinLength(1));
 const ShortTextSchema = NonEmptyStringSchema.check(
@@ -62,6 +68,20 @@ export type WorkstreamIdInput = typeof WorkstreamIdInputSchema.Type;
 
 export const InboxGetInputSchema = Schema.Struct({
   eventId: ManagerInputIdSchema,
+  maxChars: Schema.optionalKey(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThan(0),
+      Schema.isLessThanOrEqualTo(INBOX_EVENT_EXCERPT_MAX_CHARS),
+    ),
+  ),
+  offset: Schema.optionalKey(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(INBOX_EVENT_EXCERPT_MAX_OFFSET),
+    ),
+  ),
 });
 export type InboxGetInput = typeof InboxGetInputSchema.Type;
 
@@ -90,10 +110,15 @@ export const PullRequestCreateInputSchema = Schema.Struct({
   agentId: ManagerInputIdSchema,
   baseBranch: PullRequestBranchSchema,
   body: PullRequestBodySchema,
+  browserMode: Schema.optionalKey(PullRequestBrowserModeSchema),
   openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
   workstreamId: ManagerInputIdSchema,
-});
+}).check(
+  Schema.makeFilter(pullRequestBrowserOptionsAreCompatible, {
+    description: 'browserMode agrees with the compatibility openInBrowser alias when both are set',
+  }),
+);
 export type PullRequestCreateInput = typeof PullRequestCreateInputSchema.Type;
 
 export const AgentSpawnInputSchema = Schema.Struct({

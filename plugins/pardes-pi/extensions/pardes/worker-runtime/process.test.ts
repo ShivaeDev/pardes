@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Cause, Effect, Exit, Scope } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
-import { requiredValue } from '../test-support.ts';
+import { requiredValue, runGitFixture } from '../test-support.ts';
 import { childProfileEnvironment, verifierChildProfile } from './child-profile.ts';
 import {
   DEFAULT_WORKER_EXTENSION,
@@ -236,6 +236,44 @@ setInterval(() => {}, 1000);
         inheritedPath: process.env.PATH,
         worktreeRoot: root,
       });
+    } finally {
+      await closeScope(scope);
+    }
+  });
+
+  test('keeps child Bash Git rooted in its managed cwd despite inherited repository redirection', async () => {
+    const root = temporaryDirectory();
+    const worktree = join(root, 'worktree');
+    const redirected = join(root, 'redirected');
+    runGitFixture(root, 'init', '-b', 'main', worktree);
+    runGitFixture(root, 'init', '-b', 'main', redirected);
+    const scope = await Effect.runPromise(Scope.make());
+    const child = await Effect.runPromise(
+      spawnWorkerProcess(workerInput(worktree), {
+        args: () => [
+          '-c',
+          'printf "%s\\n" "$GIT_DIR" "$GIT_ALLOW_PROTOCOL" "$GIT_DEFAULT_HASH"; git rev-parse --git-dir; sleep 10',
+        ],
+        command: '/bin/bash',
+        env: {
+          GIT_ALLOW_PROTOCOL: 'https',
+          GIT_DEFAULT_HASH: 'sha256',
+          GIT_DIR: join(redirected, '.git'),
+        },
+      }).pipe(Scope.provide(scope)),
+    );
+    try {
+      const output = await new Promise<string>((resolve) => {
+        let accumulated = '';
+        const onData = (chunk: Buffer) => {
+          accumulated += String(chunk);
+          if (accumulated.split('\n').length < 5) return;
+          child.stdout.off('data', onData);
+          resolve(accumulated);
+        };
+        child.stdout.on('data', onData);
+      });
+      expect(output.split('\n').slice(0, 4)).toEqual(['', 'https', 'sha256', '.git']);
     } finally {
       await closeScope(scope);
     }

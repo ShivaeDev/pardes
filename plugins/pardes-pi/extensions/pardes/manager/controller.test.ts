@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -15,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Deferred, Effect, Fiber } from 'effect';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
@@ -23,6 +22,7 @@ import {
   type WorktreeLease,
 } from '../git/index.ts';
 import {
+  type BrowserHandoffShape,
   GitHubCommandError,
   type GitHubPublicationShape,
   type GitHubWatcherCallbacks,
@@ -30,6 +30,7 @@ import {
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   makeGitHubPublicationService,
+  makeGitHubWatcherService,
   type PublishedPullRequest,
   type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
@@ -38,8 +39,13 @@ import {
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
-import { makeFileSystemStateStore } from '../storage/index.ts';
-import { requiredValue } from '../test-support.ts';
+import { makeFileSystemStateStore, STORAGE_STATE_WRITE_MAX_BYTES } from '../storage/index.ts';
+import {
+  copyOriginGitRepositoryFixture,
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  requiredValue,
+  runGitFixture,
+} from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
@@ -53,15 +59,37 @@ import {
   type InboxHandoffStart,
   MANAGER_COMPACTION_SAFETY_EXPIRY_MS,
   type ManagerCompactionSafetyScheduler,
-  ManagerController,
+  type ManagerControllerOptions,
+  ManagerController as ProductionManagerController,
 } from './controller.ts';
 import { currentVerificationAttempt, type PullRequestObservation } from './domain.ts';
-import { AgentNotFoundError } from './errors.ts';
+import { AgentNotFoundError, formatPardesError } from './errors.ts';
 import { MANAGER_INBOX_WAKE_MAX_ROWS } from './inbox.ts';
 import { ManagerInputValidationError } from './inputs.ts';
 
 const temporaryDirectories: string[] = [];
 const originalStateDir = process.env.PARDES_PI_STATE_DIR;
+const githubWatcherFixtures: GitHubWatcherShape[] = [];
+let restoreGitProtocolEnvironment: (() => void) | undefined;
+
+beforeEach(() => {
+  // Controller fixtures intentionally use copied local file origins through production Git transport.
+  restoreGitProtocolEnvironment = normalizeControlledLocalRemoteProtocolEnvironment();
+});
+
+class ManagerController extends ProductionManagerController {
+  constructor(pi: ExtensionAPI, options: ManagerControllerOptions = {}) {
+    const githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
+    githubWatcherFixtures.push(githubWatcher);
+    super(pi, { ...options, githubWatcher });
+  }
+}
+
+async function stopGithubWatcherFixtures(): Promise<void> {
+  for (const watcher of githubWatcherFixtures.splice(0).reverse())
+    await Effect.runPromise(watcher.stop());
+}
+
 type MutableWorktreeLease = { -readonly [Key in keyof WorktreeLease]: WorktreeLease[Key] };
 type MutablePersistedAgentPaths = {
   worktree: MutableWorktreeLease;
@@ -69,15 +97,21 @@ type MutablePersistedAgentPaths = {
   sessionFile: string;
 };
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0))
-    rmSync(directory, { force: true, recursive: true });
-  if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
-  else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+afterEach(async () => {
+  try {
+    await stopGithubWatcherFixtures();
+    for (const directory of temporaryDirectories.splice(0))
+      rmSync(directory, { force: true, recursive: true });
+    if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+    else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+  } finally {
+    restoreGitProtocolEnvironment?.();
+    restoreGitProtocolEnvironment = undefined;
+  }
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 function fixturePluginSource(): string {
@@ -100,19 +134,8 @@ function fixturePluginSource(): string {
 }
 
 function fixtureRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-manager-'));
+  const { repo, root } = copyOriginGitRepositoryFixture('pardes-manager-');
   temporaryDirectories.push(root);
-  const origin = join(root, 'origin.git');
-  const repo = join(root, 'project');
-  execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-  execFileSync('git', ['init', '-b', 'main', repo]);
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
-  writeFileSync(join(repo, 'README.md'), 'fixture\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'fixture');
-  git(repo, 'remote', 'add', 'origin', origin);
-  git(repo, 'push', '-u', 'origin', 'main');
   return repo;
 }
 
@@ -400,7 +423,7 @@ function failingWorkers(onSpawn?: (input: WorkerSpawnInput) => void) {
   return { makeWorkers };
 }
 
-function manualGithubWatcher() {
+function manualGithubWatcher(onReconcile?: () => void) {
   let callbacks: GitHubWatcherCallbacks | undefined;
   let starts = 0;
   let stops = 0;
@@ -410,6 +433,7 @@ function manualGithubWatcher() {
     reconcile: () =>
       Effect.sync(() => {
         reconciliations += 1;
+        onReconcile?.();
       }),
     start: (nextCallbacks) =>
       Effect.sync(() => {
@@ -531,6 +555,20 @@ function manualGithubWatcher() {
   };
 }
 
+function recordingBrowserHandoff() {
+  const requests: Array<{ readonly requestedMode: string; readonly url: string }> = [];
+  const browserHandoff: BrowserHandoffShape = {
+    handoff: (url, requestedMode) =>
+      Effect.sync(() => {
+        requests.push({ requestedMode, url });
+        return requestedMode === 'none'
+          ? ({ requestedMode, status: 'not_requested' } as const)
+          : ({ openedMode: requestedMode, requestedMode, status: 'opened' } as const);
+      }),
+  };
+  return { browserHandoff, requests };
+}
+
 function observedPullRequest(
   overrides: Partial<PullRequestObservation> = {},
 ): PullRequestObservation {
@@ -574,7 +612,6 @@ function stubGithub(
           draft: true,
           headBranch: input.headBranch,
           number,
-          openedInBrowser: input.openInBrowser === true,
           status: 'open' as const,
           title: input.title,
           url: `https://github.test/acme/project/pull/${number}`,
@@ -936,6 +973,7 @@ describe('manager controller', () => {
     const restored = new ManagerController(fixture.pi);
     await Effect.runPromise(restored.restore(fixture.ctx));
     expect(restored.snapshot()?.workstreams[created.id]).toEqual(created);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
 
     await Effect.runPromise(controller.deactivate(fixture.ctx));
     expect(controller.isActive()).toBe(false);
@@ -2952,7 +2990,7 @@ describe('manager controller', () => {
     expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
       'agent_report_completed: [child summary]',
     );
-    expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
+    expect(JSON.stringify(fixture.messages[0]?.message)).not.toContain(
       'Fast fixture completed before spawn returned.',
     );
   });
@@ -3112,7 +3150,7 @@ describe('manager controller', () => {
       staleCursor: false,
     });
     expect(controller.snapshot()?.inbox).toHaveLength(1);
-    expect(controller.snapshot()?.inbox[0]?.summary).toContain(
+    expect(controller.snapshot()?.inbox[0]?.details).toContain(
       'existing cursor still cover this later attention',
     );
     expect(fixture.messages).toHaveLength(1);
@@ -3295,6 +3333,57 @@ describe('manager controller', () => {
       managerEvents(stateDir).filter(({ type }) => type === 'inbox_cursor_acknowledged'),
     ).toHaveLength(2);
     await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('fails closed before lifecycle mutation when legacy state exceeds the current write cap', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const controller = new ManagerController(fixture.pi);
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const stateDir = activationStateDir(fixture.entries);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+
+    const statePath = join(stateDir, 'state.json');
+    const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      inbox: Array<Record<string, unknown>>;
+      inboxWake?: unknown;
+    };
+    const summary = `legacy oversized projection ${'x'.repeat(STORAGE_STATE_WRITE_MAX_BYTES + 1_024)} tail`;
+    persisted.inbox.push({
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-oversized-state',
+      summary,
+      type: 'legacy_attention',
+    });
+    persisted.inboxWake = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      cursor: 'event-stale-cursor',
+      pendingCount: 1,
+      token: 'wake-stale-cursor',
+    };
+    const before = `${JSON.stringify(persisted, null, 2)}\n`;
+    writeFileSync(statePath, before);
+    expect(readFileSync(statePath).byteLength).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
+    const restoredWatcher = manualGithubWatcher();
+    const restored = new ManagerController(fixture.pi, { githubWatcher: restoredWatcher.watcher });
+
+    const failure = await Effect.runPromise(restored.restore(fixture.ctx).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'StoreError',
+      operation: 'reject oversized current state: operator storage recovery required',
+      path: statePath,
+    });
+    expect(formatPardesError(failure)).toBe(
+      'StoreError: reject oversized current state: operator storage recovery required',
+    );
+    expect(restored.isActive()).toBe(false);
+    expect(restoredWatcher.starts()).toBe(0);
+    expect(readFileSync(statePath, 'utf8')).toBe(before);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).inbox[0].summary).toBe(summary);
   });
 
   test('scopes feedback-tool and next-normal-user-message handoffs to the surfaced cursor', async () => {
@@ -4087,11 +4176,15 @@ describe('manager controller', () => {
     await Effect.runPromise(
       workers.emit({
         agentId: agent.id,
+        context: `lossless restore context ${'x'.repeat(5_000)}`,
         question: 'Present me after restoration.',
         type: 'question',
       }),
     );
     expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    const persistedQuestionDetails = controller.snapshot()?.inbox[0]?.details;
+    expect(persistedQuestionDetails).toContain('lossless restore context');
+    expect(persistedQuestionDetails).toContain('x'.repeat(5_000));
     await Effect.runPromise(controller.shutdown(fixture.ctx));
 
     fixture.setManagerIdle(true);
@@ -4101,6 +4194,7 @@ describe('manager controller', () => {
     await eventually(() => fixture.messages.length === 1);
     const cursor = restored.snapshot()?.inboxWake?.cursor;
     expect(cursor).toBe(restored.snapshot()?.inbox[0]?.id);
+    expect(restored.snapshot()?.inbox[0]?.details).toBe(persistedQuestionDetails);
     expect(await Effect.runPromise(restored.beginInboxHandoff(fixture.ctx))).toMatchObject({
       cursor,
     });
@@ -5141,6 +5235,28 @@ describe('manager controller', () => {
     await Effect.runPromise(deactivated.deactivate(fixture.ctx));
     expect(deactivatedWatcher.starts()).toBe(1);
     expect(deactivatedWatcher.stops()).toBe(1);
+  });
+
+  test('test fixture cleanup stops every tracked watcher when restored controllers remain active', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const activatedWatcher = manualGithubWatcher();
+    const activated = new ManagerController(fixture.pi, {
+      githubWatcher: activatedWatcher.watcher,
+    });
+    await Effect.runPromise(activated.activate(fixture.ctx));
+    const restoredWatcher = manualGithubWatcher();
+    const restored = new ManagerController(fixture.pi, { githubWatcher: restoredWatcher.watcher });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(activatedWatcher.stops()).toBe(0);
+    expect(restoredWatcher.stops()).toBe(1);
+    await stopGithubWatcherFixtures();
+    expect(activatedWatcher.stops()).toBe(1);
+    expect(restoredWatcher.stops()).toBe(2);
   });
 
   test('reconciles after publication and treats a deduplicated merged signal as observation only', async () => {
@@ -6271,9 +6387,7 @@ describe('manager controller', () => {
       '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
     );
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
       details: { cursor: mergeAttention?.id, pendingCount: 1, type: 'manager_inbox_wake' },
     });
 
@@ -6367,7 +6481,12 @@ describe('manager controller', () => {
     const blockedMerge = requiredValue(controller.snapshot()?.inbox[1]);
     expect(
       await Effect.runPromise(controller.getInboxEvent({ eventId: blockedMerge.id }, fixture.ctx)),
-    ).toMatchObject({ id: blockedMerge.id, presentationBlocked: true, type: 'merged' });
+    ).toMatchObject({
+      id: blockedMerge.id,
+      presentationBlocked: true,
+      presentationBlockedReason: 'merge_retirement_refinement',
+      type: 'merged',
+    });
     await Effect.runPromise(
       workers.emit({
         agentId: unrelated.agent.id,
@@ -6411,9 +6530,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
       details: { cursor: suffix.id, pendingCount: 2 },
     });
     expect(
@@ -6477,9 +6594,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
       details: { pendingCount: 2 },
     });
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
@@ -6538,9 +6653,7 @@ describe('manager controller', () => {
       '#42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
     );
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
     });
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
       content: expect.stringContaining('- agent_git_audit_dirty: [Pardes]'),
@@ -7201,6 +7314,45 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
+  test('deduplicates equivalent pending conflict attention until acknowledgement rearms a later transition', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const pullRequestId = published.pullRequest.id;
+
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
+    );
+    const conflict = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'conflict'),
+    );
+    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
+    );
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: conflict.id }));
+    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
+    );
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('surfaces bounded remote-head divergence once until matching watcher metadata clears its durable warning', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -7231,6 +7383,20 @@ describe('manager controller', () => {
 
     await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.headDivergedAt).toBeUndefined();
+    expect(
+      controller.snapshot()?.inbox.filter(({ type }) => type === 'pull_request_head_diverged'),
+    ).toHaveLength(1);
+
+    // Matching lifecycle metadata may clear the current marker, but an equivalent
+    // still-pending diagnosis remains canonical until acknowledged.
+    await Effect.runPromise(watcher.diverge(pullRequestId));
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.headDivergedAt).toBeDefined();
+    expect(
+      controller.snapshot()?.inbox.filter(({ type }) => type === 'pull_request_head_diverged'),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: attention[0]?.id }));
+    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    await Effect.runPromise(watcher.diverge(pullRequestId));
     expect(
       controller.snapshot()?.inbox.filter(({ type }) => type === 'pull_request_head_diverged'),
     ).toHaveLength(1);
@@ -7495,7 +7661,7 @@ describe('manager controller', () => {
     );
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
-      'github_rate_metadata_unavailable: [GitHub metadata] GitHub.com watcher rate metadata is unavailable or invalid;',
+      'github_rate_metadata_unavailable: [GitHub metadata] inspect inbox_get({ eventId:',
     );
     expect(JSON.stringify(fixture.messages[0]?.message).length).toBeLessThan(1_200);
 
@@ -7646,7 +7812,9 @@ describe('manager controller', () => {
     const fixture = harness(repo);
     const workers = stubWorkers();
     const github = stubGithub();
+    const browser = recordingBrowserHandoff();
     const controller = new ManagerController(fixture.pi, {
+      browserHandoff: browser.browserHandoff,
       github: github.github,
       makeWorkers: workers.makeWorkers,
     });
@@ -7679,6 +7847,7 @@ describe('manager controller', () => {
           agentId: agent.id,
           baseBranch: 'main',
           body: 'Summary and validation.',
+          browserMode: 'background',
           title: 'Publish the fixture',
           workstreamId: workstream.id,
         },
@@ -7707,6 +7876,14 @@ describe('manager controller', () => {
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
+    expect(published.browserHandoff).toEqual({
+      openedMode: 'background',
+      requestedMode: 'background',
+      status: 'opened',
+    });
+    expect(browser.requests).toEqual([
+      { requestedMode: 'background', url: 'https://github.test/acme/project/pull/42' },
+    ]);
     expect(published.pullRequest).toMatchObject({
       agentId: agent.id,
       baseBranch: 'main',
@@ -7750,6 +7927,108 @@ describe('manager controller', () => {
     expect(github.reservations).toHaveLength(1);
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('persists and settles a verified review gate before handing off its exact verified URL', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub({ status: 'closed' });
+    const redirectedUrl = 'https://attacker.test/acme/project/pull/42';
+    let controller: ManagerController;
+    const watcher = manualGithubWatcher(() => {
+      const statePath = join(activationStateDir(fixture.entries), 'state.json');
+      const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+        pullRequests: Record<string, { url: string }>;
+      };
+      requiredValue(persisted.pullRequests['pr-42']).url = redirectedUrl;
+      writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+      const snapshot = requiredValue(controller.snapshot());
+      (requiredValue(snapshot.pullRequests['pr-42']) as { url: string }).url = redirectedUrl;
+    });
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const browserHandoff: BrowserHandoffShape = {
+      handoff: (url, requestedMode) =>
+        Effect.gen(function* () {
+          expect(url).toBe('https://github.test/acme/project/pull/42');
+          expect(requestedMode).toBe('background');
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return {
+            attemptedMode: 'background' as const,
+            failure: { code: 'ENOENT' as const, kind: 'browser_open_failed' as const },
+            requestedMode: 'background' as const,
+            status: 'failed' as const,
+          };
+        }),
+    };
+    controller = new ManagerController(fixture.pi, {
+      browserHandoff,
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'post-persistence browser handoff',
+    );
+    writeFileSync(join(requiredValue(agent.worktree).path, 'handoff.txt'), 'handoff fixture\n');
+    git(requiredValue(agent.worktree).path, 'add', 'handoff.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'handoff fixture');
+
+    const publication = Effect.runFork(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Persist before browser handoff.',
+          browserMode: 'background',
+          title: 'Post-persistence browser handoff',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+
+    expect(controller.snapshot()?.pullRequests['pr-42']).toMatchObject({
+      agentId: agent.id,
+      id: 'pr-42',
+      number: 42,
+      status: 'closed',
+      url: redirectedUrl,
+      workstreamId: workstream.id,
+    });
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+    expect(controller.snapshot()?.inbox).toEqual([
+      expect.objectContaining({ pullRequestId: 'pr-42', type: 'closed_unmerged' }),
+    ]);
+    expect(watcher.associations()).toEqual([]);
+    expect(watcher.reconciliations()).toBe(1);
+    expect(
+      readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
+    ).toContain('pull_request_published');
+
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    const published = await Effect.runPromise(Fiber.join(publication));
+    expect(published).toMatchObject({
+      browserHandoff: {
+        attemptedMode: 'background',
+        failure: { code: 'ENOENT', kind: 'browser_open_failed' },
+        requestedMode: 'background',
+        status: 'failed',
+      },
+      openedInBrowser: false,
+      pullRequest: { id: 'pr-42', url: redirectedUrl },
+    });
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
   test('durably clears a collided remote candidate before reserving its readable fallback', async () => {
@@ -8360,7 +8639,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain('no published head branch');
   });
 
-  test('deduplicates bounded associated attention when a reporting agent has ambiguous open review gates', async () => {
+  test('deduplicates restored legacy attention when a reporting agent has ambiguous open review gates', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -8380,6 +8659,7 @@ describe('manager controller', () => {
     );
     const statePath = join(activationStateDir(fixture.entries), 'state.json');
     const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      inbox: Array<Record<string, unknown>>;
       pullRequests: Record<string, Record<string, unknown>>;
     };
     persisted.pullRequests['pr-43'] = {
@@ -8388,6 +8668,14 @@ describe('manager controller', () => {
       number: 43,
       url: 'https://github.test/acme/project/pull/43',
     };
+    persisted.inbox.push({
+      agentId: agent.id,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-auto-sync-attention',
+      summary: `Did not auto-sync ${agent.id}: found 2 persisted open review-gate associations; expected exactly one.`,
+      type: 'pull_request_auto_sync_attention',
+      workstreamId: workstream.id,
+    });
     writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
     await Effect.runPromise(controller.refresh(fixture.ctx));
 
@@ -9165,7 +9453,9 @@ describe('manager controller', () => {
       managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
     ).toHaveLength(1);
     expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
-    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain('do not poll');
+    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain(
+      'verification_terminal_report_missing: [Pardes] inspect inbox_get({ eventId:',
+    );
 
     await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
     await Effect.runPromise(

@@ -11,6 +11,7 @@ import {
   renderPardesToolCall,
   renderPardesToolResult,
 } from '../presentation/index.ts';
+import { completeOrOmittedText } from './projections/core.ts';
 
 export function json(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -70,6 +71,6 @@ export async function runTool<A>(
   try {
     return { ok: true, value: await Effect.runPromise(effect) };
   } catch (error) {
-    return { error: formatPardesError(error), ok: false };
+    return { error: completeOrOmittedText(formatPardesError(error), 400), ok: false };
   }
 }

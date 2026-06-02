@@ -33,6 +33,33 @@ export const GITHUB_DISCUSSION_BODY_MAX_LENGTH = 65_536;
 export const GITHUB_DISCUSSION_AUTHOR_MAX_LENGTH = 100;
 export const GITHUB_HOSTED_EXCERPT_DEFAULT_CHARS = 2_000;
 export const GITHUB_HOSTED_EXCERPT_MAX_CHARS = 4_000;
+export const GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH = 160;
+export const PULL_REQUEST_BROWSER_MODES = ['none', 'background', 'foreground'] as const;
+
+export const PullRequestBrowserModeSchema = Schema.Literals(PULL_REQUEST_BROWSER_MODES);
+export type PullRequestBrowserMode = typeof PullRequestBrowserModeSchema.Type;
+
+export interface PullRequestBrowserOptions {
+  readonly browserMode?: PullRequestBrowserMode;
+  /** Compatibility alias retained for callers predating explicit modes. */
+  readonly openInBrowser?: boolean;
+}
+
+export function pullRequestBrowserOptionsAreCompatible(
+  options: PullRequestBrowserOptions,
+): boolean {
+  return (
+    options.browserMode === undefined ||
+    options.openInBrowser === undefined ||
+    options.browserMode === (options.openInBrowser ? 'foreground' : 'none')
+  );
+}
+
+export function resolvePullRequestBrowserMode(
+  options: PullRequestBrowserOptions,
+): PullRequestBrowserMode {
+  return options.browserMode ?? (options.openInBrowser ? 'foreground' : 'none');
+}
 
 export const GitHubDiscussionSurfaceSchema = Schema.Literals([
   'issue_comment',
@@ -233,7 +260,6 @@ export const PublishPullRequestInputSchema = Schema.Struct({
   headSha: FullCommitShaSchema,
   humanHeadBranchReservation: Schema.optionalKey(HumanPublishedReviewBranchReservationSchema),
   legacyExistingPullRequestNumber: Schema.optionalKey(PositiveIntegerSchema),
-  openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
 });
 

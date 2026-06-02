@@ -58,7 +58,7 @@ export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: Manager
       {
         maxRows: Type.Optional(
           Type.Integer({
-            description: `Maximum returned rows, hard-capped at ${CONTROL_PLANE_MAX_ROWS}.`,
+            description: `Maximum returned rows, hard-capped at ${CONTROL_PLANE_MAX_ROWS} before reserved structural omission metadata.`,
             maximum: CONTROL_PLANE_MAX_ROWS,
             minimum: 1,
           }),

@@ -5,6 +5,7 @@ import { chmod, link, lstat, mkdir, readFile, realpath, rm, writeFile } from 'no
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Effect } from 'effect';
+import { gitEnvironmentForExplicitCwd } from '../git/index.ts';
 import { PluginActivationBlockedError } from './errors.ts';
 
 const DEFAULT_PLUGIN_SOURCE_ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -103,6 +104,7 @@ function sourceControlStatus(pluginRoot: string): PluginSourceControlStatus {
     execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
       cwd: pluginRoot,
       encoding: 'utf8',
+      env: gitEnvironmentForExplicitCwd(),
       stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch (error) {
@@ -115,6 +117,7 @@ function sourceControlStatus(pluginRoot: string): PluginSourceControlStatus {
       {
         cwd: pluginRoot,
         encoding: 'utf8',
+        env: gitEnvironmentForExplicitCwd(),
         stdio: ['ignore', 'pipe', 'ignore'],
       },
     );

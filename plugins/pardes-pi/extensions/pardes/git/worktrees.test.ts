@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -12,7 +11,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
+import { copyLocalGitRepositoryFixture, runGitFixture } from '../test-support.ts';
 import { discoverRepository } from './repository.ts';
+import type { WorktreeLease } from './schemas.ts';
 import {
   type CreateDetachedReviewCheckoutInput,
   type ManagedLeaseOwner,
@@ -29,7 +30,7 @@ afterEach(() => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 function owner(
@@ -38,6 +39,16 @@ function owner(
   agentId: string,
 ): ManagedLeaseOwner {
   return { agentId, managerId, repo };
+}
+
+function inspectProvenance(
+  service: ManagedWorktreeShape,
+  owner: ManagedLeaseOwner,
+  lease: WorktreeLease,
+) {
+  const inspect = service.inspectWithProvenance;
+  if (!inspect) throw new Error('Expected opt-in Git provenance inspection');
+  return inspect(owner, lease);
 }
 
 const provisionReview = Effect.fnUntraced(function* (
@@ -53,15 +64,8 @@ const provisionReview = Effect.fnUntraced(function* (
 });
 
 function fixtureRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-worktree-'));
+  const { repo, root } = copyLocalGitRepositoryFixture('pardes-worktree-');
   temporaryDirectories.push(root);
-  const repo = join(root, 'project');
-  execFileSync('git', ['init', '-b', 'main', repo]);
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
-  writeFileSync(join(repo, 'README.md'), 'fixture\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'fixture');
   return realpathSync(repo);
 }
 
@@ -83,13 +87,13 @@ describe('managed worktree service', () => {
     expect(git(primary, 'status', '--porcelain', '--untracked-files=all')).toBe('');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
-    ).toEqual({ changedPaths: [], dirty: false, headSha: branchPointSha, path: lease.path });
+    ).toMatchObject({ changedPaths: [], dirty: false, headSha: branchPointSha, path: lease.path });
 
     const changed = join(lease.path, 'worker.txt');
     writeFileSync(changed, 'dirty\n');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
-    ).toEqual({
+    ).toMatchObject({
       changedPaths: ['worker.txt'],
       dirty: true,
       headSha: branchPointSha,
@@ -106,7 +110,7 @@ describe('managed worktree service', () => {
     const committedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
-    ).toEqual({
+    ).toMatchObject({
       changedPaths: ['worker.txt'],
       dirty: false,
       headSha: committedHeadSha,
@@ -222,7 +226,7 @@ describe('managed worktree service', () => {
     const firstInspection = await Effect.runPromise(
       service.inspect(owner(repo, 'manager-1', 'agent-snapshot'), lease),
     );
-    expect(firstInspection).toEqual({
+    expect(firstInspection).toMatchObject({
       changedPaths: ['first.txt'],
       dirty: false,
       headSha: git(lease.path, 'rev-parse', 'HEAD'),
@@ -239,6 +243,293 @@ describe('managed worktree service', () => {
     expect(secondInspection.headSha).not.toBe(firstInspection.headSha);
     expect(firstInspection.changedPaths).toEqual(['first.txt']);
     expect(secondInspection.changedPaths).toEqual(['first.txt', 'second.txt']);
+  });
+
+  test('distinguishes cooperative first-parent candidates from additive merge context', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-provenance', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'worker.txt'), 'worker authored\n');
+    git(lease.path, 'add', 'worker.txt');
+    git(lease.path, 'commit', '-m', 'worker-authored fixture');
+    const workerAuthoredSha = git(lease.path, 'rev-parse', 'HEAD');
+
+    writeFileSync(join(primary, 'main.txt'), 'additive main change\n');
+    git(primary, 'add', 'main.txt');
+    git(primary, 'commit', '-m', 'main integration fixture');
+    git(lease.path, 'merge', '--no-edit', 'main');
+    const integratedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
+    const inspection = await Effect.runPromise(
+      inspectProvenance(service, owner(repo, 'manager-1', 'agent-provenance'), lease),
+    );
+
+    expect(workerAuthoredSha).not.toBe(integratedHeadSha);
+    expect(inspection).toMatchObject({
+      changedPaths: ['main.txt', 'worker.txt'],
+      dirty: false,
+      headSha: integratedHeadSha,
+      provenance: {
+        attribution: 'cooperative_first_parent',
+        branchPointSha,
+        firstParentNonMergeCommitCount: 1,
+        firstParentNonMergePaths: ['worker.txt'],
+        headSha: integratedHeadSha,
+        latestDelta: {
+          changedPaths: ['main.txt'],
+          commitSha: integratedHeadSha,
+          kind: 'merge_commit',
+        },
+        mergeCommitCount: 1,
+        mergePaths: ['main.txt'],
+        status: 'available',
+        totalBranchCommitCount: 2,
+        totalBranchDeltaPaths: ['main.txt', 'worker.txt'],
+      },
+    });
+  });
+
+  test('refuses stable provenance for dirty worktrees while returning complete dirty paths', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-dirty', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'worker.txt'), 'committed worker change\n');
+    git(lease.path, 'add', 'worker.txt');
+    git(lease.path, 'commit', '-m', 'worker fixture');
+    writeFileSync(join(lease.path, 'dirty.txt'), 'live dirty change\n');
+
+    const inspection = await Effect.runPromise(
+      inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty'), lease),
+    );
+
+    expect(inspection).toMatchObject({
+      changedPaths: ['dirty.txt'],
+      dirty: true,
+      provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
+    });
+  });
+
+  test('returns dirty refusal before committed-range output can exceed the audit circuit breaker', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceGitMaxBufferBytes: 65 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-dirty-bound',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const committedPath = `${'long-committed-path-'.repeat(8)}.txt`;
+    writeFileSync(join(lease.path, committedPath), 'committed worker change\n');
+    git(lease.path, 'add', committedPath);
+    git(lease.path, 'commit', '-m', 'long worker fixture');
+    writeFileSync(join(lease.path, 'dirty.txt'), 'live dirty change\n');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty-bound'), lease),
+      ),
+    ).toMatchObject({
+      provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
+    });
+  });
+
+  test('rejects routine inspection and degrades opt-in provenance when the writing branch mismatches its retained lease', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-branch', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    git(lease.path, 'checkout', '-b', 'unexpected-branch');
+
+    expect(
+      await Effect.runPromise(
+        service.inspect(owner(repo, 'manager-1', 'agent-branch'), lease).pipe(Effect.flip),
+      ),
+    ).toMatchObject({
+      _tag: 'InvalidManagedLeaseError',
+      reason: 'managed writing checkout branch does not match its retained lease',
+    });
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-branch'), lease),
+      ),
+    ).toMatchObject({
+      provenance: {
+        dirtyPaths: [],
+        observedBranch: 'unexpected-branch',
+        reason: 'branch_mismatch',
+        status: 'unavailable',
+      },
+    });
+  });
+
+  test('degrades disconnected orphan history instead of attributing unrelated commits', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-orphan', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    git(lease.path, 'checkout', '--orphan', 'orphan-temp');
+    git(lease.path, 'rm', '-rf', '.');
+    writeFileSync(join(lease.path, 'unrelated.txt'), 'disconnected history\n');
+    git(lease.path, 'add', 'unrelated.txt');
+    git(lease.path, 'commit', '-m', 'orphan fixture');
+    git(lease.path, 'branch', '-D', lease.branch);
+    git(lease.path, 'branch', '-m', lease.branch);
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-orphan'), lease),
+      ),
+    ).toMatchObject({
+      provenance: { dirtyPaths: [], reason: 'baseline_not_ancestor', status: 'unavailable' },
+    });
+  });
+
+  test('degrades provenance before path materialization exceeds its configured cap', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceMaxPaths: 1 });
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-bounds', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'first.txt'), 'first\n');
+    writeFileSync(join(lease.path, 'second.txt'), 'second\n');
+    git(lease.path, 'add', 'first.txt', 'second.txt');
+    git(lease.path, 'commit', '-m', 'bounded provenance fixture');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-bounds'), lease),
+      ),
+    ).toMatchObject({
+      provenance: {
+        bounds: { maxPaths: 1 },
+        dirtyPaths: [],
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+    });
+  });
+
+  test('keeps touched cooperative non-merge candidate paths invariant when additive merge context appears', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-touched', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'reverted.txt'), 'temporary\n');
+    git(lease.path, 'add', 'reverted.txt');
+    git(lease.path, 'commit', '-m', 'add temporary fixture');
+    rmSync(join(lease.path, 'reverted.txt'));
+    git(lease.path, 'add', '-A');
+    git(lease.path, 'commit', '-m', 'remove temporary fixture');
+    writeFileSync(join(lease.path, 'stable.txt'), 'stable\n');
+    git(lease.path, 'add', 'stable.txt');
+    git(lease.path, 'commit', '-m', 'stable fixture');
+
+    const before = await Effect.runPromise(
+      inspectProvenance(service, owner(repo, 'manager-1', 'agent-touched'), lease),
+    );
+    writeFileSync(join(primary, 'main.txt'), 'additive main\n');
+    git(primary, 'add', 'main.txt');
+    git(primary, 'commit', '-m', 'main fixture');
+    git(lease.path, 'merge', '--no-edit', 'main');
+    const after = await Effect.runPromise(
+      inspectProvenance(service, owner(repo, 'manager-1', 'agent-touched'), lease),
+    );
+
+    expect(before.provenance).toMatchObject({
+      firstParentNonMergePaths: ['reverted.txt', 'stable.txt'],
+      status: 'available',
+    });
+    expect(after.provenance).toMatchObject({
+      firstParentNonMergePaths: ['reverted.txt', 'stable.txt'],
+      mergePaths: ['main.txt'],
+      status: 'available',
+    });
+  });
+
+  test('degrades unsupported octopus merge graphs instead of assigning semantic attribution', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-octopus', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'worker.txt'), 'worker\n');
+    git(lease.path, 'add', 'worker.txt');
+    git(lease.path, 'commit', '-m', 'worker fixture');
+    git(primary, 'branch', 'side', branchPointSha);
+    writeFileSync(join(primary, 'main.txt'), 'main\n');
+    git(primary, 'add', 'main.txt');
+    git(primary, 'commit', '-m', 'main fixture');
+    git(primary, 'checkout', 'side');
+    writeFileSync(join(primary, 'side.txt'), 'side\n');
+    git(primary, 'add', 'side.txt');
+    git(primary, 'commit', '-m', 'side fixture');
+    git(primary, 'checkout', 'main');
+    git(lease.path, 'merge', '--no-edit', 'main', 'side');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-octopus'), lease),
+      ),
+    ).toMatchObject({
+      provenance: { dirtyPaths: [], reason: 'unsupported_graph', status: 'unavailable' },
+    });
+  });
+
+  test('degrades provenance when first-parent traversal exceeds its configured commit cap', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceMaxFirstParentCommits: 1 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-commit-bounds',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    for (const path of ['first.txt', 'second.txt']) {
+      writeFileSync(join(lease.path, path), `${path}\n`);
+      git(lease.path, 'add', path);
+      git(lease.path, 'commit', '-m', `${path} fixture`);
+    }
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-commit-bounds'), lease),
+      ),
+    ).toMatchObject({
+      provenance: {
+        bounds: { maxFirstParentCommits: 1 },
+        dirtyPaths: [],
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+    });
   });
 
   test('creates a fresh manager-namespaced detached review checkout pinned to an immutable worker head', async () => {
@@ -460,14 +751,14 @@ describe('managed worktree service', () => {
     writeFileSync(join(lease.path, 'added.txt'), 'added\n');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-audit'), lease)),
-    ).toEqual({ changedPaths, dirty: true, headSha: branchPointSha, path: lease.path });
+    ).toMatchObject({ changedPaths, dirty: true, headSha: branchPointSha, path: lease.path });
 
     git(lease.path, 'add', '-A');
     git(lease.path, 'commit', '-m', 'audit changes');
     const auditedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-audit'), lease)),
-    ).toEqual({ changedPaths, dirty: false, headSha: auditedHeadSha, path: lease.path });
+    ).toMatchObject({ changedPaths, dirty: false, headSha: auditedHeadSha, path: lease.path });
   });
 
   test('rejects dot path segments before mutating managed worktrees', async () => {

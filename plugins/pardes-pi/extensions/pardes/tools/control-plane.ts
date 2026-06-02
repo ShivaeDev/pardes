@@ -2,6 +2,8 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import {
   AUTONOMOUS_INBOX_PATH,
+  INBOX_EVENT_EXCERPT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   INBOX_TWO_PATH_GUIDANCE,
   type ManagerController,
   projectResolvedWorkCleanup,
@@ -87,7 +89,7 @@ export function registerPardesStatusTool(pi: ExtensionAPI, manager: ManagerContr
         ),
         maxRows: Type.Optional(
           Type.Integer({
-            description: `Maximum returned rows for views other than inbox, hard-capped at ${CONTROL_PLANE_MAX_ROWS}. Inbox preserves its fixed authored orientation rows and omission metadata even when they exceed this target.`,
+            description: `Maximum returned rows for views other than inbox, hard-capped at ${CONTROL_PLANE_MAX_ROWS} before reserved structural metadata. Inbox preserves its fixed authored orientation rows and omission metadata even when they exceed this target. All projections preserve authored orientation, omission metadata, and retrieval hints when required.`,
             maximum: CONTROL_PLANE_MAX_ROWS,
             minimum: 1,
           }),
@@ -148,11 +150,14 @@ export function registerPardesStatusTool(pi: ExtensionAPI, manager: ManagerContr
 
 export function registerInboxGetTool(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
-    description: `Read one known currently-pending durable Pardes inbox row by eventId, then judge which path applies. Returns a trust-labelled JSON-escaped bounded summary plus allowlisted metadata; never lists audit history, fetches external bodies, or routes external feedback. ${INBOX_TWO_PATH_GUIDANCE}`,
+    description: `Read one known currently-pending durable Pardes inbox row by eventId, then judge which path applies. Returns one trust-labelled JSON-escaped bounded prose excerpt plus allowlisted metadata and explicit offset/maxChars/totalChars/hasMore continuation. Non-report detail retrieval is durable and lossless across calls; report bodies remain separate report_get artifacts; never lists audit history, fetches external bodies, or routes external feedback. ${INBOX_TWO_PATH_GUIDANCE}`,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.getInboxEvent(params, ctx));
       return result.ok
-        ? textResult(inboxEventDetailLines(result.value), inboxEventDetailMetadata(result.value))
+        ? textResult(
+            inboxEventDetailLines(result.value, params),
+            inboxEventDetailMetadata(result.value, params),
+          )
         : textResult(`Error: ${result.error}`);
     },
     label: 'Get Durable Inbox Event',
@@ -160,10 +165,28 @@ export function registerInboxGetTool(pi: ExtensionAPI, manager: ManagerControlle
     parameters: Type.Object(
       {
         eventId: managerId('Path-free event id copied from pardes_status(view="inbox")'),
+        maxChars: Type.Optional(
+          Type.Integer({
+            description: 'Maximum raw prose characters returned in this excerpt.',
+            maximum: INBOX_EVENT_EXCERPT_MAX_CHARS,
+            minimum: 1,
+          }),
+        ),
+        offset: Type.Optional(
+          Type.Integer({
+            description: 'Raw prose character offset for explicit continuation.',
+            maximum: INBOX_EVENT_EXCERPT_MAX_OFFSET,
+            minimum: 0,
+          }),
+        ),
       },
       { additionalProperties: false },
     ),
-    preview: (args) => [{ name: 'eventId', value: args.eventId }],
+    preview: (args) => [
+      { name: 'eventId', value: args.eventId },
+      { name: 'offset', value: args.offset },
+      { name: 'maxChars', value: args.maxChars },
+    ],
     promptGuidelines: [AUTONOMOUS_INBOX_PATH, USER_JUDGMENT_INBOX_PATH, USER_JUDGMENT_HANDOFF_PATH],
     promptSnippet:
       'Read and judge one known durable Pardes attention row after compact inbox status',

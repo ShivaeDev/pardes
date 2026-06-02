@@ -1,4 +1,15 @@
 export {
+  BROWSER_OPEN_MAX_BUFFER_BYTES,
+  BROWSER_OPEN_TIMEOUT_MILLIS,
+  type BrowserHandoffShape,
+  type BrowserOpenInvocation,
+  type BrowserOpenRunnerShape,
+  makeBrowserHandoff,
+  makeExecFileBrowserOpenRunner,
+  type PullRequestBrowserHandoff,
+  type SafeBrowserOpenFailureMetadata,
+} from './browser-handoff.ts';
+export {
   GitHubCommandError,
   GitHubPublicationInputError,
   GitHubResponseError,
@@ -126,16 +137,22 @@ export {
   PULL_REQUEST_BODY_MAX_LENGTH,
   PULL_REQUEST_BRANCH_MAX_LENGTH,
   PULL_REQUEST_BRANCH_PATTERN,
+  PULL_REQUEST_BROWSER_MODES,
   PULL_REQUEST_TITLE_MAX_LENGTH,
   PublishedReviewBranchCandidatesInputSchema,
   PullRequestBodySchema,
   PullRequestBranchSchema,
+  type PullRequestBrowserMode,
+  PullRequestBrowserModeSchema,
+  type PullRequestBrowserOptions,
   PullRequestTitleSchema,
+  pullRequestBrowserOptionsAreCompatible,
   READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN,
   READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX,
   ReadablePublishedReviewBranchSchema,
   ReleasePublishedReviewBranchClaimInputSchema,
   ReservePublishedReviewBranchInputSchema,
+  resolvePullRequestBrowserMode,
 } from './schemas.ts';
 export {
   DEFAULT_GITHUB_WATCHER_CADENCE,

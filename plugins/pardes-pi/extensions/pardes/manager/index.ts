@@ -86,6 +86,7 @@ export {
   type InboxWake,
   InboxWakeSchema,
   initialManagerState,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerActivation,
   ManagerActivationSchema,
   type ManagerEvent,
@@ -167,6 +168,9 @@ export {
 } from './inbox.ts';
 export {
   type AgentSendReportInput,
+  INBOX_EVENT_EXCERPT_DEFAULT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   type InboxAcknowledgeInput,
   type InboxGetInput,
   MANAGER_INPUT_BASELINE_BRANCH_MAX_LENGTH,

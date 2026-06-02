@@ -16,6 +16,8 @@ import {
   decodeVerificationRequestInput,
   decodeWorkstreamCreateInput,
   decodeWorkstreamIdInput,
+  INBOX_EVENT_EXCERPT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   MANAGER_INPUT_ID_MAX_LENGTH,
   MANAGER_INPUT_LONG_TEXT_MAX_LENGTH,
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
@@ -64,6 +66,25 @@ describe('manager input schemas', () => {
       body: 'Summary and validation.',
       openInBrowser: true,
       title: 'Publish schema substrate',
+      workstreamId: 'ws-12345678',
+    });
+    expect(
+      await Effect.runPromise(
+        decodePullRequestCreateInput({
+          agentId: 'agent-12345678',
+          baseBranch: 'release/v1.2_3',
+          body: 'Summary and validation.',
+          browserMode: 'background',
+          title: 'Publish schema substrate in background',
+          workstreamId: 'ws-12345678',
+        }),
+      ),
+    ).toEqual({
+      agentId: 'agent-12345678',
+      baseBranch: 'release/v1.2_3',
+      body: 'Summary and validation.',
+      browserMode: 'background',
+      title: 'Publish schema substrate in background',
       workstreamId: 'ws-12345678',
     });
     expect(
@@ -156,9 +177,20 @@ describe('manager input schemas', () => {
       forceDeleteUnmergedBranch: true,
       forceDiscardDirty: true,
     });
-    expect(await Effect.runPromise(decodeInboxGetInput({ eventId: 'event-1234_ab.cd' }))).toEqual({
+    expect(
+      await Effect.runPromise(
+        decodeInboxGetInput({ eventId: 'event-1234_ab.cd', maxChars: 123, offset: 456 }),
+      ),
+    ).toEqual({
       eventId: 'event-1234_ab.cd',
+      maxChars: 123,
+      offset: 456,
     });
+    expect(
+      await Effect.runPromise(
+        decodeInboxGetInput({ eventId: 'event-legacy-summary', offset: 2 * 1_024 * 1_024 }),
+      ),
+    ).toEqual({ eventId: 'event-legacy-summary', offset: 2 * 1_024 * 1_024 });
     expect(
       await Effect.runPromise(
         decodeVerificationRequestInput({
@@ -227,6 +259,14 @@ describe('manager input schemas', () => {
     await expectRejected(decodeInboxGetInput({ eventId: 'event/unsafe' }), 'inbox_get');
     await expectRejected(
       decodeInboxGetInput({ eventId: 'e'.repeat(MANAGER_INPUT_ID_MAX_LENGTH + 1) }),
+      'inbox_get',
+    );
+    await expectRejected(
+      decodeInboxGetInput({ eventId: 'event-safe', maxChars: INBOX_EVENT_EXCERPT_MAX_CHARS + 1 }),
+      'inbox_get',
+    );
+    await expectRejected(
+      decodeInboxGetInput({ eventId: 'event-safe', offset: INBOX_EVENT_EXCERPT_MAX_OFFSET + 1 }),
       'inbox_get',
     );
     await expectRejected(
@@ -313,7 +353,7 @@ describe('manager input schemas', () => {
     );
   });
 
-  test('rejects oversized bounded text, unsafe PR branches, and non-boolean browser handoff', async () => {
+  test('rejects oversized bounded text, unsafe PR branches, and invalid browser handoff', async () => {
     await expectRejected(
       decodeWorkstreamCreateInput({
         objective: 'Objective',
@@ -419,7 +459,30 @@ describe('manager input schemas', () => {
         agentId: 'agent-1',
         baseBranch: 'main',
         body: 'Summary.',
+        browserMode: 'sideways',
+        title: 'Publish',
+        workstreamId: 'ws-1',
+      }),
+      'pull_request_create',
+    );
+    await expectRejected(
+      decodePullRequestCreateInput({
+        agentId: 'agent-1',
+        baseBranch: 'main',
+        body: 'Summary.',
         openInBrowser: 'yes',
+        title: 'Publish',
+        workstreamId: 'ws-1',
+      }),
+      'pull_request_create',
+    );
+    await expectRejected(
+      decodePullRequestCreateInput({
+        agentId: 'agent-1',
+        baseBranch: 'main',
+        body: 'Summary.',
+        browserMode: 'background',
+        openInBrowser: true,
         title: 'Publish',
         workstreamId: 'ws-1',
       }),

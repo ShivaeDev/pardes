@@ -5,10 +5,20 @@ name: version-bump
 #   never runs in an untrusted context, so there is no supply-chain surface to
 #   hijack (a fork PR can't trigger it; nothing untrusted runs with the token).
 # - Least-privilege permissions. Actions pinned to full commit SHAs.
+# - Checkout does NOT persist credentials. bump.ts removes GH_TOKEN and the
+#   provider key from its own process env, then injects each only into its narrow
+#   children: explicit remote Git/gh publication ops or OpenCode classification.
+#   Git's ephemeral extraheader is scoped to the proved HTTPS GitHub server.
 # - The bump opens a PR with GITHUB_TOKEN, merges it SYNCHRONOUSLY in the same run,
-#   then tags the PR's EXACT merge commit — resolved from the PR, not main HEAD, so
-#   an unrelated merge racing onto main can't mis-point the tag (no bypass actor, no
-#   standing secret). A GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so
+#   then tags the PR's EXACT verified merge commit — resolved from the PR, not main
+#   HEAD. It aggregates classifier coverage to a fetched main watermark, rejects
+#   pre-merge advancement, and refuses a raced same-plugin integration tag (no
+#   bypass actor, no standing secret). Reused PRs must be main-based with the
+#   exact published head; merged SHAs must be contained in origin/main. Loud
+#   post-merge same-plugin-race recovery:
+#   DO NOT manually tag the raced merge; inspect/reconcile plugin source +
+#   changelog on main, then land a normal non-manifest source commit so this
+#   workflow classifies and publishes a clean release. A GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so
 #   there is no recursion — and that same fact is why the tag must be created inline
 #   (an async "tag on merge" step would never fire). The run is re-entrant: a re-run
 #   detects an already-landed bump from main's manifest and only ensures the tag.
@@ -16,8 +26,27 @@ name: version-bump
 #   `*--v*` blocks tag update + delete (supply-chain protection). The script never
 #   force/moves them — only the disposable bot-owned `bump/<sha>` branch may be
 #   force-with-leased on a re-run.
-# - Untrusted strings (commit messages/diffs) are passed to tools as argv DATA,
-#   never interpolated into a shell. opencode runs read-only (classify only).
+# - Bounded untrusted strings (commit subjects/paths) are one argv DATA value,
+#   never interpolated into a shell. OpenCode runs in a disposable Git-rooted
+#   cwd/HOME with global + PRIMARY-agent wildcard deny and one schema-first verdict
+#   submission tool. Its narrowed child env has OPENCODE_API_KEY plus isolated
+#   runtime paths/config controls — never GH_TOKEN, persisted credentials, or
+#   publication secrets.
+#   OpenCode uses one isolated config root and bounded startup/run timeouts. Its
+#   snapshot-only Git workspace receives read-only credential-free tracked
+#   before/after blobs; config/HOME/XDG/verdict stay outside that workspace. A
+#   resolved-policy preflight asserts fallback build has zero enabled tools and
+#   bump has only read/glob/grep + submit_verdict, with external directories
+#   denied. The script also rejects fallback-agent warnings, prose salvage,
+#   unexpected tools, escaped contextual reads/searches, invalid/multiple
+#   submissions, and non-allowlisted release diffs before push. Existing plugin
+#   manifest versions are workflow-owned: a source push that edits one is rejected.
+# - GITHUB_TOKEN-created bump branch/PR events do NOT launch lint.yml. Before any
+#   bump branch push, bump.ts runs the same `bun run ready` deterministic gate
+#   inline with publication/provider credentials removed, then reasserts a clean
+#   tree. A blanket ruleset that also requires a hosted check on these bot PRs is
+#   intentionally fail-closed at synchronous merge; repo policy must account for
+#   the trusted bump path without granting any broader bypass.
 
 on:
   push:
@@ -40,15 +69,25 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0   # need history for the github.event.before..after diff
+          fetch-depth: 0   # need history for classifier aggregation + exact tag recovery
+          persist-credentials: false # bump.ts injects auth only into explicit remote publication operations
 
       - name: Read pinned tool versions
         id: tool-versions
-        run: echo "bun=$(awk '$1 == "bun" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "bun=$(awk '$1 == "bun" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+          echo "uv=$(awk '$1 == "uv" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ steps.tool-versions.outputs.bun }}
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ steps.tool-versions.outputs.uv }}
+
+      - name: Install dependencies for the inline pre-merge ready gate
+        run: bun install --frozen-lockfile
 
       - name: Install opencode (pinned, from npm)
         run: |
@@ -58,11 +97,11 @@ jobs:
       - name: Classify, bump, merge, and tag
         env:
           # ONLY GitHub-controlled SHAs here (safe). bump.ts gathers commit
-          # messages/diffs itself via git as DATA — nothing attacker-controlled is
+          # messages/paths itself via git as DATA — nothing attacker-controlled is
           # interpolated into a shell command anywhere.
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}   # set this repo VARIABLE to your zen/go model id (provider/model)
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}   # OpenCode/OpenCode Go only: opencode[-go]/model
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun script/bump.ts

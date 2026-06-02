@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
+import { copyLocalGitRepositoryFixture, runGitFixture } from '../test-support.ts';
 import { discoverRepository, resolveGitPathOutput } from './repository.ts';
 
 const temporaryDirectories: string[] = [];
@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 describe('resolveGitPathOutput', () => {
@@ -33,15 +33,8 @@ describe('resolveGitPathOutput', () => {
 
 describe('repository discovery', () => {
   test('resolves the primary checkout from both primary and linked worktrees', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'pardes-repo-'));
+    const { repo: primary, root } = copyLocalGitRepositoryFixture('pardes-repo-');
     temporaryDirectories.push(root);
-    const primary = join(root, 'project');
-    execFileSync('git', ['init', '-b', 'main', primary]);
-    git(primary, 'config', 'user.email', 'pardes@example.test');
-    git(primary, 'config', 'user.name', 'Pardes Test');
-    writeFileSync(join(primary, 'README.md'), 'fixture\n');
-    git(primary, 'add', 'README.md');
-    git(primary, 'commit', '-m', 'fixture');
     const linked = join(root, 'linked');
     git(primary, 'worktree', 'add', '-b', 'worker', linked, 'HEAD');
 

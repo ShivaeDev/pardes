@@ -849,6 +849,34 @@ describe('Pardes coordinating-manager compaction', () => {
     ).toContain('stage: unknown');
   });
 
+  test('does not coerce arbitrary fallback causes or accessor-backed error messages', () => {
+    let accessorReads = 0;
+    let objectCoercions = 0;
+    const coercible = {
+      toString: () => {
+        objectCoercions += 1;
+        return 'token=private-coerced-object';
+      },
+    };
+    const accessorError = new Error('initial safe message');
+    Object.defineProperty(accessorError, 'message', {
+      configurable: true,
+      get: () => {
+        accessorReads += 1;
+        return 'token=private-accessor-message';
+      },
+    });
+
+    for (const cause of [coercible, accessorError]) {
+      const diagnostic = renderManagerCompactionFallbackDiagnostic('summarize', cause);
+      expect(diagnostic).toContain('chars(original=unknown, shown=0, omitted=unknown)');
+      expect(diagnostic).not.toContain('private');
+      expect(diagnostic).not.toContain('token=');
+    }
+    expect(objectCoercions).toBe(0);
+    expect(accessorReads).toBe(0);
+  });
+
   test('keeps fallback safe when the UI diagnostic surface itself throws', () => {
     const logs: string[] = [];
     const diagnostic = renderManagerCompactionFallbackDiagnostic(

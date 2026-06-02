@@ -1,3 +1,4 @@
+import { isNativeError } from 'node:util/types';
 import {
   type CompactionResult,
   compact as compactPiConversation,
@@ -454,13 +455,20 @@ function omissionAwareDiagnosticText(
   return `${text.slice(0, shownChars)}${suffix}`;
 }
 
+function safeManagerCompactionCauseText(cause: unknown): string | undefined {
+  if (typeof cause === 'string') return cause;
+  if (!isNativeError(cause)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(cause, 'message');
+  return descriptor && 'value' in descriptor && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : undefined;
+}
+
 function causeOmissionMetadata(cause: unknown): string {
-  try {
-    const text = String(cause instanceof Error ? cause.message : cause);
-    return `chars(original=${text.length}, shown=0, omitted=${text.length})`;
-  } catch {
-    return 'chars(original=unknown, shown=0, omitted=unknown)';
-  }
+  const text = safeManagerCompactionCauseText(cause);
+  return text === undefined
+    ? 'chars(original=unknown, shown=0, omitted=unknown)'
+    : `chars(original=${text.length}, shown=0, omitted=${text.length})`;
 }
 
 /** Bound one body-free utility value; arbitrary caller text is never delivered. */

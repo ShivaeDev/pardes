@@ -18,6 +18,8 @@ import { type WorkerRpcResponse, WorkerRpcWire } from './codecs.ts';
 import { attachWorkerRpcJsonl } from './jsonl.ts';
 import { makeWorkerRpcRequestCorrelator } from './requests.ts';
 
+export const WORKER_STDERR_FINAL_DRAIN_MS = 100;
+
 export interface WorkerRpcSessionCallbacks {
   readonly onValue: (event: unknown, record: WorkerRpcRecordMetadata) => void;
   readonly onProtocolError: (diagnostic: WorkerProtocolDiagnostic) => void;
@@ -70,6 +72,7 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
     let stderr = emptyWorkerStderrTail();
     const stderrDecoder = new StringDecoder('utf8');
     let stderrDecoderFlushed = false;
+    let stderrDrainTimeout: ReturnType<typeof setTimeout> | undefined;
     let started = false;
 
     const appendStderr = (text: string) => {
@@ -78,7 +81,14 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
     const flushStderr = () => {
       if (stderrDecoderFlushed) return;
       stderrDecoderFlushed = true;
+      if (stderrDrainTimeout) clearTimeout(stderrDrainTimeout);
+      stderrDrainTimeout = undefined;
       appendStderr(stderrDecoder.end());
+    };
+    const scheduleStderrFlush = () => {
+      if (stderrDecoderFlushed || stderrDrainTimeout) return;
+      stderrDrainTimeout = setTimeout(flushStderr, WORKER_STDERR_FINAL_DRAIN_MS);
+      stderrDrainTimeout.unref();
     };
 
     const start = (callbacks: WorkerRpcSessionCallbacks) => {
@@ -104,6 +114,7 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
         },
       });
       child.stderr.on('data', (chunk: Buffer | string) => {
+        if (stderrDecoderFlushed) return;
         appendStderr(typeof chunk === 'string' ? chunk : stderrDecoder.write(chunk));
       });
       child.stderr.on('end', flushStderr);
@@ -116,8 +127,8 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
           ),
         );
       });
-      child.on('close', (exitCode, signal) => {
-        flushStderr();
+      child.on('exit', (exitCode, signal) => {
+        scheduleStderrFlush();
         rpcRequests.failPending(
           `Worker exited with code ${String(exitCode)} and signal ${String(signal)}`,
         );

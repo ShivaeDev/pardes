@@ -6264,6 +6264,57 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
+  test('rearms a continuing watcher failure from authoritative acknowledgement before cached inbox refresh', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const pullRequestId = published.pullRequest.id;
+    const stateDir = activationStateDir(fixture.entries);
+    const durableStore = await Effect.runPromise(makeFileSystemStateStore(stateDir));
+
+    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+    const firstWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
+    );
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+
+    // Model the narrow post-acknowledgement window: durable acknowledgement has
+    // committed, but the controller namespace still retains its prior inbox row.
+    await Effect.runPromise(
+      durableStore.mutate((state) => {
+        const { inboxHandoff: _inboxHandoff, inboxWake: _inboxWake, ...withoutDelivery } = state;
+        return Effect.succeed([undefined, { ...withoutDelivery, inbox: [] }] as const);
+      }),
+    );
+    expect((await Effect.runPromise(durableStore.load())).inbox).toEqual([]);
+    expect(controller.snapshot()?.inbox).toContainEqual(firstWarning);
+
+    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+
+    const durable = await Effect.runPromise(durableStore.load());
+    const rearmedWarnings = durable.inbox.filter(({ type }) => type === 'watcher_failed');
+    expect(rearmedWarnings).toHaveLength(1);
+    expect(rearmedWarnings[0]?.id).not.toBe(firstWarning.id);
+    expect(rearmedWarnings[0]?.summary).toBe(firstWarning.summary);
+    expect(durable.inboxWake?.cursor).toBe(rearmedWarnings[0]?.id);
+    expect(controller.snapshot()?.inbox).toEqual(rearmedWarnings);
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(2);
+    expect(managerEvents(stateDir).filter(({ type }) => type === 'watcher_failed')).toHaveLength(2);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('lets injected rate-budget ownership consume rate-limit symptoms quietly', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));

@@ -2,6 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { Effect, type Scope } from 'effect';
+import { gitEnvironmentForExplicitCwd } from '../git/index.ts';
 import {
   type ChildLaunchProfile,
   childProfileEnvironment,
@@ -102,12 +103,12 @@ export function spawnWorkerProcess<Input extends WorkerProcessInput>(
 ): Effect.Effect<WorkerProcess, WorkerProcessError, Scope.Scope> {
   const command = options.command ?? 'pi';
   const args = options.args?.(input) ?? defaultWorkerProcessArgs(input);
-  const env = {
+  const env = gitEnvironmentForExplicitCwd({
     ...process.env,
     ...options.env,
     PARDES_WORKTREE_ROOT: input.cwd,
     ...childProfileEnvironment(input.childProfile),
-  };
+  });
   const acquire = Effect.callback<WorkerProcess, WorkerProcessError>((resume) => {
     const child = spawn(command, [...args], { cwd: input.cwd, env, stdio: 'pipe' });
     let settled = false;

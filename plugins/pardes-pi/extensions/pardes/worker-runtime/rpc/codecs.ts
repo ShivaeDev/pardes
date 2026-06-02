@@ -1,10 +1,13 @@
 import { Option, Schema } from 'effect';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
+import { CHILD_QUESTION_CONTEXT_MAX_CHARS, CHILD_QUESTION_MAX_CHARS } from '../child-profile.ts';
 import {
   type WorkerProtocolDiagnostic,
   workerCompactionFailure,
   workerProtocolDiagnostic,
 } from '../diagnostics.ts';
+
+const MAX_PROTOCOL_ERROR_LENGTH = 240;
 
 export interface WorkerRpcResponse {
   readonly type: 'response';
@@ -143,8 +146,10 @@ const PardesReportPayloadSchema = Schema.Struct({
   type: Schema.Literal('report'),
 });
 const PardesQuestionPayloadSchema = Schema.Struct({
-  context: Schema.optionalKey(Schema.String),
-  question: NonEmptyString,
+  context: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(CHILD_QUESTION_CONTEXT_MAX_CHARS)),
+  ),
+  question: NonEmptyString.check(Schema.isMaxLength(CHILD_QUESTION_MAX_CHARS)),
   type: Schema.Literal('question'),
 });
 const WorkerSessionStatsSchema = Schema.Struct({
@@ -220,4 +225,11 @@ export function rpcPayloadDiagnostic(
   return originalChars === undefined
     ? workerProtocolDiagnostic('invalid_rpc_payload', message)
     : workerProtocolDiagnostic('invalid_rpc_payload', message, originalChars);
+}
+
+/** Bound one legacy caller preview; production protocol diagnostics remain body-free. */
+export function boundedProtocolErrorMessage(message: string): string {
+  return message.length <= MAX_PROTOCOL_ERROR_LENGTH
+    ? message
+    : `${message.slice(0, MAX_PROTOCOL_ERROR_LENGTH - 1)}…`;
 }

@@ -6,8 +6,10 @@ import {
   type AgentRecord,
   type AgentStatus,
   AUTONOMOUS_INBOX_PATH,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   INBOX_TWO_PATH_GUIDANCE,
   initialManagerState,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerController,
   type ManagerEvent,
   type PluginActivationStatus,
@@ -266,6 +268,11 @@ describe('Pardes model-visible tools', () => {
       minLength: 1,
     });
     assertLexicalId('inbox_get', 'eventId');
+    expect(tools.get('inbox_get')?.parameters.properties.offset).toMatchObject({ minimum: 0 });
+    expect(tools.get('inbox_get')?.parameters.properties.maxChars).toMatchObject({
+      maximum: REPORT_EXCERPT_MAX_CHARS,
+      minimum: 1,
+    });
     assertLexicalId('inbox_acknowledge', 'cursor');
     expect(tools.get('await_user_feedback')?.parameters.properties.prompt).toMatchObject({
       maxLength: 256,
@@ -651,8 +658,8 @@ describe('Pardes model-visible tools', () => {
     expect(explicit.content[0]?.text).toBe(
       [
         'activation safety: shared inputs changed · fresh spawn, revive, verifier launch, and child reload allowed',
-        'pinned child runtime: cccccccccccc (2 input files)',
-        'shared child inputs: loaded aaaaaaaaaaaa (2 source files) · current bbbbbbbbbbbb (2 source files)',
+        `pinned child runtime: ${'c'.repeat(64)} (2 input files)`,
+        `shared child inputs: loaded ${'a'.repeat(64)} (2 source files) · current ${'b'.repeat(64)} (2 source files)`,
         'source control: loaded clean · current dirty',
         'operator boundary: coordinate pull/reload manually; Pardes does not fetch, pull, or reload plugin sources automatically',
       ].join('\n'),
@@ -761,11 +768,11 @@ describe('Pardes model-visible tools', () => {
     expect(explicit.content[0]?.text).toBe(
       [
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
-        'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
+        `default branch main · advertised:${'a'.repeat(40)} · hosted:${'a'.repeat(40)} [current/complete] · ci:failing · checks:2 · fail:1`,
         'rate scope: GitHub.com repository pinned/controller lifetime · caller must not switch gh credentials in place · reload manager first for fresh cache',
         'rate budget: graphql:100/5000 [near_exhaustion/graphql] · reset:2026-06-01T01:00:00Z',
         'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher-last-disposition:deferred(proactive_throttle)',
-        '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
+        `#42 · audited:${'b'.repeat(40)} · observed:${'b'.repeat(40)} [current] · hosted:${'c'.repeat(40)} [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1`,
         '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
       ].join('\n'),
@@ -1294,20 +1301,20 @@ describe('Pardes model-visible tools', () => {
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(
-      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · software refinement pending:1',
+      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · ack-safe cursor:event-1/1 · frontier:event-1/1 · blocked:1 · barrier:event-blocked-merge(software_refinement_pending)',
     );
     expect(pending.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
     expect(pending.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
     expect(pending.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
     expect(pending.content[0]?.text).toContain(
-      'event-1 [review_feedback] Review gate needs a follow-up.',
+      'event-1 [review_feedback] · external-metadata · drill-down: inbox_get({ eventId:event-1 })',
     );
     expect(pending.content[0]?.text).toContain(
-      'event-blocked-merge [merged] · software refinement pending; do not acknowledge #42 externally merged; bounded retirement outcome is pending.',
+      'event-blocked-merge [merged] · external-metadata · refinement barrier:software_refinement_pending; do not acknowledge · drill-down: inbox_get({ eventId:event-blocked-merge })',
     );
 
     const summary = await status.execute('call-3', {}, signal, onUpdate, ctx);
-    expect(summary.content[0]?.text).toContain('· software refinement pending:1');
+    expect(summary.content[0]?.text).toContain('· blocked:1');
     expect(summary.content[0]?.text).toContain(
       '! inbox event-blocked-merge [merged] · software refinement pending; judge first: inbox_get({ eventId }); do not acknowledge',
     );
@@ -1801,7 +1808,14 @@ describe('Pardes model-visible tools', () => {
       },
     };
     const status: AgentStatus = { agent: detailedAgent, runtime: runtime() };
-    const manager = { agentStatus: () => Effect.succeed(status) } as unknown as ManagerController;
+    const provenanceRequests: boolean[] = [];
+    const manager = {
+      agentStatus: (_agentId: string, _ctx: ExtensionContext, includeGitProvenance = false) =>
+        Effect.sync(() => {
+          provenanceRequests.push(includeGitProvenance);
+          return status;
+        }),
+    } as unknown as ManagerController;
     const { pi, tools } = registry();
     registerAgentTools(pi, manager);
     const agentStatus = requiredValue(tools.get('agent_status'));
@@ -1817,8 +1831,10 @@ describe('Pardes model-visible tools', () => {
       'latest git audit: succeeded · completion · dirty worktree',
     );
     expect(audit.content[0]?.text).toContain(
-      'changed paths (2): extensions/pardes/tools/index.ts, extensions/pardes/tools/tools.test.ts',
+      'changed paths: 2 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
     );
+    expect(audit.content[0]?.text).toContain('↳ extensions/pardes/tools/index.ts');
+    expect(audit.content[0]?.text).toContain('↳ extensions/pardes/tools/tools.test.ts');
     expect(audit.content[0]?.text).not.toContain('owned paths');
     expect(audit.content[0]?.text).not.toContain('scope violations');
     expect(audit.content[0]?.text).not.toContain('sessionDir');
@@ -1840,6 +1856,136 @@ describe('Pardes model-visible tools', () => {
     expect(live.content[0]?.text).not.toContain('diagnostic stderr');
     expect(live.content[0]?.text).not.toContain('sessionFile');
     expect(live.details).toBeUndefined();
+    expect(provenanceRequests).toEqual([true, false]);
+  });
+
+  test('keeps additive merge context distinct from complete first-N cooperative candidate paths', async () => {
+    const baselineSha = 'a'.repeat(40);
+    const headSha = 'b'.repeat(40);
+    const authoredPaths = [
+      'src/authored-a.ts',
+      'src/authored-b.ts',
+      'src/authored-c.ts',
+      'src/authored-d.ts',
+      'src/authored-e.ts',
+      'src/authored-f.ts',
+    ];
+    const detailedAgent: AgentRecord = {
+      ...worker(),
+      changedPaths: [...authoredPaths, 'src/main-only.ts'],
+      gitAudit: {
+        checkedAt: createdAt,
+        dirty: false,
+        status: 'succeeded',
+        trigger: 'completion',
+      },
+    };
+    const manager = {
+      agentStatus: () =>
+        Effect.succeed({
+          agent: detailedAgent,
+          gitProvenance: {
+            attribution: 'cooperative_first_parent' as const,
+            bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+            branchPointSha: baselineSha,
+            firstParentNonMergeCommitCount: 2,
+            firstParentNonMergePaths: authoredPaths,
+            headSha,
+            latestDelta: {
+              changedPaths: ['src/main-only.ts'],
+              commitSha: headSha,
+              kind: 'merge_commit' as const,
+            },
+            mergeCommitCount: 1,
+            mergePaths: ['src/main-only.ts'],
+            status: 'available' as const,
+            totalBranchCommitCount: 3,
+            totalBranchDeltaPaths: [...authoredPaths, 'src/main-only.ts'],
+          },
+          runtime: undefined,
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerAgentTools(pi, manager);
+
+    const result = await requiredValue(tools.get('agent_status')).execute(
+      'call-provenance',
+      { agentId: detailedAgent.id, mode: 'audit' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain(
+      'commit provenance: cooperative first-parent graph · non-merge rows are worker-branch candidates; merge rows are integration context only · bounds:first 200 commits/512 paths/category',
+    );
+    expect(text).toContain('commits: first-parent non-merge:2 · merge-context:1 · total branch:3');
+    expect(text).toContain(`latest delta: merge_commit commit:${headSha} · 1 changed path`);
+    expect(text).toContain(
+      `total branch delta: ${baselineSha}..${headSha} · 7 changed paths · 1 merge-context path`,
+    );
+    expect(text).toContain(
+      'cooperative first-parent non-merge paths: 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
+    );
+    for (const path of authoredPaths.slice(0, 3)) expect(text).toContain(`↳ ${path}`);
+    expect(text).toContain('… +3 more cooperative first-parent non-merge paths omitted');
+    expect(text).not.toContain('src/authored-d.ts');
+    expect(text).not.toContain('src/main-only.ts');
+    expect(text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
+  });
+
+  test('renders explicit dirty provenance refusal with complete first-N live dirty paths', async () => {
+    const dirtyPaths = [
+      'src/dirty-a.ts',
+      'src/dirty-b.ts',
+      'src/dirty-c.ts',
+      'src/dirty-d.ts',
+      'src/dirty-e.ts',
+    ];
+    const detailedAgent: AgentRecord = {
+      ...worker(),
+      changedPaths: [...dirtyPaths, 'src/stale-committed.ts'],
+      gitAudit: {
+        checkedAt: createdAt,
+        dirty: true,
+        status: 'succeeded',
+        trigger: 'completion',
+      },
+    };
+    const manager = {
+      agentStatus: () =>
+        Effect.succeed({
+          agent: detailedAgent,
+          gitProvenance: {
+            bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+            dirtyPaths,
+            reason: 'dirty_worktree' as const,
+            status: 'unavailable' as const,
+          },
+          runtime: undefined,
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerAgentTools(pi, manager);
+
+    const result = await requiredValue(tools.get('agent_status')).execute(
+      'call-dirty-provenance',
+      { agentId: detailedAgent.id, mode: 'audit' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain(
+      'commit provenance: unavailable · reason:dirty_worktree · bounds:first 200 first-parent commits/512 paths/category',
+    );
+    expect(text).toContain('dirty paths: 5 paths');
+    for (const path of dirtyPaths.slice(0, 4)) expect(text).toContain(`↳ ${path}`);
+    expect(text).toContain('… +1 more dirty paths omitted');
+    expect(text).not.toContain('src/dirty-e.ts');
+    expect(text).not.toContain('src/stale-committed.ts');
   });
 
   test('registers narrow guarded child lifecycle tools with bounded path-free projections and distinct reload semantics', async () => {
@@ -2022,6 +2168,7 @@ describe('Pardes model-visible tools', () => {
       createPullRequest: () =>
         Effect.succeed({
           action: 'created' as const,
+          browserHandoff: { requestedMode: 'none' as const, status: 'not_requested' as const },
           openedInBrowser: false,
           pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
         }),
@@ -2030,7 +2177,7 @@ describe('Pardes model-visible tools', () => {
 
     const publish = requiredValue(tools.get('pull_request_create'));
     expect(publish.description).toBe(
-      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Rejects completed or otherwise non-active workstreams. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
     );
     expect(publish.promptSnippet).toBe(
       'Publish a committed Pardes worker branch as a pull-request review gate',
@@ -2048,7 +2195,17 @@ describe('Pardes model-visible tools', () => {
       'Reviewer-first pull-request body with concise Why / How / Decisions / Callouts content',
     );
     expect(publish.parameters.properties.baseBranch?.maxLength).toBe(255);
+    expect(publish.parameters.required).not.toContain('browserMode');
     expect(publish.parameters.required).not.toContain('openInBrowser');
+    expect(publish.parameters.properties.browserMode?.anyOf).toEqual([
+      { const: 'none', type: 'string' },
+      { const: 'background', type: 'string' },
+      { const: 'foreground', type: 'string' },
+    ]);
+    expect(publish.parameters.properties.browserMode?.description).toContain("Defaults to 'none'");
+    expect(publish.parameters.properties.openInBrowser?.description).toContain(
+      'Compatibility alias',
+    );
     expect([...tools.keys()].some((name) => name.includes('merge'))).toBe(false);
     const result = await publish.execute(
       'call-1',
@@ -2064,8 +2221,54 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(result.content[0]?.text).toBe(
-      'Created PR #42: https://github.test/acme/project/pull/42.',
+      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: none.',
     );
+  });
+
+  test('surfaces a safe non-fatal pull_request_create browser handoff failure', async () => {
+    const { pi, tools } = registry();
+    const manager = {
+      createPullRequest: () =>
+        Effect.succeed({
+          action: 'created' as const,
+          browserHandoff: {
+            attemptedMode: 'background' as const,
+            failure: { code: 'ENOENT' as const, kind: 'browser_open_failed' as const },
+            requestedMode: 'background' as const,
+            status: 'failed' as const,
+          },
+          openedInBrowser: false,
+          pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
+        }),
+    } as unknown as ManagerController;
+    registerPullRequestTools(pi, manager);
+
+    const result = await requiredValue(tools.get('pull_request_create')).execute(
+      'call-1',
+      {
+        agentId: 'agent-1',
+        baseBranch: 'main',
+        body: 'Summary.',
+        browserMode: 'background',
+        title: 'Review gate',
+        workstreamId: 'ws-1',
+      },
+      signal,
+      onUpdate,
+      ctx,
+    );
+
+    expect(result.content[0]?.text).toBe(
+      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: background failed safely.',
+    );
+    expect(result.details).toMatchObject({
+      browserHandoff: {
+        attemptedMode: 'background',
+        failure: { code: 'ENOENT', kind: 'browser_open_failed' },
+        requestedMode: 'background',
+        status: 'failed',
+      },
+    });
   });
 
   test('redacts failed pull_request_create body content from bounded tool output', async () => {
@@ -2156,11 +2359,12 @@ describe('Pardes model-visible tools', () => {
     expect(text).toContain(
       'reportId:report-123 · previewTruncated:true · artifact: report_get({ reportId })',
     );
-    expect(text).toContain('event-report [agent_report_completed] child-authored preview:');
     expect(text).toContain(
-      'event-verifier-report [agent_report_completed] advisory-verifier-authored preview:',
+      'event-report [agent_report_completed] · child-authored · drill-down: inbox_get({ eventId:event-report })',
     );
-    expect(text).toContain('child-authored preview:');
+    expect(text).toContain(
+      'event-verifier-report [agent_report_completed] · advisory-verifier-authored · drill-down: inbox_get({ eventId:event-verifier-report })',
+    );
     expect(text).not.toContain('worker summary '.repeat(30));
   });
 
@@ -2354,6 +2558,14 @@ describe('Pardes model-visible tools', () => {
         summary: '#42 has changes-requested review metadata.',
         type: 'review_feedback',
       },
+      'event-question-detail': {
+        agentId: 'agent-1',
+        createdAt,
+        details: 'question-context-tail',
+        id: 'event-question-detail',
+        summary: 'agent-1 asks a blocking question; inspect the durable inbox detail.',
+        type: 'agent_question',
+      },
       'event-report': {
         agentId: 'agent-1',
         createdAt,
@@ -2422,7 +2634,7 @@ describe('Pardes model-visible tools', () => {
     );
     expect(external.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_FEEDBACK_TRUST_LABEL}]`);
     expect(external.content[0]?.text).toContain(
-      'summary(JSON string): "[external GitHub feedback] #42 observed a preview.\\n\\"quoted external preview\\""',
+      'excerpt(JSON string): "[external GitHub feedback] #42 observed a preview.\\n\\"quoted external preview\\""',
     );
     expect(external.content[0]?.text).toContain(
       'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.',
@@ -2440,10 +2652,16 @@ describe('Pardes model-visible tools', () => {
       agentId: 'agent-1',
       createdAt,
       eventId: 'event-external',
+      excerptSource: 'summary',
+      hasMore: false,
+      maxChars: 4_000,
+      offset: 0,
       pullRequestId: 'pr-42',
+      returnedChars: externalSummary.length,
       returnedSummaryChars: externalSummary.length,
       summaryChars: externalSummary.length,
       summaryTruncated: false,
+      totalChars: externalSummary.length,
       trust: 'external_feedback',
       type: 'discussion_feedback',
       workstreamId: 'ws-1',
@@ -2567,6 +2785,29 @@ describe('Pardes model-visible tools', () => {
       trust: 'child_authored',
     });
 
+    const questionExcerpt = await inboxGet.execute(
+      'call-question-detail',
+      { eventId: 'event-question-detail', maxChars: 8, offset: 9 },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(questionExcerpt.content[0]?.text).toContain(
+      'excerptSource: details · offset: 9 · maxChars: 8 · returnedChars: 8 · totalChars: 21 · hasMore: true',
+    );
+    expect(questionExcerpt.content[0]?.text).toContain('excerpt(JSON string): "context-"');
+    expect(questionExcerpt.content[0]?.text).toContain(
+      'next: inbox_get({ eventId: "event-question-detail", offset: 17, maxChars: 8 })',
+    );
+    expect(questionExcerpt.details).toMatchObject({
+      excerptSource: 'details',
+      hasMore: true,
+      maxChars: 8,
+      offset: 9,
+      returnedChars: 8,
+      totalChars: 21,
+    });
+
     const verifierReport = await inboxGet.execute(
       'call-verifier-report',
       { eventId: 'event-verifier-report' },
@@ -2652,6 +2893,58 @@ describe('Pardes model-visible tools', () => {
       summaryChars: 5_000,
       summaryTruncated: true,
     });
+  });
+
+  test('traverses every decodable continuation for a restored legacy summary-only row beyond the detail cap', async () => {
+    const summary = `legacy summary ${'x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 2 * REPORT_EXCERPT_MAX_CHARS)} tail`;
+    const event: ManagerEvent = {
+      createdAt,
+      id: 'event-legacy-large-summary',
+      summary,
+      type: 'legacy_attention',
+    };
+    let maximumRequestedOffset = 0;
+    const manager = {
+      getInboxEvent: (params: { readonly offset?: number }) =>
+        Effect.sync(() => {
+          maximumRequestedOffset = Math.max(maximumRequestedOffset, params.offset ?? 0);
+          if ((params.offset ?? 0) > INBOX_EVENT_EXCERPT_MAX_OFFSET)
+            throw new Error('Continuation pointer was not decodable.');
+          return event;
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerWorkstreamTools(pi, manager);
+    const inboxGet = requiredValue(tools.get('inbox_get'));
+    let offset = 0;
+    let returnedTotal = 0;
+
+    while (true) {
+      const result = await inboxGet.execute(
+        'call-legacy-summary',
+        { eventId: event.id, maxChars: REPORT_EXCERPT_MAX_CHARS, offset },
+        signal,
+        onUpdate,
+        ctx,
+      );
+      const details = result.details as {
+        readonly hasMore: boolean;
+        readonly offset: number;
+        readonly returnedChars: number;
+        readonly totalChars: number;
+      };
+      expect(details).toMatchObject({ offset, totalChars: summary.length });
+      returnedTotal += details.returnedChars;
+      if (!details.hasMore) break;
+      offset += details.returnedChars;
+      expect(offset).toBeLessThanOrEqual(INBOX_EVENT_EXCERPT_MAX_OFFSET);
+      expect(result.content[0]?.text).toContain(
+        `next: inbox_get({ eventId: "${event.id}", offset: ${offset}, maxChars: ${REPORT_EXCERPT_MAX_CHARS} })`,
+      );
+    }
+
+    expect(returnedTotal).toBe(summary.length);
+    expect(maximumRequestedOffset).toBeGreaterThan(MANAGER_EVENT_DETAILS_MAX_CHARS);
   });
 
   test('submits valid feedback but disarms cancelled, blank, and oversized handoffs without consuming unseen rows', async () => {

@@ -8,7 +8,7 @@ import type {
   StorageLeafObservation,
   StorageMetricAccuracy,
 } from '../../storage/index.ts';
-import { boundedRows, CONTROL_PLANE_MAX_ROWS, compactText, plural } from './core.ts';
+import { CONTROL_PLANE_MAX_ROWS, plural, structuralRows, structuralValue } from './core.ts';
 
 function storageLeafLabel(
   leaf: StorageLeafObservation,
@@ -36,15 +36,15 @@ function storageMetric(value: number, accuracy: StorageMetricAccuracy): string {
   return `${accuracy === 'lower_bound' ? '≥' : ''}${value}`;
 }
 
-function shortSha(sha: string | undefined): string {
-  return sha === undefined ? 'unavailable' : sha.slice(0, 12);
+function fullSha(sha: string | undefined): string {
+  return sha === undefined ? 'unavailable' : structuralValue(sha);
 }
 
 function hostedChecksLabel(hostedChecks: GitHubHostedChecksObservation): string {
   if (hostedChecks.availability === 'unavailable') return `unavailable (${hostedChecks.issue})`;
   if (hostedChecks.availability === 'none') return 'none observed';
   const countPrefix = hostedChecks.countAccuracy === 'lower_bound' ? '≥' : '';
-  return `${shortSha(hostedChecks.headSha)} [${hostedChecks.relation}/${hostedChecks.completeness}] · ci:${hostedChecks.ci} · checks:${countPrefix}${hostedChecks.observedCheckCount} · fail:${countPrefix}${hostedChecks.observedFailingCheckCount}`;
+  return `${fullSha(hostedChecks.headSha)} [${hostedChecks.relation}/${hostedChecks.completeness}] · ci:${hostedChecks.ci} · checks:${countPrefix}${hostedChecks.observedCheckCount} · fail:${countPrefix}${hostedChecks.observedFailingCheckCount}`;
 }
 
 function rateLimitBudgetLabel(
@@ -52,7 +52,7 @@ function rateLimitBudgetLabel(
 ): string {
   return budget.availability === 'unavailable'
     ? 'unavailable'
-    : `${budget.remaining}/${budget.limit} [${budget.pressure}/${budget.source}] · reset:${compactText(budget.resetAt, 32)}`;
+    : `${budget.remaining}/${budget.limit} [${budget.pressure}/${budget.source}] · reset:${structuralValue(budget.resetAt)}`;
 }
 
 function rateLimitHealthLines(
@@ -95,23 +95,25 @@ export function githubIntegrationHealthLines(
 ): string {
   const defaultBranch =
     inspection.defaultBranch.availability === 'available'
-      ? `default branch ${compactText(inspection.defaultBranch.defaultBranch, 42)} · advertised:${shortSha(inspection.defaultBranch.advertisedHeadSha)} · hosted:${hostedChecksLabel(inspection.defaultBranch.hostedChecks)}`
+      ? `default branch ${structuralValue(inspection.defaultBranch.defaultBranch)} · advertised:${fullSha(inspection.defaultBranch.advertisedHeadSha)} · hosted:${hostedChecksLabel(inspection.defaultBranch.hostedChecks)}`
       : `default branch unavailable (${inspection.defaultBranch.issue})`;
-  return boundedRows(
-    [
-      `github integration health: opt-in read-only hosted metadata · ${plural(inspection.inspectedPullRequestCount, 'review gate')} inspected${inspection.omittedPullRequestCount === 0 ? '' : ` · ${inspection.omittedPullRequestCount} omitted`}`,
-      defaultBranch,
-      ...rateLimitHealthLines(inspection),
-      ...inspection.pullRequests.flatMap((pullRequest) => {
+  return structuralRows(
+    {
+      authoredLines: [
+        `github integration health: opt-in read-only hosted metadata · ${plural(inspection.inspectedPullRequestCount, 'review gate')} inspected${inspection.omittedPullRequestCount === 0 ? '' : ` · ${inspection.omittedPullRequestCount} omitted`}`,
+        defaultBranch,
+        ...rateLimitHealthLines(inspection),
+      ],
+      itemLines: inspection.pullRequests.map((pullRequest) => {
         const label =
           pullRequest.number === undefined
-            ? compactText(pullRequest.id, 42)
+            ? structuralValue(pullRequest.id)
             : `#${pullRequest.number}`;
         const sharedFailure = canRenderSharedFailureHint(inspection, pullRequest)
           ? ` · likely-main-shared-failures:${pullRequest.sharedFailingWorkflowCount}`
           : '';
         return [
-          `${label} · audited:${shortSha(pullRequest.auditedHeadSha)} · observed:${shortSha(pullRequest.observedHeadSha)} [${pullRequest.pullRequestHead}] · hosted:${hostedChecksLabel(pullRequest.hostedChecks)}${sharedFailure}`,
+          `${label} · audited:${fullSha(pullRequest.auditedHeadSha)} · observed:${fullSha(pullRequest.observedHeadSha)} [${pullRequest.pullRequestHead}] · hosted:${hostedChecksLabel(pullRequest.hostedChecks)}${sharedFailure}`,
           ...(pullRequest.watcherFailure === undefined
             ? []
             : [
@@ -119,8 +121,10 @@ export function githubIntegrationHealthLines(
               ]),
         ];
       }),
-      `bounds: first ${inspection.bounds.maxPullRequests} open review gates · first ${inspection.bounds.maxHostedChecksPerRef} server-selected hosted checks per ref · no logs, bodies, fetch, or pull`,
-    ],
+      retrievalHintLines: [
+        `bounds: first ${inspection.bounds.maxPullRequests} open review gates · first ${inspection.bounds.maxHostedChecksPerRef} server-selected hosted checks per ref · no logs, bodies, fetch, or pull`,
+      ],
+    },
     maxRows ?? CONTROL_PLANE_MAX_ROWS,
   );
 }
@@ -150,21 +154,25 @@ export function storageLines(storage: StorageInspection, maxRows?: number): stri
     storage.reports.issue
       ? ` (${storage.reports.issue})`
       : '';
-  return boundedRows(
-    [
-      `storage: read-only bounded inspection · root ${storageLeafLabel(storage.root, 'directory')}`,
-      `state: ${storageLeafLabel(storage.state, 'regular_file')} · ${storageBytes(storage.state)}`,
-      `events: ${storageLeafLabel(storage.events, 'regular_file')} · ${storageBytes(storage.events)} · ${storageMetric(storage.events.eventLines, storage.events.eventLinesAccuracy)} event lines${eventIssue}${eventScan}`,
-      `reports: ${storageLeafLabel(storage.reports, 'directory')} · ${storageMetric(storage.reports.reports, storage.reports.metricsAccuracy)} reports · ${storageMetric(storage.reports.reportBytes, storage.reports.metricsAccuracy)} bytes${reportIssue}${otherReports}${reportScan}`,
-      `bounds: events first ${storage.bounds.eventScanMaxBytes} bytes · reports first ${storage.bounds.reportScanMaxEntries} direct entries · no artifact contents returned`,
-    ],
+  return structuralRows(
+    {
+      authoredLines: [
+        `storage: read-only bounded inspection · root ${storageLeafLabel(storage.root, 'directory')}`,
+        `state: ${storageLeafLabel(storage.state, 'regular_file')} · ${storageBytes(storage.state)}`,
+        `events: ${storageLeafLabel(storage.events, 'regular_file')} · ${storageBytes(storage.events)} · ${storageMetric(storage.events.eventLines, storage.events.eventLinesAccuracy)} event lines${eventIssue}${eventScan}`,
+        `reports: ${storageLeafLabel(storage.reports, 'directory')} · ${storageMetric(storage.reports.reports, storage.reports.metricsAccuracy)} reports · ${storageMetric(storage.reports.reportBytes, storage.reports.metricsAccuracy)} bytes${reportIssue}${otherReports}${reportScan}`,
+      ],
+      retrievalHintLines: [
+        `bounds: events first ${storage.bounds.eventScanMaxBytes} bytes · reports first ${storage.bounds.reportScanMaxEntries} direct entries · no artifact contents returned`,
+      ],
+    },
     maxRows,
   );
 }
 
 function pluginTreeLabel(observation: PluginSourceObservation): string {
   return observation.tree.kind === 'known'
-    ? `${observation.tree.fingerprint.slice(0, 12)} (${plural(observation.tree.sourceFileCount, 'source file')})`
+    ? `${structuralValue(observation.tree.fingerprint)} (${plural(observation.tree.sourceFileCount, 'source file')})`
     : `unknown (${observation.tree.issue})`;
 }
 
@@ -175,16 +183,18 @@ export function activationLines(status: PluginActivationStatus): string {
       : 'fresh spawn, revive, verifier launch, and child reload blocked';
   const pinned =
     status.snapshot.state === 'ready'
-      ? `${status.snapshot.identity.slice(0, 12)} (${plural(status.snapshot.inputFileCount, 'input file')})`
+      ? `${structuralValue(status.snapshot.identity)} (${plural(status.snapshot.inputFileCount, 'input file')})`
       : `unavailable (${status.snapshot.issue})`;
-  return boundedRows(
-    [
-      `activation safety: shared inputs ${status.status} · ${lifecycle}`,
-      `pinned child runtime: ${pinned}`,
-      `shared child inputs: loaded ${pluginTreeLabel(status.loaded)} · current ${pluginTreeLabel(status.current)}`,
-      `source control: loaded ${status.loaded.sourceControl} · current ${status.current.sourceControl}`,
-      'operator boundary: coordinate pull/reload manually; Pardes does not fetch, pull, or reload plugin sources automatically',
-    ],
+  return structuralRows(
+    {
+      authoredLines: [
+        `activation safety: shared inputs ${status.status} · ${lifecycle}`,
+        `pinned child runtime: ${pinned}`,
+        `shared child inputs: loaded ${pluginTreeLabel(status.loaded)} · current ${pluginTreeLabel(status.current)}`,
+        `source control: loaded ${status.loaded.sourceControl} · current ${status.current.sourceControl}`,
+        'operator boundary: coordinate pull/reload manually; Pardes does not fetch, pull, or reload plugin sources automatically',
+      ],
+    },
     5,
   );
 }

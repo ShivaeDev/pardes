@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { Effect } from 'effect';
+import { gitEnvironmentForExplicitCwd } from '../git/index.ts';
 import { GitHubCommandError } from './errors.ts';
 import { githubCommandFailureDiagnosticHint } from './watcher-diagnostics.ts';
 
@@ -119,7 +120,13 @@ export function makeExecFileGitHubCommandRunner(): GitHubCommandRunnerShape {
             execFile(
               command,
               args,
-              { cwd, encoding: 'utf8', maxBuffer: GITHUB_COMMAND_MAX_BUFFER_BYTES, signal },
+              {
+                cwd,
+                encoding: 'utf8',
+                maxBuffer: GITHUB_COMMAND_MAX_BUFFER_BYTES,
+                signal,
+                ...(command === 'git' ? { env: gitEnvironmentForExplicitCwd() } : {}),
+              },
               (error, stdout, stderr) => {
                 if (error) {
                   reject(

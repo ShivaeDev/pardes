@@ -1,13 +1,14 @@
 import { Effect, Exit, Option } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
+import { CHILD_QUESTION_CONTEXT_MAX_CHARS, CHILD_QUESTION_MAX_CHARS } from '../child-profile.ts';
 import {
   renderWorkerCompactionFailure,
   renderWorkerProtocolDiagnostic,
   type WorkerCompactionFailure,
   type WorkerProtocolDiagnostic,
 } from '../diagnostics.ts';
-import { rpcPayloadDiagnostic, WorkerRpcWire } from './codecs.ts';
+import { boundedProtocolErrorMessage, rpcPayloadDiagnostic, WorkerRpcWire } from './codecs.ts';
 
 describe('worker RPC wire schema', () => {
   test('keeps tolerant envelope dispatch separate from targeted response decoding', () => {
@@ -195,5 +196,38 @@ describe('worker RPC wire schema', () => {
       expect(rendered).not.toContain('undefined');
       expect(rendered).not.toContain('Infinity');
     }
+  });
+
+  test('accepts bounded child questions and rejects oversized question or context fields', () => {
+    const bounded = {
+      context: 'c'.repeat(CHILD_QUESTION_CONTEXT_MAX_CHARS),
+      question: 'q'.repeat(CHILD_QUESTION_MAX_CHARS),
+      type: 'question',
+    } as const;
+
+    expect(Option.isSome(WorkerRpcWire.decodePardesQuestionPayload(bounded))).toBe(true);
+    expect(
+      Option.isNone(
+        WorkerRpcWire.decodePardesQuestionPayload({
+          ...bounded,
+          question: `${bounded.question}q`,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Option.isNone(
+        WorkerRpcWire.decodePardesQuestionPayload({
+          ...bounded,
+          context: `${bounded.context}c`,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  test('bounds protocol error previews', () => {
+    expect(boundedProtocolErrorMessage('short error')).toBe('short error');
+    const bounded = boundedProtocolErrorMessage('x'.repeat(300));
+    expect(bounded).toHaveLength(240);
+    expect(bounded.endsWith('…')).toBe(true);
   });
 });

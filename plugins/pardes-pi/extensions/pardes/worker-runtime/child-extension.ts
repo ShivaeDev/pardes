@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import {
+  CHILD_QUESTION_CONTEXT_MAX_CHARS,
+  CHILD_QUESTION_MAX_CHARS,
   CHILD_REPORT_DETAILS_MAX_CHARS,
   CHILD_REPORT_SUMMARY_MAX_CHARS,
   childProfileFromEnvironment,
@@ -28,8 +30,34 @@ const GIT_DIAGNOSTIC_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const GIT_DIAGNOSTIC_MAX_CHARS = 1_000;
 const GIT_HEAD_MAX_CHARS = 1_000;
 const GIT_INSPECTION_STDERR_MAX_BYTES = 64 * 1_024;
+const GIT_INSPECTION_TIMEOUT_MS = 10_000;
 export const GIT_INSPECTION_STDOUT_MAX_BYTES = 16 * 1_024 * 1_024;
 export const VERIFIER_CHANGED_PATHS_MAX_CHARS = 12_000;
+const GIT_EXPLICIT_CWD_UNSAFE_ENVIRONMENT_VARIABLES = [
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_ATTR_SOURCE',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_DIR',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_GRAFT_FILE',
+  'GIT_IMPLICIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_NAMESPACE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_PREFIX',
+  'GIT_QUARANTINE_PATH',
+  'GIT_REPLACE_REF_BASE',
+  'GIT_SHALLOW_FILE',
+  'GIT_WORK_TREE',
+] as const;
+
+/** Keep the pinned child extension self-contained while mirroring the Git boundary policy. */
+function gitEnvironmentForExplicitCwd(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const name of GIT_EXPLICIT_CWD_UNSAFE_ENVIRONMENT_VARIABLES) delete environment[name];
+  return environment;
+}
 
 function nearestExistingAncestor(path: string): string {
   let candidate = path;
@@ -207,7 +235,12 @@ function gitRows(
   maxChars: number,
 ): Promise<GitRowEvidence> {
   return new Promise((resolve, reject) => {
-    const child = spawn('git', [...args], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('git', [...args], {
+      cwd: root,
+      env: gitEnvironmentForExplicitCwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: GIT_INSPECTION_TIMEOUT_MS,
+    });
     const collector = gitRowCollector(maxChars);
     const stdoutDecoder = new StringDecoder('utf8');
     const stderrChunks: Buffer[] = [];
@@ -439,8 +472,8 @@ export default function pardesWorker(pi: ExtensionAPI): void {
     name: 'ask_manager',
     parameters: Type.Object(
       {
-        context: Type.Optional(Type.String()),
-        question: Type.String({ minLength: 1 }),
+        context: Type.Optional(Type.String({ maxLength: CHILD_QUESTION_CONTEXT_MAX_CHARS })),
+        question: Type.String({ maxLength: CHILD_QUESTION_MAX_CHARS, minLength: 1 }),
       },
       { additionalProperties: false },
     ),

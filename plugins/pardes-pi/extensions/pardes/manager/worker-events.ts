@@ -14,6 +14,7 @@ import {
   type AgentGitAuditTrigger,
   type AgentRecord,
   currentVerificationTerminalReportStatus,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerEvent,
   type VerificationRecord,
 } from './domain.ts';
@@ -28,7 +29,11 @@ export type ReportArtifactPersistence =
       readonly reportId: string;
       readonly reference?: AgentReportReference;
     }
-  | { readonly status: 'failed'; readonly failureSummary: string };
+  | {
+      readonly status: 'failed';
+      readonly failureSummary: string;
+      readonly failureDetails?: string;
+    };
 
 export type HandoffAuditOutcome =
   | {
@@ -39,12 +44,15 @@ export type HandoffAuditOutcome =
   | {
       readonly status: 'failed';
       readonly gitAudit: Extract<AgentGitAudit, { readonly status: 'failed' }>;
+      readonly failureDetails: string;
     };
 
 export interface WorkerEventSummary {
   readonly type: string;
   readonly summary: string;
   readonly actionable: boolean;
+  /** Lossless non-report prose retrieved only through explicit inbox_get pagination. */
+  readonly details?: string;
   readonly reportPreviewTruncated?: boolean;
   readonly reportPreviewChars?: ReportTextCounts;
   readonly reportPreviewOmissionReason?: typeof REPORT_SUMMARY_PREVIEW_OMISSION_REASON;
@@ -138,6 +146,13 @@ export function boundedFailureSummary(error: unknown): string {
   return truncateModelFacingText(formatPardesError(error));
 }
 
+/** Preserve accepted prose exactly; replace rejected bulk input with one structural diagnostic. */
+export function acceptedDurableEventDetails(details: string, source: string): string {
+  return details.length <= MANAGER_EVENT_DETAILS_MAX_CHARS
+    ? details
+    : `${source} rejected before durable persistence: ${details.length} chars exceeds the ${MANAGER_EVENT_DETAILS_MAX_CHARS}-char inbox detail cap.`;
+}
+
 export function boundedEventSummary(parts: ReadonlyArray<string>): string {
   const summary = normalizeModelFacingText(parts.filter(Boolean).join(' '));
   return omissionAwareBound(summary, BOUNDED_EVENT_SUMMARY_LIMIT, 'manager_event_summary_limit');
@@ -161,6 +176,10 @@ export function failedHandoffAudit(
   error: unknown,
 ): HandoffAuditOutcome {
   return {
+    failureDetails: acceptedDurableEventDetails(
+      formatPardesError(error),
+      'managed-worktree Git audit diagnostic',
+    ),
     gitAudit: {
       checkedAt,
       failureSummary: boundedFailureSummary(error),
@@ -218,11 +237,28 @@ export function workerEventSummary(
         : reportPersistence?.status === 'failed'
           ? 'agent_report_persist_failed'
           : `agent_report_${event.status}`;
+    const details = acceptedDurableEventDetails(
+      [
+        ...(reportPersistence?.status === 'failed'
+          ? [
+              `report summary(JSON string): ${JSON.stringify(event.summary)}`,
+              `report artifact persistence diagnostic(JSON string): ${JSON.stringify(reportPersistence.failureDetails ?? reportPersistence.failureSummary)}`,
+            ]
+          : []),
+        ...(audit?.status === 'failed'
+          ? [
+              `managed-worktree Git audit diagnostic(JSON string): ${JSON.stringify(audit.failureDetails)}`,
+            ]
+          : []),
+      ].join('\n'),
+      'worker report diagnostic',
+    );
     return {
       actionable:
         event.status !== 'progress' ||
         reportPersistence?.status === 'failed' ||
         audit?.status === 'failed',
+      ...(details.length === 0 ? {} : { details }),
       summary: boundedEventSummary([
         `${event.agentId}: ${reportSummaryPreview(event.summary, reportPersistence)}`,
         reportPersistenceSuffix(reportPersistence),
@@ -248,7 +284,14 @@ export function workerEventSummary(
   if (event.type === 'question')
     return {
       actionable: true,
-      summary: `${event.agentId} asks: ${omissionAwareModelFacingText(event.question)}`,
+      details: acceptedDurableEventDetails(
+        JSON.stringify({
+          question: event.question,
+          ...(event.context === undefined ? {} : { context: event.context }),
+        }),
+        'child question detail',
+      ),
+      summary: `${event.agentId} asks a blocking question; inspect the durable inbox detail.`,
       type: 'agent_question',
     };
   if (event.type === 'unexpected_exit')
@@ -260,14 +303,18 @@ export function workerEventSummary(
   if (event.type === 'protocol_error')
     return {
       actionable: true,
-      summary: `${event.agentId} emitted invalid RPC JSON: ${renderWorkerProtocolDiagnostic(
-        event.diagnostic ??
-          workerProtocolDiagnostic(
-            'legacy_adapter_text_omitted',
-            'Legacy protocol-error adapter text was omitted.',
-            event.message?.length,
-          ),
-      )}`,
+      details: acceptedDurableEventDetails(
+        renderWorkerProtocolDiagnostic(
+          event.diagnostic ??
+            workerProtocolDiagnostic(
+              'legacy_adapter_text_omitted',
+              'Legacy protocol-error adapter text was omitted.',
+              event.message?.length,
+            ),
+        ),
+        'child RPC protocol diagnostic',
+      ),
+      summary: `${event.agentId} emitted invalid RPC JSON; inspect the durable inbox diagnostic.`,
       type: 'agent_protocol_error',
     };
   if (event.type === 'status' && event.status === 'idle') {
@@ -299,6 +346,26 @@ export function hasPendingAgentAttention(
 ): boolean {
   return inbox.some(
     (event) => event.type === candidate.type && event.agentId === candidate.agentId,
+  );
+}
+
+/** Suppress only an equivalent pending row; acknowledgement or a changed canonical outcome rearms it. */
+export function hasPendingCanonicalAttention(
+  inbox: ReadonlyArray<ManagerEvent>,
+  candidate: ManagerEvent,
+): boolean {
+  return inbox.some(
+    (event) =>
+      event.type === candidate.type &&
+      event.agentId === candidate.agentId &&
+      event.pullRequestId === candidate.pullRequestId &&
+      event.verificationId === candidate.verificationId &&
+      event.workstreamId === candidate.workstreamId &&
+      event.summary === candidate.summary &&
+      (event.details === candidate.details ||
+        (candidate.type === 'pull_request_auto_sync_attention' &&
+          ((event.details === undefined && candidate.details === candidate.summary) ||
+            (candidate.details === undefined && event.details === event.summary)))),
   );
 }
 

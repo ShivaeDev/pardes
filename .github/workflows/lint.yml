@@ -6,8 +6,12 @@ name: lint
 # tests. Read-only token, actions pinned to full commit SHAs. Runs on PRs (and
 # pushes to main as a backstop).
 #
-# NOTE: this workflow only REPORTS pass/fail. To actually block merge, add it as a
-# required status check in the repo ruleset (a repo setting, not YAML).
+# NOTE: this workflow only REPORTS pass/fail. To actually block human PR merges,
+# add it as a required status check in the repo ruleset (a repo setting, not YAML).
+# version-bump.yml creates its trusted bot PR with GITHUB_TOKEN, whose generated
+# events cannot launch this workflow; it runs the same `bun run ready` gate inline
+# before push. A blanket hosted-check requirement covering those bot PRs therefore
+# blocks auto-publication closed unless repo policy accounts for that trusted path.
 
 on:
   pull_request:

@@ -1,10 +1,13 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
+import {
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  runGitFixture,
+} from '../test-support.ts';
 import {
   GitHubCommandError,
   makeGitHubHostedMetadataAdapter,
@@ -289,11 +292,16 @@ describe('GitHub publication boundary', () => {
     const root = mkdtempSync(join(tmpdir(), 'pardes-publication-claim-descendant-'));
     const origin = join(root, 'origin.git');
     const project = join(root, 'project');
-    const git = (...args: ReadonlyArray<string>) =>
-      execFileSync('git', args, { cwd: project, encoding: 'utf8' }).trim();
+    const git = (...args: string[]) => runGitFixture(project, ...args);
+    const restoreInheritedGitProtocolEnvironment =
+      normalizeControlledLocalRemoteProtocolEnvironment();
+    process.env.GIT_ALLOW_PROTOCOL = 'https';
+    process.env.GIT_PROTOCOL_FROM_USER = '0';
+    const restorePoisonedGitProtocolEnvironment =
+      normalizeControlledLocalRemoteProtocolEnvironment();
     try {
-      execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-      execFileSync('git', ['init', '-b', 'main', project]);
+      runGitFixture(root, 'init', '--bare', '-b', 'main', origin);
+      runGitFixture(root, 'init', '-b', 'main', project);
       git('config', 'user.email', 'pardes@example.test');
       git('config', 'user.name', 'Pardes Test');
       writeFileSync(join(project, 'README.md'), 'fixture\n');
@@ -331,6 +339,8 @@ describe('GitHub publication boundary', () => {
         'refs/heads/actor/pardes/readable-branch-ux',
       );
     } finally {
+      restorePoisonedGitProtocolEnvironment();
+      restoreInheritedGitProtocolEnvironment();
       rmSync(root, { force: true, recursive: true });
     }
   });
@@ -436,17 +446,16 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(1);
   });
 
-  test('pushes exactly the audited SHA to the proved immutable remote target before creating a ready-for-review PR', async () => {
+  test('pushes exactly the audited SHA before creating a verified ready-for-review PR', async () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
       result('https://github.com/acme/project/pull/42\n'),
       result(JSON.stringify(pullRequest())),
-      result(),
     ]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
 
-    const published = await Effect.runPromise(service.publish({ ...input, openInBrowser: true }));
+    const published = await Effect.runPromise(service.publish(input));
 
     expect(published).toEqual({
       action: 'created',
@@ -455,7 +464,6 @@ describe('GitHub publication boundary', () => {
       draft: false,
       headBranch: input.headBranch,
       number: 42,
-      openedInBrowser: true,
       status: 'open',
       title: input.title,
       url: 'https://github.com/acme/project/pull/42',
@@ -516,11 +524,7 @@ describe('GitHub publication boundary', () => {
       '--json',
       'number,url,state,isDraft,headRefName,headRefOid,baseRefName',
     ]);
-    expect(withoutBoundRepo(fixture.invocations.at(-1))).toEqual({
-      args: ['pr', 'view', '42', '--web'],
-      command: 'gh',
-      cwd: input.cwd,
-    });
+    expect(fixture.invocations).toHaveLength(4);
   });
 
   test('retains completed CLI-only hosted spend conservatively without changing exact-SHA publication', async () => {
@@ -652,7 +656,6 @@ describe('GitHub publication boundary', () => {
     expect(published.draft).toBe(true);
     expect(published.title).toBe(input.title);
     expect(published.body).toBe(input.body);
-    expect(published.openedInBrowser).toBe(false);
     expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
       false,
     );

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -34,7 +33,7 @@ import {
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
-import { requiredValue } from '../test-support.ts';
+import { copyOriginGitRepositoryFixture, requiredValue, runGitFixture } from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
@@ -72,7 +71,7 @@ afterEach(() => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 function fixturePluginSource(): string {
@@ -95,19 +94,8 @@ function fixturePluginSource(): string {
 }
 
 function fixtureRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-manager-'));
+  const { repo, root } = copyOriginGitRepositoryFixture('pardes-manager-');
   temporaryDirectories.push(root);
-  const origin = join(root, 'origin.git');
-  const repo = join(root, 'project');
-  execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-  execFileSync('git', ['init', '-b', 'main', repo]);
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
-  writeFileSync(join(repo, 'README.md'), 'fixture\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'fixture');
-  git(repo, 'remote', 'add', 'origin', origin);
-  git(repo, 'push', '-u', 'origin', 'main');
   return repo;
 }
 

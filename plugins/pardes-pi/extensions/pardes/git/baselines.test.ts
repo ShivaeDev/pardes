@@ -1,9 +1,13 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
+import {
+  copyLocalGitRepositoryFixture,
+  copyRemoteGitRepositoryFixture,
+  runGitFixture,
+} from '../test-support.ts';
 import { makeRemoteBaselineResolver, resolveRemoteBaseline } from './baselines.ts';
 import { GitCommandError } from './errors.ts';
 import { discoverRepository } from './repository.ts';
@@ -18,43 +22,22 @@ afterEach(() => {
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-}
-
-function configureIdentity(repo: string): void {
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
+  return runGitFixture(cwd, ...args);
 }
 
 function localRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-baseline-local-'));
+  const { repo, root } = copyLocalGitRepositoryFixture('pardes-baseline-local-');
   temporaryDirectories.push(root);
-  const primary = join(root, 'project');
-  execFileSync('git', ['init', '-b', 'main', primary]);
-  configureIdentity(primary);
-  writeFileSync(join(primary, 'README.md'), 'fixture\n');
-  git(primary, 'add', 'README.md');
-  git(primary, 'commit', '-m', 'fixture');
-  return primary;
+  return repo;
 }
 
 function remoteRepository(defaultBranch = 'main') {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-baseline-remote-'));
-  temporaryDirectories.push(root);
-  const origin = join(root, 'origin.git');
-  const primary = join(root, 'project');
-  execFileSync('git', ['init', '--bare', '-b', defaultBranch, origin]);
-  execFileSync('git', ['init', '-b', defaultBranch, primary]);
-  configureIdentity(primary);
-  writeFileSync(join(primary, 'README.md'), 'fixture\n');
-  git(primary, 'add', 'README.md');
-  git(primary, 'commit', '-m', 'fixture');
-  git(primary, 'remote', 'add', 'origin', origin);
-  git(primary, 'push', '-u', 'origin', defaultBranch);
-  const publisher = join(root, 'publisher');
-  execFileSync('git', ['clone', origin, publisher]);
-  configureIdentity(publisher);
-  return { defaultBranch, origin, primary, publisher, root };
+  const { repo: primary, ...fixture } = copyRemoteGitRepositoryFixture(
+    'pardes-baseline-remote-',
+    defaultBranch,
+  );
+  temporaryDirectories.push(fixture.root);
+  return { ...fixture, defaultBranch, primary };
 }
 
 async function repoState(primary: string): Promise<RepoState> {
@@ -123,7 +106,7 @@ describe('remote baseline resolution', () => {
     const emptyRoot = mkdtempSync(join(tmpdir(), 'pardes-baseline-empty-origin-'));
     temporaryDirectories.push(emptyRoot);
     const emptyOrigin = join(emptyRoot, 'origin.git');
-    execFileSync('git', ['init', '--bare', '-b', 'main', emptyOrigin]);
+    git(emptyRoot, 'init', '--bare', '-b', 'main', emptyOrigin);
     git(local, 'remote', 'add', 'origin', emptyOrigin);
     const missingDefault = await Effect.runPromise(
       resolveRemoteBaseline(await repoState(local)).pipe(Effect.flip),

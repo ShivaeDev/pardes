@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -7,7 +6,7 @@ import type { ExtensionAPI, Theme, ToolDefinition } from '@earendil-works/pi-cod
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../reporting/index.ts';
-import { requiredValue } from '../test-support.ts';
+import { requiredValue, runGitFixture } from '../test-support.ts';
 import pardesWorker, {
   getWorkerToolPathDenialReason,
   isPathInsideWorktree,
@@ -191,10 +190,9 @@ describe('verifier child profile', () => {
 
   test('executes fixed bounded captured-head evidence', async () => {
     const { worktree } = createFixture();
-    const git = (...args: string[]) =>
-      execFileSync('git', args, { cwd: worktree, encoding: 'utf8' }).trim();
+    const git = (...args: string[]) => runGitFixture(worktree, ...args);
     rmSync(join(worktree, 'escape'), { recursive: true });
-    execFileSync('git', ['init', '-b', 'main', worktree]);
+    git('init', '-b', 'main');
     git('config', 'user.email', 'pardes@example.test');
     git('config', 'user.name', 'Pardes Test');
     writeFileSync(join(worktree, 'README.md'), 'baseline\n');

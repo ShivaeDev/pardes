@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -13,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
+import { runGitFixture } from '../test-support.ts';
 import { CHILD_RUNTIME_INPUTS, makePluginActivationSafety } from './activation-safety.ts';
 
 const temporaryDirectories: string[] = [];
@@ -51,7 +51,7 @@ function fixtureManagerDirectory(): string {
 }
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 describe('loaded child-runtime activation safety', () => {

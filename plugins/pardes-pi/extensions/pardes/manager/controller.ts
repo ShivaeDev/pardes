@@ -64,6 +64,7 @@ import {
   InvalidManagedStateError,
   ManagerAlreadyActiveError,
   ManagerInactiveError,
+  WorkstreamCompletionRejectedError,
   WorkstreamNotFoundError,
 } from './errors.ts';
 import {
@@ -1268,7 +1269,7 @@ export class ManagerController {
     return workstream;
   });
 
-  readonly completeWorkstream = Effect.fnUntraced(function* (
+  private readonly completeWorkstreamUnlocked = Effect.fnUntraced(function* (
     this: ManagerController,
     rawWorkstreamId: string,
     ctx?: ExtensionContext,
@@ -1278,12 +1279,58 @@ export class ManagerController {
     const state = yield* this.refresh(ctx);
     const workstream = state.workstreams[workstreamId];
     if (!workstream) return yield* new WorkstreamNotFoundError({ workstreamId });
-    if (workstream.status === 'complete') return workstream;
+    const reject = (reason: string) =>
+      new WorkstreamCompletionRejectedError({ reason, workstreamId });
+    if (
+      Object.values(state.pullRequests).some(
+        (pullRequest) => pullRequest.workstreamId === workstreamId && pullRequest.status === 'open',
+      )
+    ) {
+      return yield* reject('an unresolved open review gate still requires retained ownership');
+    }
+    const attachedChildren = Object.values(state.agents)
+      .filter((agent) => {
+        if (agent.workstreamId !== workstreamId) return false;
+        const runtime = this.liveRuntimes.get(agent.id);
+        return (
+          ATTACHED_STATUSES.has(agent.status) ||
+          (runtime !== undefined && ATTACHED_STATUSES.has(runtime.status))
+        );
+      })
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const busyChild = attachedChildren.find((agent) => {
+      const status = this.liveRuntimes.get(agent.id)?.status ?? agent.status;
+      return status !== 'idle' && status !== 'stopped' && status !== 'crashed';
+    });
+    if (busyChild)
+      return yield* reject(
+        `attached child ${busyChild.id} is not safely idle; no busy child was interrupted`,
+      );
+    for (const agent of attachedChildren) {
+      const stopped = yield* (
+        agent.role === 'verifier'
+          ? active.verifications.stopIdleForWorkstreamCompletion(agent.id, ctx)
+          : active.attachments
+              .stopIfIdleForWorkstreamCompletion(agent.id, ctx)
+              .pipe(Effect.map((record) => record !== undefined))
+      ).pipe(
+        Effect.mapError(() =>
+          reject(
+            `attached child ${agent.id} could not be safely stopped; retained artifacts were preserved`,
+          ),
+        ),
+      );
+      if (!stopped)
+        return yield* reject(
+          `attached child ${agent.id} is not safely idle; no busy child was interrupted`,
+        );
+    }
     const timestamp = yield* nowIso;
-    yield* active.store.mutate((current) => {
+    const transitioned = yield* active.store.mutate((current) => {
       const currentWorkstream = current.workstreams[workstreamId] ?? workstream;
+      if (currentWorkstream.status === 'complete') return Effect.succeed([false, current] as const);
       return Effect.succeed([
-        undefined,
+        true,
         {
           ...current,
           workstreams: {
@@ -1293,19 +1340,24 @@ export class ManagerController {
         },
       ] as const);
     });
-    yield* this.appendEventSafely(
-      active.store,
-      makeEvent(
-        'workstream_completed',
-        `Completed ${workstreamId}: ${workstream.title}`,
-        timestamp,
-      ),
-    );
+    if (transitioned) {
+      yield* this.appendEventSafely(
+        active.store,
+        makeEvent(
+          'workstream_completed',
+          `Completed ${workstreamId}: ${workstream.title}. Safely stopped ${attachedChildren.length} idle attached child${attachedChildren.length === 1 ? '' : 'ren'}; retained artifacts and review history preserved.`,
+          timestamp,
+        ),
+      );
+    }
     yield* this.refreshActiveState(active, ctx);
     const completed = active.state.workstreams[workstreamId];
     if (!completed) return yield* new WorkstreamNotFoundError({ workstreamId });
     return completed;
   });
+
+  readonly completeWorkstream = (rawWorkstreamId: string, ctx?: ExtensionContext) =>
+    this.withActiveLifecyclePermit(() => this.completeWorkstreamUnlocked(rawWorkstreamId, ctx));
 
   /** Persist that the one delivered cursor was explicitly surfaced for user feedback. */
   readonly beginInboxHandoff = Effect.fnUntraced(function* (

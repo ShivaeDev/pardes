@@ -134,6 +134,7 @@ export {
   VerificationNotFoundError,
   VerificationRefreshRejectedError,
   VerificationRequestRejectedError,
+  WorkstreamCompletionRejectedError,
   WorkstreamNotFoundError,
 } from './errors.ts';
 export {

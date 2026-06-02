@@ -61,6 +61,13 @@ export class WorkstreamNotFoundError extends Data.TaggedError('WorkstreamNotFoun
   readonly workstreamId: string;
 }> {}
 
+export class WorkstreamCompletionRejectedError extends Data.TaggedError(
+  'WorkstreamCompletionRejectedError',
+)<{
+  readonly workstreamId: string;
+  readonly reason: string;
+}> {}
+
 export class InboxEventNotFoundError extends Data.TaggedError('InboxEventNotFoundError')<{
   readonly eventId: string;
 }> {}
@@ -138,6 +145,7 @@ export type PardesError =
   | PluginActivationBlockedError
   | ManagerInputValidationError
   | WorkstreamNotFoundError
+  | WorkstreamCompletionRejectedError
   | InboxEventNotFoundError
   | InboxHandoffUnavailableError
   | AgentNotFoundError
@@ -196,6 +204,13 @@ export function formatPardesError(error: unknown): string {
     }
     if (tagged._tag === 'WorkstreamNotFoundError' && 'workstreamId' in tagged) {
       return `Unknown workstream: ${String(tagged.workstreamId)}`;
+    }
+    if (
+      tagged._tag === 'WorkstreamCompletionRejectedError' &&
+      'workstreamId' in tagged &&
+      'reason' in tagged
+    ) {
+      return `Cannot complete workstream ${String(tagged.workstreamId)}: ${String(tagged.reason)}`;
     }
     if (tagged._tag === 'InboxEventNotFoundError' && 'eventId' in tagged) {
       return `Unknown pending inbox event: ${String(tagged.eventId)}`;

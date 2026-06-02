@@ -203,6 +203,10 @@ export interface VerificationLifecycleCoordinatorShape {
   readonly retryResolvedRetirementForIdleVerifier: (
     verifierAgentId: string,
   ) => Effect.Effect<boolean, unknown>;
+  readonly stopIdleForWorkstreamCompletion: (
+    verifierAgentId: string,
+    ctx?: ExtensionContext,
+  ) => Effect.Effect<boolean, unknown>;
 }
 
 export class VerificationLifecycleCoordinator extends Context.Service<
@@ -1110,6 +1114,57 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
     return true;
   });
 
+  const stopIdleForWorkstreamCompletionUnlocked = Effect.fnUntraced(function* (
+    verifierAgentId: string,
+    ctx?: ExtensionContext,
+  ) {
+    yield* callbacks.refresh(ctx);
+    const verification = Object.values(namespace.state.verifications).find(
+      (candidate) => candidate.verifierAgentId === verifierAgentId,
+    );
+    const verifierAgent = namespace.state.agents[verifierAgentId];
+    if (!verification || !verifierAgent || verifierAgent.role !== 'verifier') return false;
+    const stoppedResult = yield* workers.stopIfIdle(verifierAgent.id);
+    if (!stoppedResult || stoppedResult.status !== 'stopped') return false;
+    callbacks.recordRuntime(verifierAgent.id, stoppedResult);
+    const stoppedAt = yield* nowIso;
+    const persisted = yield* namespace.store.mutate((state) => {
+      const current = state.verifications[verification.id];
+      const agent = state.agents[verifierAgent.id];
+      if (!current || !agent || agent.role !== 'verifier')
+        return Effect.succeed([false, state] as const);
+      return Effect.succeed([
+        true,
+        {
+          ...state,
+          agents: {
+            ...state.agents,
+            [agent.id]: { ...agent, status: 'stopped', updatedAt: stoppedAt },
+          },
+          verifications: {
+            ...state.verifications,
+            [current.id]: withVerificationStatus(current, 'stopped', stoppedAt),
+          },
+        },
+      ] as const);
+    });
+    if (!persisted) return false;
+    yield* callbacks.appendEventSafely(
+      makeEvent(
+        'verification_workstream_completion_stopped',
+        `${verification.id} safely stopped idle retained verifier ${verifierAgent.id} during explicit workstream completion; durable advisory history and scratch checkout metadata were preserved.`,
+        stoppedAt,
+        {
+          agentId: verifierAgent.id,
+          verificationId: verification.id,
+          workstreamId: verification.workstreamId,
+        },
+      ),
+    );
+    yield* callbacks.refresh(ctx);
+    return true;
+  });
+
   const statusUnlocked: VerificationLifecycleCoordinatorShape['status'] = Effect.fnUntraced(
     function* (verificationId, ctx) {
       yield* callbacks.refresh(ctx);
@@ -1162,6 +1217,9 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
     serializeMutation(refreshUnlocked(verificationId, ctx));
   const status: VerificationLifecycleCoordinatorShape['status'] = (verificationId, ctx) =>
     serializeMutation(statusUnlocked(verificationId, ctx));
+  const stopIdleForWorkstreamCompletion: VerificationLifecycleCoordinatorShape['stopIdleForWorkstreamCompletion'] =
+    (verifierAgentId, ctx) =>
+      serializeMutation(stopIdleForWorkstreamCompletionUnlocked(verifierAgentId, ctx));
   const reconcileForSource: VerificationLifecycleCoordinatorShape['reconcileForSource'] = (
     sourceAgentId,
   ) => serializeMutation(reconcileForSourceUnlocked(sourceAgentId));
@@ -1176,5 +1234,6 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
     retryResolvedRetirementForIdleVerifier,
     serializeMutation,
     status,
+    stopIdleForWorkstreamCompletion,
   });
 });

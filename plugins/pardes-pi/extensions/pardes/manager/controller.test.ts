@@ -1062,6 +1062,324 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
+  test('serializes concurrent review-gate publication behind deferred idle completion, then rejects publication after completion', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const makeWorkers = (
+      onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
+    ): GuardedWorkerSupervisorShape => {
+      const supervisor = workers.makeWorkers(onEvent);
+      return {
+        ...supervisor,
+        stopIfIdle: (agentId) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+            return yield* supervisor.stopIfIdle(agentId);
+          }),
+      };
+    };
+    const controller = new ManagerController(fixture.pi, { github: github.github, makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'serialized completion publication',
+    );
+    writeFileSync(join(requiredValue(agent.worktree).path, 'publish-race.txt'), 'race fixture\n');
+    git(requiredValue(agent.worktree).path, 'add', 'publish-race.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'publish race fixture');
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        sessionFile: agent.sessionFile,
+        status: 'idle',
+        type: 'status',
+      }),
+    );
+
+    const completionFiber = Effect.runFork(
+      controller.completeWorkstream(workstream.id, fixture.ctx),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+    const publicationFiber = Effect.runFork(
+      controller
+        .createPullRequest(
+          {
+            agentId: agent.id,
+            baseBranch: 'main',
+            body: 'Must wait behind completion.',
+            title: 'Do not publish after completion',
+            workstreamId: workstream.id,
+          },
+          fixture.ctx,
+        )
+        .pipe(Effect.flip),
+    );
+    await Effect.runPromise(Effect.sleep('20 millis'));
+    expect(github.publications).toEqual([]);
+
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    expect((await Effect.runPromise(Fiber.join(completionFiber))).status).toBe('complete');
+    expect(await Effect.runPromise(Fiber.join(publicationFiber))).toMatchObject({
+      _tag: 'PullRequestPublicationValidationError',
+      reason: `workstream ${workstream.id} is complete; review-gate publication requires an active workstream`,
+    });
+    expect(controller.snapshot()?.pullRequests).toEqual({});
+    expect(github.publications).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('rejects final completion mutation if open review ownership appears during deferred idle stop', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const makeWorkers = (
+      onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
+    ): GuardedWorkerSupervisorShape => {
+      const supervisor = workers.makeWorkers(onEvent);
+      return {
+        ...supervisor,
+        stopIfIdle: (agentId) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+            return yield* supervisor.stopIfIdle(agentId);
+          }),
+      };
+    };
+    const controller = new ManagerController(fixture.pi, { makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'final review ownership recheck',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        sessionFile: agent.sessionFile,
+        status: 'idle',
+        type: 'status',
+      }),
+    );
+
+    const completionFiber = Effect.runFork(
+      controller.completeWorkstream(workstream.id, fixture.ctx).pipe(Effect.flip),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pullRequests: Record<string, unknown>;
+    };
+    const timestamp = new Date().toISOString();
+    state.pullRequests['pr-raced'] = {
+      agentId: agent.id,
+      createdAt: timestamp,
+      id: 'pr-raced',
+      status: 'open',
+      updatedAt: timestamp,
+      url: 'https://github.test/acme/project/pull/raced',
+      workstreamId: workstream.id,
+    };
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+
+    expect(await Effect.runPromise(Fiber.join(completionFiber))).toMatchObject({
+      _tag: 'WorkstreamCompletionRejectedError',
+      reason: 'an unresolved open review gate still requires retained ownership',
+    });
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('stopped');
+    expect(controller.snapshot()?.pullRequests['pr-raced']?.status).toBe('open');
+    expect(existsSync(requiredValue(agent.worktree).path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('rejects review-gate publication after explicit workstream completion without pushing', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'completed publication rejection',
+    );
+    writeFileSync(join(requiredValue(agent.worktree).path, 'completed.txt'), 'retain branch\n');
+    git(requiredValue(agent.worktree).path, 'add', 'completed.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'completed publication fixture');
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        sessionFile: agent.sessionFile,
+        status: 'idle',
+        type: 'status',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    const rejected = await Effect.runPromise(
+      controller
+        .createPullRequest(
+          {
+            agentId: agent.id,
+            baseBranch: 'main',
+            body: 'Never publish a completed stream.',
+            title: 'Completed stream rejection',
+            workstreamId: workstream.id,
+          },
+          fixture.ctx,
+        )
+        .pipe(Effect.flip),
+    );
+
+    expect(rejected).toMatchObject({
+      _tag: 'PullRequestPublicationValidationError',
+      reason: `workstream ${workstream.id} is complete; review-gate publication requires an active workstream`,
+    });
+    expect(github.publications).toEqual([]);
+    expect(controller.snapshot()?.pullRequests).toEqual({});
+    expect(existsSync(requiredValue(agent.worktree).path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('rejects completion when fresh idle preflight observes streaming, compaction, or queued follow-up state', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'fresh idle completion decline',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        sessionFile: agent.sessionFile,
+        status: 'idle',
+        type: 'status',
+      }),
+    );
+    const idle = requiredValue(workers.runtimes.get(agent.id));
+    const declined = [
+      { isCompacting: false, isStreaming: true, pendingMessageCount: 0 },
+      { isCompacting: true, isStreaming: false, pendingMessageCount: 0 },
+      { isCompacting: false, isStreaming: false, pendingMessageCount: 1 },
+    ];
+    for (const runtimeState of declined) {
+      const runtime = { ...idle, ...runtimeState, status: 'idle' as const };
+      workers.runtimes.set(agent.id, runtime);
+      await Effect.runPromise(workers.emit({ agentId: agent.id, runtime, type: 'telemetry' }));
+
+      expect(
+        await Effect.runPromise(
+          controller.completeWorkstream(workstream.id, fixture.ctx).pipe(Effect.flip),
+        ),
+      ).toMatchObject({ _tag: 'WorkstreamCompletionRejectedError' });
+      expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+      expect(controller.snapshot()?.agents[agent.id]?.status).toBe('idle');
+      expect(workers.stops).toEqual([]);
+    }
+    expect(existsSync(requiredValue(agent.worktree).path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('preserves a partial safe-stop disposition when a later idle child freshly declines stopping', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Preserve partial conservative disposition.', title: 'Partial safe stop' },
+        fixture.ctx,
+      ),
+    );
+    const agents = await Effect.runPromise(
+      Effect.all([
+        controller.spawnAgent(
+          { task: 'First retained child.', workstreamId: workstream.id },
+          fixture.ctx,
+        ),
+        controller.spawnAgent(
+          { task: 'Second retained child.', workstreamId: workstream.id },
+          fixture.ctx,
+        ),
+      ]),
+    );
+    for (const agent of agents) {
+      await Effect.runPromise(
+        workers.emit({
+          agentId: agent.id,
+          sessionFile: agent.sessionFile,
+          status: 'idle',
+          type: 'status',
+        }),
+      );
+    }
+    const [first, later] = [...agents].sort((left, right) => left.id.localeCompare(right.id));
+    const declinedRuntime = {
+      ...requiredValue(workers.runtimes.get(requiredValue(later).id)),
+      isStreaming: false,
+      pendingMessageCount: 1,
+      status: 'idle' as const,
+    };
+    workers.runtimes.set(requiredValue(later).id, declinedRuntime);
+    await Effect.runPromise(
+      workers.emit({
+        agentId: requiredValue(later).id,
+        runtime: declinedRuntime,
+        type: 'telemetry',
+      }),
+    );
+
+    expect(
+      await Effect.runPromise(
+        controller.completeWorkstream(workstream.id, fixture.ctx).pipe(Effect.flip),
+      ),
+    ).toMatchObject({ _tag: 'WorkstreamCompletionRejectedError' });
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.agents[requiredValue(first).id]?.status).toBe('stopped');
+    expect(controller.snapshot()?.agents[requiredValue(later).id]?.status).toBe('idle');
+    expect(workers.stops).toEqual([requiredValue(first).id]);
+    for (const agent of agents) expect(existsSync(requiredValue(agent.worktree).path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('closes lifecycle admission before deactivate waits for an in-flight spawn, then retires the completed child without launching queued work', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));

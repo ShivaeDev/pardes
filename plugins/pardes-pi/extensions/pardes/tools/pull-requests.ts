@@ -12,7 +12,7 @@ import { managerId, registerPardesTool, runTool, textResult } from './registrati
 export function registerPullRequestTools(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
     description:
-      "Audit a managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Rejects completed or otherwise non-active workstreams. Never merges.",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.createPullRequest(params, ctx));
       if (!result.ok) return textResult(`Error: ${result.error}`);

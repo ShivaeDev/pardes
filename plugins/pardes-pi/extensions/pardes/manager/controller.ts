@@ -1328,6 +1328,16 @@ export class ManagerController {
     const timestamp = yield* nowIso;
     const transitioned = yield* active.store.mutate((current) => {
       const currentWorkstream = current.workstreams[workstreamId] ?? workstream;
+      if (
+        Object.values(current.pullRequests).some(
+          (pullRequest) =>
+            pullRequest.workstreamId === workstreamId && pullRequest.status === 'open',
+        )
+      ) {
+        return Effect.fail(
+          reject('an unresolved open review gate still requires retained ownership'),
+        );
+      }
       if (currentWorkstream.status === 'complete') return Effect.succeed([false, current] as const);
       return Effect.succeed([
         true,
@@ -1572,7 +1582,7 @@ export class ManagerController {
     return yield* active.reporting.getExcerpt(rawInput);
   });
 
-  readonly createPullRequest = Effect.fnUntraced(function* (
+  private readonly createPullRequestUnlocked = Effect.fnUntraced(function* (
     this: ManagerController,
     rawInput: PullRequestCreateInput,
     ctx?: ExtensionContext,
@@ -1581,6 +1591,9 @@ export class ManagerController {
     const active = yield* this.requireActive();
     return yield* active.pullRequests.publish(input, ctx);
   });
+
+  readonly createPullRequest = (rawInput: PullRequestCreateInput, ctx?: ExtensionContext) =>
+    this.withActiveLifecyclePermit(() => this.createPullRequestUnlocked(rawInput, ctx));
 
   private readonly requestVerificationUnlocked = Effect.fnUntraced(function* (
     this: ManagerController,

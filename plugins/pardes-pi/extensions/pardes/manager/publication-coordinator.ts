@@ -241,6 +241,11 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         reason: `agent ${agent.id} belongs to ${agent.workstreamId}, not ${workstream.id}`,
       });
     }
+    if (workstream.status !== 'active') {
+      return yield* new PullRequestPublicationValidationError({
+        reason: `workstream ${workstream.id} is ${workstream.status}; review-gate publication requires an active workstream`,
+      });
+    }
     if (agent.role !== 'worker' || !agent.worktree) {
       return yield* new PullRequestPublicationValidationError({
         reason: `agent ${agent.id} has no managed worker worktree`,

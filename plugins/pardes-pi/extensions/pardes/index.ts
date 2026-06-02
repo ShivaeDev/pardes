@@ -40,7 +40,7 @@ export default function pardes(pi: ExtensionAPI): void {
 
   pi.registerCommand('pardes', {
     description:
-      'Open the Pardes dashboard, or use /pardes start, /pardes stop, and /pardes monitor',
+      'Open the Pardes dashboard, or use /pardes start, /pardes stop, /pardes monitor, and /pardes config',
     handler: async (args, ctx) => {
       const [action] = args.trim().split(/\s+/, 1);
       if (action === 'start') {
@@ -72,8 +72,15 @@ export default function pardes(pi: ExtensionAPI): void {
         );
         return;
       }
+      if (action === 'config') {
+        await presentation.showConfigOverlay(ctx);
+        return;
+      }
       if (action) {
-        ctx.ui.notify('Usage: /pardes, /pardes start, /pardes stop, or /pardes monitor', 'warning');
+        ctx.ui.notify(
+          'Usage: /pardes, /pardes start, /pardes stop, /pardes monitor, or /pardes config',
+          'warning',
+        );
         return;
       }
       await presentation.showDashboardOverlay(ctx, manager.snapshot(), manager.runtimeSnapshots());

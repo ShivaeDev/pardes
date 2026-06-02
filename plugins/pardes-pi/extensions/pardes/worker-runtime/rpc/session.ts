@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { Effect, Exit, Option, Scope } from 'effect';
 import {
   appendWorkerStderrTail,
@@ -67,7 +68,18 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
       stdin: child.stdin,
     });
     let stderr = emptyWorkerStderrTail();
+    const stderrDecoder = new StringDecoder('utf8');
+    let stderrDecoderFlushed = false;
     let started = false;
+
+    const appendStderr = (text: string) => {
+      if (text) stderr = appendWorkerStderrTail(stderr, text);
+    };
+    const flushStderr = () => {
+      if (stderrDecoderFlushed) return;
+      stderrDecoderFlushed = true;
+      appendStderr(stderrDecoder.end());
+    };
 
     const start = (callbacks: WorkerRpcSessionCallbacks) => {
       if (started) return;
@@ -92,8 +104,9 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
         },
       });
       child.stderr.on('data', (chunk: Buffer | string) => {
-        stderr = appendWorkerStderrTail(stderr, String(chunk));
+        appendStderr(typeof chunk === 'string' ? chunk : stderrDecoder.write(chunk));
       });
+      child.stderr.on('end', flushStderr);
       child.on('error', (cause) => {
         callbacks.onProtocolError(
           workerProtocolDiagnostic(
@@ -103,7 +116,8 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
           ),
         );
       });
-      child.on('exit', (exitCode, signal) => {
+      child.on('close', (exitCode, signal) => {
+        flushStderr();
         rpcRequests.failPending(
           `Worker exited with code ${String(exitCode)} and signal ${String(signal)}`,
         );

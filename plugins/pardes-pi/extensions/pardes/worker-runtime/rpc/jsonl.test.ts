@@ -100,6 +100,33 @@ describe('worker RPC JSONL decoder', () => {
     ]);
   });
 
+  test('excludes CRLF framing from oversized counts across chunk fragmentation', () => {
+    for (const chunks of [
+      ['xxxxxxxxx\r\n'],
+      ['xxxxxxxxx', '\r\n'],
+      ['xxxxxxxxx\r', '\n'],
+      ['xxxxxxxxx', '\r', '\n'],
+    ]) {
+      const { stdout, values, errors } = fixture(8);
+
+      for (const chunk of chunks) stdout.write(chunk);
+      stdout.end('{"ok":1}\n');
+
+      expect(values, JSON.stringify(chunks)).toEqual([{ ok: 1 }]);
+      expect(errors, JSON.stringify(chunks)).toEqual([
+        {
+          countAccuracy: 'exact',
+          message:
+            'RPC JSONL record exceeded the 8-character transport framing breaker; record content was discarded through its delimiter.',
+          omittedChars: 9,
+          originalChars: 9,
+          reason: 'line_length_breaker',
+          shownChars: 0,
+        },
+      ]);
+    }
+  });
+
   test('reports a lower bound when an oversized record ends without a delimiter', async () => {
     const { stdout, values, errors } = fixture(8);
 

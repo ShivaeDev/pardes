@@ -39,6 +39,17 @@ function handle(command) {
     send({ type: "response", id: "unrelated", command: command.type, success: "yes" });
     return respond(command);
   }
+  if (command.type === "split-stderr-utf8") {
+    process.stderr.write(Buffer.from([0xc3]));
+    return setTimeout(() => {
+      process.stderr.write(Buffer.from([0xa9]));
+      respond(command);
+    }, 20);
+  }
+  if (command.type === "flush-stderr-utf8") {
+    process.stderr.write(Buffer.from([0xc3]));
+    return setTimeout(() => process.exit(24), 10);
+  }
   if (command.type === "stall") return setTimeout(() => process.exit(23), 10);
   respond(command);
 }
@@ -151,6 +162,46 @@ describe('worker RPC session', () => {
     await Effect.runPromise(session.close);
   });
 
+  test('decodes split stderr UTF-8 invariantly and flushes an incomplete final code point', async () => {
+    const fixture = fakeRpcWorker();
+    const exits: Array<{ readonly stderr: WorkerStderrTail }> = [];
+    const session = await Effect.runPromise(
+      openWorkerRpcSession(fixture.input, {
+        args: () => [fixture.script],
+        command: process.execPath,
+        requestTimeoutMs: 1_000,
+      }),
+    );
+    session.start({
+      onExit: (_exitCode, _signal, stderr) => {
+        exits.push({ stderr });
+      },
+      onProtocolError: () => undefined,
+      onValue: () => undefined,
+    });
+
+    await Effect.runPromise(session.request({ type: 'split-stderr-utf8' }));
+    expect(session.stderr()).toEqual({
+      omittedChars: 0,
+      originalChars: 1,
+      shownChars: 1,
+      tail: 'é',
+    });
+
+    expect(
+      Exit.isFailure(await Effect.runPromiseExit(session.request({ type: 'flush-stderr-utf8' }))),
+    ).toBe(true);
+    await eventually(() => exits.length === 1);
+    expect(exits[0]?.stderr).toEqual({
+      omittedChars: 0,
+      originalChars: 2,
+      shownChars: 2,
+      tail: 'é�',
+    });
+    expect(session.stderr()).toEqual(exits[0]?.stderr);
+    await Effect.runPromise(session.close);
+  });
+
   test('closes the scope-owned retained subprocess', async () => {
     const fixture = fakeRpcWorker();
     const exits: Array<{
@@ -173,6 +224,7 @@ describe('worker RPC session', () => {
     });
 
     await Effect.runPromise(session.close);
+    await eventually(() => exits.length === 1);
     expect(exits).toEqual([{ exitCode: null, signal: 'SIGTERM' }]);
   });
 });

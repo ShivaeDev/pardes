@@ -515,6 +515,37 @@ describe('worker-event summary policy', () => {
     expect(projected?.summary).not.toContain('token=');
   });
 
+  test('canonicalizes forged typed protocol diagnostics before durable manager summaries', () => {
+    for (const diagnostic of [
+      {
+        countAccuracy: 'exact',
+        message: 'token=private-forged-protocol-message',
+        omittedChars: 31,
+        originalChars: 31,
+        reason: 'invalid_json',
+        shownChars: 0,
+      },
+      {
+        countAccuracy: 'exact',
+        message: 'token=private-forged-protocol-message',
+        omittedChars: 31,
+        originalChars: 31,
+        reason: 'token=private-forged-protocol-reason',
+        shownChars: 0,
+      },
+    ]) {
+      const projected = workerEventSummary({
+        agentId: 'agent-one',
+        diagnostic,
+        type: 'protocol_error',
+      } as unknown as WorkerSupervisorEvent);
+
+      expect(projected?.summary).not.toContain('private-forged');
+      expect(projected?.summary).not.toContain('token=');
+      expect(projected?.summary).toContain('chars(original=31, shown=0, omitted=31)');
+    }
+  });
+
   test('makes progress persistence failures actionable and lets Git audit failure type win', () => {
     const progress = workerEventSummary(
       { agentId: 'agent-one', status: 'progress', summary: 'Routine progress.', type: 'report' },

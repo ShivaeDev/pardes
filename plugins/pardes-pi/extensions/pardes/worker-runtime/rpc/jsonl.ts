@@ -37,6 +37,7 @@ export function attachWorkerRpcJsonl(
   const maxLineLength = callbacks.maxLineLength ?? MAX_WORKER_RPC_JSONL_LINE_LENGTH;
   let buffer = '';
   let discardedOversizedChars = 0;
+  let discardedOversizedEndsWithCarriageReturn = false;
   let discardingOversizedLine = false;
 
   const oversizedDiagnostic = (originalChars: number, countAccuracy: 'exact' | 'lower_bound') =>
@@ -73,13 +74,18 @@ export function attachWorkerRpcJsonl(
       if (discardingOversizedLine) {
         if (newline === -1) {
           discardedOversizedChars += buffer.length;
+          if (buffer.length > 0) discardedOversizedEndsWithCarriageReturn = buffer.endsWith('\r');
           buffer = '';
           return;
         }
         discardedOversizedChars += newline;
+        const delimiterHasCarriageReturn =
+          newline > 0 ? buffer[newline - 1] === '\r' : discardedOversizedEndsWithCarriageReturn;
+        if (delimiterHasCarriageReturn) discardedOversizedChars -= 1;
         callbacks.onProtocolError(oversizedDiagnostic(discardedOversizedChars, 'exact'));
         buffer = buffer.slice(newline + 1);
         discardedOversizedChars = 0;
+        discardedOversizedEndsWithCarriageReturn = false;
         discardingOversizedLine = false;
         continue;
       }
@@ -92,6 +98,7 @@ export function attachWorkerRpcJsonl(
       }
       if (buffer.length > maxLineLength) {
         discardedOversizedChars += buffer.length;
+        discardedOversizedEndsWithCarriageReturn = buffer.endsWith('\r');
         buffer = '';
         discardingOversizedLine = true;
       }
@@ -107,6 +114,7 @@ export function attachWorkerRpcJsonl(
     if (discardingOversizedLine) {
       callbacks.onProtocolError(oversizedDiagnostic(discardedOversizedChars, 'lower_bound'));
       discardedOversizedChars = 0;
+      discardedOversizedEndsWithCarriageReturn = false;
       discardingOversizedLine = false;
       return;
     }

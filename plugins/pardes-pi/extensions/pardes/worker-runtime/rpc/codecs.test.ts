@@ -146,12 +146,37 @@ describe('worker RPC wire schema', () => {
     });
   });
 
+  test('renders canonical labels instead of forged typed diagnostic reasons or prose', () => {
+    const forgedProtocol = {
+      countAccuracy: 'exact',
+      message: 'token=private-forged-protocol-message',
+      omittedChars: 31,
+      originalChars: 31,
+      reason: 'token=private-forged-protocol-reason',
+      shownChars: 0,
+    } as unknown as WorkerProtocolDiagnostic;
+    const forgedCompaction = {
+      omittedChars: 29,
+      originalChars: 29,
+      reason: 'token=private-forged-compaction-reason',
+      shownChars: 0,
+    } as unknown as WorkerCompactionFailure;
+
+    expect(renderWorkerProtocolDiagnostic(forgedProtocol)).toBe(
+      '[unknown_protocol_diagnostic] Worker protocol diagnostic reason was not recognized; arbitrary text was omitted. chars(original=31, shown=0, omitted=31).',
+    );
+    expect(renderWorkerCompactionFailure(forgedCompaction)).toBe(
+      '[child_compaction_error_message_omitted] Child-authored compaction diagnostic text omitted. chars(original=29, shown=0, omitted=29).',
+    );
+  });
+
   test('degrades malformed counted diagnostics to unknown accounting at render time', () => {
     for (const counts of [
       { omittedChars: undefined, originalChars: undefined, shownChars: 0 },
       { omittedChars: 1, originalChars: 1, shownChars: 99 },
       { omittedChars: -1, originalChars: -1, shownChars: 0 },
       { omittedChars: 1.5, originalChars: 1.5, shownChars: 0 },
+      { countAccuracy: 'forged', omittedChars: 1, originalChars: 1, shownChars: 0 },
       {
         omittedChars: Number.POSITIVE_INFINITY,
         originalChars: Number.POSITIVE_INFINITY,

@@ -21,6 +21,7 @@ import {
   registerManagerCompactionStrategy,
   renderManagerCompactionFallbackDiagnostic,
   reportManagerCompactionFallback,
+  sanitizeManagerCompactionDiagnostic,
   stripManagerCompactionArtifacts,
   stripPardesCompactionProjection,
   stripPiFileOperationSuffix,
@@ -803,15 +804,49 @@ describe('Pardes coordinating-manager compaction', () => {
     }
   });
 
-  test('neutralizes direct carriage-return and tab delivery while preserving authored LF structure', () => {
+  test('keeps direct fallback helper delivery body-free and preserves only authored LF structure', () => {
     const delivered: string[] = [];
     const ctx = context({ ui: { notify: (message: string) => delivered.push(message) } as never });
 
-    reportManagerCompactionFallback(ctx, 'safe\rOVERWRITE\tTAIL\nnext', (message) =>
-      delivered.push(message),
+    reportManagerCompactionFallback(
+      ctx,
+      'access_token=private-direct-helper\rOVERWRITE\tTAIL\nnext',
+      (message) => delivered.push(message),
     );
 
-    expect(delivered).toEqual(['safe OVERWRITE TAIL\nnext', 'safe OVERWRITE TAIL\nnext']);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toBe(delivered[1]);
+    expect(delivered[0]).toContain('stage: unknown\naction:');
+    expect(delivered[0]).not.toContain('\r');
+    expect(delivered[0]).not.toContain('\t');
+    expect(delivered[0]).not.toContain('access_token');
+    expect(delivered[0]).not.toContain('private-direct-helper');
+    expect(delivered[0]).not.toContain('OVERWRITE');
+    expect(delivered[0]).not.toContain('TAIL');
+    expect(delivered[0]).not.toContain('next');
+  });
+
+  test('keeps direct diagnostic sanitization body-free for token variants and forged stages', () => {
+    for (const cause of [
+      'access_token=private-utility',
+      'OPENAI_API_KEY="private quoted utility"',
+      'PRIVATE_UNLABELLED_UTILITY_MARKER',
+    ]) {
+      const sanitized = sanitizeManagerCompactionDiagnostic(cause);
+      expect(sanitized).toContain('[custom_override_cause_omitted]');
+      expect(sanitized).toContain(
+        `chars(original=${cause.length}, shown=0, omitted=${cause.length})`,
+      );
+      expect(sanitized).not.toContain(cause);
+      expect(sanitized).not.toContain('private');
+    }
+
+    expect(
+      renderManagerCompactionFallbackDiagnostic(
+        'token=private-forged-stage' as ManagerCompactionFallbackStage,
+        'token=private-forged-cause',
+      ),
+    ).toContain('stage: unknown');
   });
 
   test('keeps fallback safe when the UI diagnostic surface itself throws', () => {
@@ -831,7 +866,8 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(() =>
       reportManagerCompactionFallback(ctx, diagnostic, (message) => logs.push(message)),
     ).not.toThrow();
-    expect(logs).toEqual([diagnostic]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('stage: unknown');
     expect(diagnostic).toContain('[custom_override_cause_omitted]');
     expect(diagnostic).not.toContain('token=');
     expect(diagnostic).not.toContain('private-ui-token');

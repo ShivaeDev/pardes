@@ -85,18 +85,62 @@ function coherentCountedDiagnostic(
   WorkerProtocolDiagnostic,
   { readonly countAccuracy: 'exact' | 'lower_bound' }
 > {
-  return diagnostic.countAccuracy !== 'unknown' && coherentBodyFreeCounts(diagnostic);
+  return (
+    (diagnostic.countAccuracy === 'exact' || diagnostic.countAccuracy === 'lower_bound') &&
+    coherentBodyFreeCounts(diagnostic)
+  );
 }
 
+function canonicalWorkerProtocolDiagnostic(reason: unknown): {
+  readonly message: string;
+  readonly reason: string;
+} {
+  switch (reason) {
+    case 'invalid_json':
+      return {
+        message: 'RPC JSONL record was not valid JSON; record content was discarded.',
+        reason,
+      };
+    case 'line_length_breaker':
+      return {
+        message:
+          'RPC JSONL record exceeded the transport framing breaker; record content was discarded through its delimiter.',
+        reason,
+      };
+    case 'invalid_response':
+      return {
+        message: 'RPC response could not be correlated or decoded; response content was discarded.',
+        reason,
+      };
+    case 'invalid_rpc_payload':
+      return { message: 'RPC event payload was invalid; payload content was discarded.', reason };
+    case 'legacy_adapter_text_omitted':
+      return { message: 'Legacy protocol-error adapter text was omitted.', reason };
+    case 'runtime_process_error':
+      return {
+        message: 'Retained child process emitted an error; arbitrary process text was omitted.',
+        reason,
+      };
+    default:
+      return {
+        message:
+          'Worker protocol diagnostic reason was not recognized; arbitrary text was omitted.',
+        reason: 'unknown_protocol_diagnostic',
+      };
+  }
+}
+
+/** Render only canonical labels: adapter-provided prose is never durable manager text. */
 export function renderWorkerProtocolDiagnostic(diagnostic: WorkerProtocolDiagnostic): string {
   const counted = coherentCountedDiagnostic(diagnostic);
+  const canonical = canonicalWorkerProtocolDiagnostic(diagnostic.reason);
   const original = counted
     ? `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.originalChars)}`
     : 'unknown';
   const omitted = counted
     ? `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.omittedChars)}`
     : 'unknown';
-  return `[${diagnostic.reason}] ${diagnostic.message} chars(original=${original}, shown=${counted ? diagnostic.shownChars : 0}, omitted=${omitted}).`;
+  return `[${canonical.reason}] ${canonical.message} chars(original=${original}, shown=${counted ? diagnostic.shownChars : 0}, omitted=${omitted}).`;
 }
 
 export function workerCompactionFailure(originalChars: number): WorkerCompactionFailure {
@@ -110,7 +154,7 @@ export function workerCompactionFailure(originalChars: number): WorkerCompaction
 
 export function renderWorkerCompactionFailure(failure: WorkerCompactionFailure): string {
   const counted = coherentBodyFreeCounts(failure);
-  return `[${failure.reason}] Child-authored compaction diagnostic text omitted. chars(original=${counted ? failure.originalChars : 'unknown'}, shown=0, omitted=${counted ? failure.omittedChars : 'unknown'}).`;
+  return `[child_compaction_error_message_omitted] Child-authored compaction diagnostic text omitted. chars(original=${counted ? failure.originalChars : 'unknown'}, shown=0, omitted=${counted ? failure.omittedChars : 'unknown'}).`;
 }
 
 export function appendWorkerStderrTail(current: WorkerStderrTail, chunk: string): WorkerStderrTail {

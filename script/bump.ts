@@ -19,12 +19,16 @@
  *   subjects/diffs (semi-untrusted, authored in PRs) are passed as argv data —
  *   never built into a shell string — so there is no command-injection surface.
  * - opencode runs as an explicitly-selected PRIMARY `bump` agent from a
- *   disposable non-repository cwd/HOME. Its wildcard-deny policy exposes one
+ *   disposable sandbox with an explicit local Git discovery boundary. Its
+ *   global + agent wildcard-deny policy exposes one
  *   schema-first custom tool (`submit_verdict`) and no read/edit/shell access.
- *   The child gets only OPENCODE_API_KEY plus runtime paths — never GH_TOKEN,
- *   persisted credentials, or publication secrets. Prose is never salvaged.
- * - Deterministic release writes are allowlisted, staged by exact path, and
- *   guarded by clean-worktree assertions before branch or tag publication.
+ *   The child gets only OPENCODE_API_KEY plus isolated runtime paths/config
+ *   controls — never GH_TOKEN, persisted credentials, or publication secrets.
+ *   Prose is never salvaged.
+ * - Deterministic release writes are allowlisted, staged by exact path, checked
+ *   by the same `bun run ready` gate as human PRs, and guarded by clean-worktree
+ *   assertions before branch or tag publication. The inline gate is necessary:
+ *   GITHUB_TOKEN-created bump PR events do not launch the normal lint workflow.
  * - Everything uses GITHUB_TOKEN (no bypass actor, no standing secret). The merge
  *   is SYNCHRONOUS, not auto-merge: a GITHUB_TOKEN merge doesn't re-trigger any
  *   workflow, so an async "tag on merge" step would never fire — we merge + tag
@@ -48,10 +52,18 @@ import {
   type Classification,
   classifierEnvironment,
   createClassifierSandbox,
+  preflightClassifierSandbox,
   readSubmission,
   removeClassifierSandbox,
 } from './bump-classifier';
 import { loadPlugins, touchedPlugins } from './bump-core';
+import {
+  bumpVersion,
+  manifestVersionAtRef,
+  nextVersionIntroductionCommit,
+  requireSemver,
+  updateManifestVersion,
+} from './bump-release';
 
 const ZERO = '0000000000000000000000000000000000000000';
 const DIFF_BUDGET = 60_000; // cap diff text handed to the model (argv size + token sanity)
@@ -220,19 +232,22 @@ function classify(name: string, version: string, subjects: string[], diff: strin
   ].join('\n');
 
   // Native OpenCode custom-tool boundary: copy only the reviewed classifier
-  // agent + submission tool into a disposable non-repository cwd/HOME. The child
+  // config + agent + submission tool into a disposable Git-rooted cwd/HOME. The child
   // receives one provider credential and required runtime paths, never GH_TOKEN,
   // persisted auth, git credentials, or publication secrets. The untrusted prompt
   // is one argv value; no shell is involved.
   const sandbox = createClassifierSandbox();
   try {
+    const env = classifierEnvironment(sandbox, opencodeApiKey);
+    preflightClassifierSandbox(sandbox, env);
+    console.log('✓ OpenCode classifier policy preflight passed');
     const res = spawnSync(
       'opencode',
       ['run', '--agent', CLASSIFIER_AGENT, '--format', 'json', '--thinking', '-m', model, prompt],
       {
         cwd: sandbox.root,
         encoding: 'utf8',
-        env: classifierEnvironment(sandbox, opencodeApiKey),
+        env,
         maxBuffer: 16 * 1024 * 1024,
       },
     );
@@ -258,23 +273,6 @@ function classify(name: string, version: string, subjects: string[], diff: strin
   } finally {
     removeClassifierSandbox(sandbox);
   }
-}
-
-function requireSemver(v: unknown): asserts v is string {
-  if (
-    typeof v !== 'string' ||
-    !/^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})$/.test(v)
-  ) {
-    throw new Error(`invalid plugin semver: ${JSON.stringify(v)}`);
-  }
-}
-
-function bumpVersion(v: string, kind: Classification['bump']): string {
-  requireSemver(v);
-  const [maj, min, pat] = v.split('.').map((n) => Number.parseInt(n, 10));
-  if (kind === 'major') return `${maj + 1}.0.0`;
-  if (kind === 'minor') return `${maj}.${min + 1}.0`;
-  return `${maj}.${min}.${pat + 1}`;
 }
 
 function writeChangelog(name: string, version: string, c: Classification): void {
@@ -310,21 +308,6 @@ function writeChangelog(name: string, version: string, c: Classification): void 
   }
 }
 
-// Read a plugin's manifest version as it exists at a git ref (e.g. `origin/main`),
-// or null if the manifest doesn't exist there. Used to make the run re-entrant:
-// the only thing that ever bumps a version is THIS workflow, so if main already
-// carries a higher version than the working-tree base, a prior (partial) run landed.
-function versionAtRef(ref: string, manifestPath: string): string | null {
-  const r = run('git', ['cat-file', '-p', `${ref}:${manifestPath}`]);
-  if (r.status !== 0) return null;
-  try {
-    const v = (JSON.parse(r.stdout) as { version?: unknown }).version;
-    return typeof v === 'string' ? v : null;
-  } catch {
-    return null;
-  }
-}
-
 // Fetch main up front so the bump loop can see whether a prior run already landed
 // a version for any plugin (re-entrancy on a "Re-run failed jobs").
 git(['fetch', 'origin', 'main']);
@@ -332,7 +315,7 @@ git(['fetch', 'origin', 'main']);
 // `released`: a bump for this plugin already exists on main (prior run) — only its
 // tag may still need to land. `bumped`: a fresh bump computed in this run that we
 // still need to commit/merge. The tag step covers both.
-const released: { name: string; to: string }[] = [];
+const released: { name: string; sha: string; to: string }[] = [];
 const bumped: { name: string; from: string; to: string; kind: string }[] = [];
 const bumpPaths = new Set<string>();
 
@@ -349,12 +332,21 @@ for (const p of toBump) {
     // Re-entrancy short-circuit: if main's manifest version already differs from
     // the working-tree base, a previous run of this workflow already bumped + merged
     // this plugin. Don't re-classify or re-commit — just make sure its tag exists.
-    const mainVersion = versionAtRef('origin/main', p.manifestPath);
+    const mainVersion = manifestVersionAtRef('.', 'origin/main', p.manifestPath);
     if (mainVersion && mainVersion !== current) {
-      // Refuse malformed versions before constructing immutable tag names.
-      bumpVersion(mainVersion, 'patch');
-      released.push({ name: p.name, to: mainVersion });
-      console.log(`${p.name}: already at ${mainVersion} on main — skipping bump, will verify tag`);
+      // Recover the earliest release version introduced after this run's source
+      // push, even if later releases or same-version manifest touches landed before
+      // a tag-only retry. Refuse malformed versions before constructing tag names.
+      requireSemver(mainVersion);
+      const landed = nextVersionIntroductionCommit(
+        '.',
+        afterSha,
+        'origin/main',
+        p.manifestPath,
+        current,
+      );
+      released.push({ name: p.name, sha: landed.sha, to: landed.version });
+      console.log(`${p.name}: ${landed.version} already landed — skipping bump, will verify tag`);
       continue;
     }
 
@@ -366,14 +358,10 @@ for (const p of toBump) {
 
     const c = classify(p.name, current, subjects, diff);
     const next = bumpVersion(current, c.bump);
-    // Surgically replace only the version value so the rest of the manifest keeps
-    // its exact (biome-formatted) bytes. A full JSON.stringify reflows arrays such
-    // as `keywords` onto multiple lines, which biome then rejects in CI — and the
-    // bump merges before that check, so the breakage lands on main.
-    const updated = rawManifest.replace(/("version"\s*:\s*")[^"]*"/, `$1${next}"`);
-    if (updated === rawManifest) {
-      throw new Error(`could not locate a "version" field to bump in ${vpath}`);
-    }
+    // Replace exactly the proven top-level version string while keeping every
+    // other byte stable. updateManifestVersion rereads + asserts the result, so
+    // an earlier nested `version` property can never shadow the release field.
+    const updated = updateManifestVersion(rawManifest, current, next);
     writeFileSync(vpath, updated);
     const changelogPath = join('changelog', `${p.name}.md`);
     writeChangelog(p.name, next, c);
@@ -393,6 +381,24 @@ function gh(args: string[]): void {
   } catch (e) {
     die(
       `gh ${args.slice(0, 2).join(' ')} failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`,
+    );
+  }
+}
+
+// GITHUB_TOKEN-created branch/PR events do not launch the normal lint workflow.
+// Execute its same deterministic repository gate locally after the exact release
+// commit exists and before publishing it. The trusted checks do not need either
+// publication or provider credentials, so withhold both from their child env.
+function validateBumpCommit(): void {
+  const env = { ...process.env };
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  delete env.OPENCODE_API_KEY;
+  try {
+    execFileSync('bun', ['run', 'ready'], { env, stdio: 'inherit' });
+  } catch (e) {
+    die(
+      `inline bump validation failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`,
     );
   }
 }
@@ -426,6 +432,8 @@ if (bumped.length > 0) {
   ].join('\n');
 
   git(['commit', '-m', title]);
+  assertCleanWorkingTree('working tree must be clean before validating bump branch');
+  validateBumpCommit();
   assertCleanWorkingTree('working tree must be clean before publishing bump branch');
 
   // Create-or-update push: a re-run rebuilds the same branch but with a fresh
@@ -506,22 +514,15 @@ if (bumped.length > 0) mergeBumpPr();
 // mis-pointed by an unrelated merge that races onto main between our merge and
 // our fetch (the `*--v*` ruleset makes a mis-tag permanent). Freshly-bumped
 // plugins resolve via the bump PR's recorded mergeCommit; already-released
-// plugins (prior run) resolve via the commit on main that last touched the
-// manifest. Both are independent of whatever else `main` HEAD currently points at.
+// plugins (prior run) were resolved above to the earliest first-parent commit
+// after afterSha that INTRODUCED a new version, not a later same-version touch or
+// newer release. Both are independent of whatever else `main` HEAD points at.
 function mergeCommitForBranch(): string {
   const r = run('gh', ['pr', 'view', branch, '--json', 'mergeCommit', '--jq', '.mergeCommit.oid']);
   const oid = r.status === 0 ? r.stdout.trim() : '';
   if (!oid) die(`could not resolve merge commit for ${branch} via gh pr view`);
   git(['fetch', 'origin', oid]);
   return oid;
-}
-
-function manifestCommitOnMain(name: string): string {
-  const plugin = plugins.find((p) => p.name === name);
-  if (!plugin) die(`unknown plugin ${name}`);
-  const sha = git(['log', '-1', '--format=%H', 'origin/main', '--', plugin.manifestPath]);
-  if (!sha) die(`could not resolve the commit that bumped ${name} on main`);
-  return sha;
 }
 
 function remoteTagTarget(tag: string): string | null {
@@ -572,7 +573,7 @@ assertCleanWorkingTree('working tree must be clean before publishing version tag
 const freshMergeSha = bumped.length > 0 ? mergeCommitForBranch() : '';
 const tagTargets: { name: string; to: string; sha: string }[] = [
   ...bumped.map((b) => ({ name: b.name, sha: freshMergeSha, to: b.to })),
-  ...released.map((rel) => ({ name: rel.name, sha: manifestCommitOnMain(rel.name), to: rel.to })),
+  ...released,
 ];
 
 // Tag each released plugin version `<plugin>--v<version>` on its exact commit. A

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -156,6 +157,65 @@ export function auditClassifierRun(run: ClassifierRun): Classification {
   return saved;
 }
 
+function enabledDebugTools(raw: string, expectedAgent: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fail(`OpenCode debug agent ${expectedAgent} output is not JSON`);
+  }
+  if (!isRecord(parsed)) fail(`OpenCode debug agent ${expectedAgent} output must be an object`);
+  if (parsed.name !== expectedAgent) {
+    fail(`OpenCode debug agent resolved ${JSON.stringify(parsed.name)}, expected ${expectedAgent}`);
+  }
+  if (parsed.mode !== 'primary') {
+    fail(
+      `OpenCode debug agent ${expectedAgent} must be primary, got ${JSON.stringify(parsed.mode)}`,
+    );
+  }
+  if (!isRecord(parsed.tools))
+    fail(`OpenCode debug agent ${expectedAgent} tools must be an object`);
+  const enabled: string[] = [];
+  for (const [name, value] of Object.entries(parsed.tools)) {
+    if (typeof value !== 'boolean')
+      fail(`OpenCode debug agent ${expectedAgent} tool ${name} is not boolean`);
+    if (value) enabled.push(name);
+  }
+  return enabled.sort();
+}
+
+export function auditClassifierPolicy(buildRaw: string, bumpRaw: string): void {
+  const build = enabledDebugTools(buildRaw, 'build');
+  if (build.length) fail(`fallback build agent exposes tools: ${build.join(', ')}`);
+  const bump = enabledDebugTools(bumpRaw, CLASSIFIER_AGENT);
+  if (JSON.stringify(bump) !== JSON.stringify([SUBMISSION_TOOL])) {
+    fail(`bump agent tools must be exactly ${SUBMISSION_TOOL}; got ${bump.join(', ') || '(none)'}`);
+  }
+}
+
+export function preflightClassifierSandbox(
+  sandbox: ClassifierSandbox,
+  env: Record<string, string>,
+): void {
+  const inspect = (agent: string): string => {
+    const result = spawnSync('opencode', ['debug', 'agent', agent], {
+      cwd: sandbox.root,
+      encoding: 'utf8',
+      env,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    if (result.error)
+      throw new Error(`could not launch opencode preflight: ${result.error.message}`);
+    if (result.status !== 0) {
+      const detail =
+        (result.stderr ?? '').trim().split('\n').slice(-1)[0] || `exit ${result.status}`;
+      fail(`OpenCode debug agent ${agent} failed: ${detail}`);
+    }
+    return result.stdout ?? '';
+  };
+  auditClassifierPolicy(inspect('build'), inspect(CLASSIFIER_AGENT));
+}
+
 export function boundedSubjects(subjects: string[]): string[] {
   const output: string[] = [];
   let used = 0;
@@ -169,8 +229,8 @@ export function boundedSubjects(subjects: string[]): string[] {
   return output;
 }
 
-export function createClassifierSandbox(sourceRoot = '.'): ClassifierSandbox {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-opencode-classifier-'));
+export function createClassifierSandbox(sourceRoot = '.', parent = tmpdir()): ClassifierSandbox {
+  const root = mkdtempSync(join(parent, 'pardes-opencode-classifier-'));
   const sandbox = {
     cache: join(root, 'cache'),
     config: join(root, 'config'),
@@ -189,6 +249,26 @@ export function createClassifierSandbox(sourceRoot = '.'): ClassifierSandbox {
     copyFileSync(join(sourceRoot, source), target);
   }
   writeFileSync(sandbox.submissionFile, '');
+
+  // Defense in depth around OpenCode v1.15.12 discovery: non-VCS directories
+  // use `/` as worktree and scan ancestor `.opencode` directories. A local Git
+  // root closes that walk. The narrowed child env below additionally disables
+  // project discovery and explicitly routes config to this sandbox's `.opencode`.
+  // OS-managed OpenCode policy remains part of the trusted runner boundary.
+  const initialized = spawnSync('git', ['init', '--quiet', root], {
+    encoding: 'utf8',
+    env: {
+      GIT_CONFIG_NOSYSTEM: '1',
+      HOME: sandbox.home,
+      PATH: process.env.PATH ?? '',
+    },
+  });
+  if (initialized.error || initialized.status !== 0) {
+    rmSync(root, { force: true, recursive: true });
+    if (initialized.error)
+      throw new Error(`could not launch git init: ${initialized.error.message}`);
+    throw new Error(`could not initialize classifier Git boundary`);
+  }
   return sandbox;
 }
 
@@ -203,10 +283,13 @@ export function classifierEnvironment(
 ): Record<string, string> {
   if (!path) throw new Error('PATH missing');
   return {
+    GIT_CONFIG_NOSYSTEM: '1',
     HOME: sandbox.home,
     OPENCODE_API_KEY: apiKey,
+    OPENCODE_CONFIG_DIR: join(sandbox.root, '.opencode'),
     OPENCODE_DISABLE_AUTOUPDATE: 'true',
     OPENCODE_DISABLE_MODELS_FETCH: 'true',
+    OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
     PARDES_VERDICT_FILE: sandbox.submissionFile,
     PATH: path,
     PWD: sandbox.root,

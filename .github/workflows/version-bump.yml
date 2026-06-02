@@ -17,12 +17,21 @@ name: version-bump
 #   force/moves them — only the disposable bot-owned `bump/<sha>` branch may be
 #   force-with-leased on a re-run.
 # - Bounded untrusted strings (commit subjects/diffs) are one argv DATA value,
-#   never interpolated into a shell. OpenCode runs in a disposable non-repo
-#   cwd/HOME with a wildcard-deny PRIMARY classifier and one schema-first verdict
-#   submission tool. Its narrowed child env has OPENCODE_API_KEY plus runtime
-#   paths only — never GH_TOKEN, persisted credentials, or publication secrets.
-#   The script rejects fallback-agent warnings, prose salvage, unexpected tools,
-#   invalid/multiple submissions, and non-allowlisted release diffs before push.
+#   never interpolated into a shell. OpenCode runs in a disposable Git-rooted
+#   cwd/HOME with global + PRIMARY-agent wildcard deny and one schema-first verdict
+#   submission tool. Its narrowed child env has OPENCODE_API_KEY plus isolated
+#   runtime paths/config controls — never GH_TOKEN, persisted credentials, or
+#   publication secrets.
+#   A resolved-policy preflight asserts fallback build has zero enabled tools and
+#   bump has only submit_verdict. The script also rejects fallback-agent warnings,
+#   prose salvage, unexpected tools, invalid/multiple submissions, and
+#   non-allowlisted release diffs before push.
+# - GITHUB_TOKEN-created bump branch/PR events do NOT launch lint.yml. Before any
+#   bump branch push, bump.ts runs the same `bun run ready` deterministic gate
+#   inline with publication/provider credentials removed, then reasserts a clean
+#   tree. A blanket ruleset that also requires a hosted check on these bot PRs is
+#   intentionally fail-closed at synchronous merge; repo policy must account for
+#   the trusted bump path without granting any broader bypass.
 
 on:
   push:
@@ -49,11 +58,20 @@ jobs:
 
       - name: Read pinned tool versions
         id: tool-versions
-        run: echo "bun=$(awk '$1 == "bun" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "bun=$(awk '$1 == "bun" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
+          echo "uv=$(awk '$1 == "uv" { print $2 }' .tool-versions)" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ steps.tool-versions.outputs.bun }}
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ steps.tool-versions.outputs.uv }}
+
+      - name: Install dependencies for the inline pre-merge ready gate
+        run: bun install --frozen-lockfile
 
       - name: Install opencode (pinned, from npm)
         run: |

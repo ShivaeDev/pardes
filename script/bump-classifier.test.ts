@@ -1,6 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  auditClassifierPolicy,
   auditClassifierRun,
   boundedSubjects,
   classifierEnvironment,
@@ -96,14 +100,42 @@ describe('auditClassifierRun', () => {
 });
 
 describe('classifier policy', () => {
-  it('selects a primary wildcard-deny agent and denies the submission tool by default', () => {
+  const debugAgent = (name: string, tools: Record<string, boolean>, mode = 'primary') =>
+    JSON.stringify({ mode, name, tools });
+
+  it('accepts an effective deny-all fallback and submit-only classifier', () => {
+    expect(() =>
+      auditClassifierPolicy(
+        debugAgent('build', { bash: false, read: false, submit_verdict: false }),
+        debugAgent('bump', { bash: false, read: false, submit_verdict: true }),
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects an actionable fallback or extra classifier capability', () => {
+    expect(() =>
+      auditClassifierPolicy(
+        debugAgent('build', { bash: true, submit_verdict: false }),
+        debugAgent('bump', { submit_verdict: true }),
+      ),
+    ).toThrow('fallback build agent exposes tools: bash');
+    expect(() =>
+      auditClassifierPolicy(
+        debugAgent('build', { bash: false, submit_verdict: false }),
+        debugAgent('bump', { read: true, submit_verdict: true }),
+      ),
+    ).toThrow('bump agent tools must be exactly submit_verdict; got read, submit_verdict');
+  });
+
+  it('globally disables fallback build tools and lets only the primary bump agent submit', () => {
     const agent = readFileSync(new URL('../.opencode/agent/bump.md', import.meta.url), 'utf8');
     const config = readFileSync(new URL('../.opencode/opencode.json', import.meta.url), 'utf8');
 
     expect(agent).toContain('mode: primary');
     expect(agent).toContain('  "*": deny');
     expect(agent).toContain('  submit_verdict: allow');
-    expect(JSON.parse(config).permission).toEqual({ submit_verdict: 'deny' });
+    expect(agent.match(/:\s+allow/g)).toEqual([': allow']);
+    expect(JSON.parse(config).permission).toEqual({ '*': 'deny' });
   });
 });
 
@@ -142,14 +174,40 @@ describe('boundedSubjects', () => {
 });
 
 describe('classifierEnvironment', () => {
-  it('passes only isolated runtime paths and the OpenCode credential', () => {
+  it('establishes a local Git root below a contaminated ancestor', () => {
+    const parent = join(tmpdir(), `pardes-opencode-ancestor-${crypto.randomUUID()}`);
+    mkdirSync(join(parent, '.opencode/tools'), { recursive: true });
+    writeFileSync(
+      join(parent, '.opencode/tools/ancestor-probe.ts'),
+      'throw new Error("loaded ancestor")',
+    );
+    const sandbox = createClassifierSandbox('.', parent);
+    try {
+      expect(existsSync(join(sandbox.root, '.git'))).toBe(true);
+      expect(
+        execFileSync('git', ['rev-parse', '--show-toplevel'], {
+          cwd: sandbox.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(realpathSync(sandbox.root));
+      expect(existsSync(join(sandbox.root, '.opencode/tools/ancestor-probe.ts'))).toBe(false);
+    } finally {
+      removeClassifierSandbox(sandbox);
+      rmSync(parent, { force: true, recursive: true });
+    }
+  });
+
+  it('passes only isolated runtime paths, discovery controls, and the OpenCode credential', () => {
     const sandbox = createClassifierSandbox();
     try {
       expect(classifierEnvironment(sandbox, 'provider-secret', '/runtime/bin')).toEqual({
+        GIT_CONFIG_NOSYSTEM: '1',
         HOME: `${sandbox.root}/home`,
         OPENCODE_API_KEY: 'provider-secret',
+        OPENCODE_CONFIG_DIR: `${sandbox.root}/.opencode`,
         OPENCODE_DISABLE_AUTOUPDATE: 'true',
         OPENCODE_DISABLE_MODELS_FETCH: 'true',
+        OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
         PARDES_VERDICT_FILE: `${sandbox.root}/verdict.jsonl`,
         PATH: '/runtime/bin',
         PWD: sandbox.root,

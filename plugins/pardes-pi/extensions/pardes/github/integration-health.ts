@@ -5,6 +5,7 @@ import {
   GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
   type GitHubRateLimitHealth,
+  type GitHubRepositoryIdentity,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -305,60 +306,83 @@ export function makeGitHubIntegrationHealthService(
     cwd: string,
     expression: string,
     referenceHeadSha: string,
+    route: GitHubRepositoryIdentity,
   ) {
-    const reservation = yield* hostedMetadata.reserveGraphQLRequest();
-    const response = yield* run(cwd, [
-      'api',
-      'graphql',
-      '--hostname',
-      GITHUB_HOSTED_METADATA_HOSTNAME,
-      '--raw-field',
-      `query=${HOSTED_CHECKS_GRAPHQL_QUERY}`,
-      '--field',
-      'owner={owner}',
-      '--field',
-      'repo={repo}',
-      '--field',
-      `expression=${expression}`,
-      '--field',
-      `limit=${MAX_GITHUB_HOSTED_CHECKS}`,
-    ]);
-    const decoded = yield* hostedMetadata.decodeGraphQL(
-      'inspect hosted checks',
-      GitHubHostedChecksGraphQLSchema,
-      response.stdout,
-      reservation.id,
+    const decoded = yield* Effect.acquireUseRelease(
+      hostedMetadata.reserveGraphQLRequest(),
+      (reservation) =>
+        Effect.gen(function* () {
+          yield* hostedMetadata.launchGraphQLRequest(reservation.id);
+          const response = yield* run(cwd, [
+            'api',
+            'graphql',
+            '--hostname',
+            GITHUB_HOSTED_METADATA_HOSTNAME,
+            '--raw-field',
+            `query=${HOSTED_CHECKS_GRAPHQL_QUERY}`,
+            '--field',
+            `owner=${route.owner}`,
+            '--field',
+            `repo=${route.repo}`,
+            '--field',
+            `expression=${expression}`,
+            '--field',
+            `limit=${MAX_GITHUB_HOSTED_CHECKS}`,
+          ]);
+          return yield* hostedMetadata.decodeGraphQL(
+            'inspect hosted checks',
+            GitHubHostedChecksGraphQLSchema,
+            response.stdout,
+            reservation.id,
+          );
+        }),
+      (reservation) => hostedMetadata.cancelUnlaunchedGraphQLReservation(reservation.id),
     );
     return projectHostedChecks(decoded, referenceHeadSha);
   });
 
-  const observeHostedChecks = (cwd: string, expression: string, referenceHeadSha: string) =>
-    hostedChecks(cwd, expression, referenceHeadSha).pipe(
+  const observeHostedChecks = (
+    cwd: string,
+    expression: string,
+    referenceHeadSha: string,
+    route: GitHubRepositoryIdentity,
+  ) =>
+    hostedChecks(cwd, expression, referenceHeadSha, route).pipe(
       Effect.matchEffect({
         onFailure: (error) => Effect.succeed(unavailableHostedChecks(issue(error))),
         onSuccess: Effect.succeed,
       }),
     );
 
-  const inspectDefaultBranch = Effect.fnUntraced(function* (cwd: string) {
-    const reservation = yield* hostedMetadata.reserveGraphQLRequest();
-    const response = yield* run(cwd, [
-      'api',
-      'graphql',
-      '--hostname',
-      GITHUB_HOSTED_METADATA_HOSTNAME,
-      '--raw-field',
-      `query=${ADVERTISED_DEFAULT_BRANCH_GRAPHQL_QUERY}`,
-      '--field',
-      'owner={owner}',
-      '--field',
-      'repo={repo}',
-    ]);
-    const decoded = yield* hostedMetadata.decodeGraphQL(
-      'inspect advertised default branch head',
-      GitHubAdvertisedDefaultBranchGraphQLSchema,
-      response.stdout,
-      reservation.id,
+  const inspectDefaultBranch = Effect.fnUntraced(function* (
+    cwd: string,
+    route: GitHubRepositoryIdentity,
+  ) {
+    const decoded = yield* Effect.acquireUseRelease(
+      hostedMetadata.reserveGraphQLRequest(),
+      (reservation) =>
+        Effect.gen(function* () {
+          yield* hostedMetadata.launchGraphQLRequest(reservation.id);
+          const response = yield* run(cwd, [
+            'api',
+            'graphql',
+            '--hostname',
+            GITHUB_HOSTED_METADATA_HOSTNAME,
+            '--raw-field',
+            `query=${ADVERTISED_DEFAULT_BRANCH_GRAPHQL_QUERY}`,
+            '--field',
+            `owner=${route.owner}`,
+            '--field',
+            `repo=${route.repo}`,
+          ]);
+          return yield* hostedMetadata.decodeGraphQL(
+            'inspect advertised default branch head',
+            GitHubAdvertisedDefaultBranchGraphQLSchema,
+            response.stdout,
+            reservation.id,
+          );
+        }),
+      (reservation) => hostedMetadata.cancelUnlaunchedGraphQLReservation(reservation.id),
     );
     const defaultBranch = decoded.data.repository.defaultBranchRef;
     if (defaultBranch === null) {
@@ -367,7 +391,12 @@ export function makeGitHubIntegrationHealthService(
         projection: { availability: 'unavailable', issue: 'default_branch_missing' },
       } satisfies InternalDefaultBranchIntegrationHealth;
     }
-    const checks = yield* observeHostedChecks(cwd, defaultBranch.name, defaultBranch.target.oid);
+    const checks = yield* observeHostedChecks(
+      cwd,
+      defaultBranch.name,
+      defaultBranch.target.oid,
+      route,
+    );
     return {
       failingWorkflowIds: checks.failingWorkflowIds,
       projection: {
@@ -379,8 +408,8 @@ export function makeGitHubIntegrationHealthService(
     } satisfies InternalDefaultBranchIntegrationHealth;
   });
 
-  const observeDefaultBranch = (cwd: string) =>
-    inspectDefaultBranch(cwd).pipe(
+  const observeDefaultBranch = (cwd: string, route: GitHubRepositoryIdentity) =>
+    inspectDefaultBranch(cwd, route).pipe(
       Effect.matchEffect({
         onFailure: (error) =>
           Effect.succeed({
@@ -395,6 +424,7 @@ export function makeGitHubIntegrationHealthService(
     cwd: string,
     rawAssociation: GitHubPullRequestIntegrationHealthAssociation,
     defaultBranch: InternalDefaultBranchIntegrationHealth,
+    route: GitHubRepositoryIdentity,
   ) {
     const associationOption = Schema.decodeUnknownOption(GitHubIntegrationHealthAssociationSchema)(
       rawAssociation,
@@ -404,14 +434,18 @@ export function makeGitHubIntegrationHealthService(
     const association = associationOption.value;
     const identifier =
       association.number === undefined ? association.url : String(association.number);
-    yield* hostedMetadata.noteUnmeteredGraphQLRequest();
-    const viewed = yield* run(cwd, [
-      'pr',
-      'view',
-      identifier,
-      '--json',
-      PULL_REQUEST_HEALTH_JSON_FIELDS,
-    ]);
+    const viewed = yield* hostedMetadata.accountOpaqueRequest(
+      'graphql',
+      run(cwd, [
+        'pr',
+        'view',
+        identifier,
+        '--json',
+        PULL_REQUEST_HEALTH_JSON_FIELDS,
+        '--repo',
+        route.slug,
+      ]),
+    );
     const pullRequest = yield* decodeGitHubJson(
       'inspect pull request hosted head',
       GitHubPullRequestHealthMetadataSchema,
@@ -433,6 +467,7 @@ export function makeGitHubIntegrationHealthService(
       cwd,
       association.headBranch ?? pullRequest.headRefOid,
       pullRequest.headRefOid,
+      route,
     );
     const projected = {
       id: safeProjectionId(association.id),
@@ -460,8 +495,9 @@ export function makeGitHubIntegrationHealthService(
     cwd: string,
     association: GitHubPullRequestIntegrationHealthAssociation,
     defaultBranch: InternalDefaultBranchIntegrationHealth,
+    route: GitHubRepositoryIdentity,
   ) =>
-    inspectPullRequest(cwd, association, defaultBranch).pipe(
+    inspectPullRequest(cwd, association, defaultBranch, route).pipe(
       Effect.matchEffect({
         onFailure: (error) => Effect.succeed(unavailablePullRequest(association, issue(error))),
         onSuccess: Effect.succeed,
@@ -473,33 +509,34 @@ export function makeGitHubIntegrationHealthService(
       0,
       MAX_GITHUB_INTEGRATION_HEALTH_PULL_REQUESTS,
     );
-    const routeFailure =
+    const routeResult =
       input.cwd.trim().length === 0
-        ? ('command_failed' as const)
+        ? ({ _tag: 'Failure', issue: 'command_failed' } as const)
         : yield* hostedMetadata
-            .ensureFixedGitHubComRepository(input.cwd)
+            .fixedRoute(
+              input.cwd,
+              selectedPullRequests.map(({ url }) => url),
+            )
             .pipe(
-              Effect.andThen(
-                Effect.forEach(selectedPullRequests, ({ url }) =>
-                  hostedMetadata.ensureFixedGitHubComUrl(url),
-                ),
-              ),
-              Effect.match({ onFailure: issue, onSuccess: () => undefined }),
+              Effect.match({
+                onFailure: (error) => ({ _tag: 'Failure' as const, issue: issue(error) }),
+                onSuccess: (route) => ({ _tag: 'Success' as const, route }),
+              }),
             );
     const defaultBranch =
-      routeFailure !== undefined
+      routeResult._tag === 'Failure'
         ? ({
             failingWorkflowIds: new Set<number>(),
-            projection: { availability: 'unavailable', issue: routeFailure },
+            projection: { availability: 'unavailable', issue: routeResult.issue },
           } satisfies InternalDefaultBranchIntegrationHealth)
-        : yield* observeDefaultBranch(input.cwd);
+        : yield* observeDefaultBranch(input.cwd, routeResult.route);
     const pullRequests =
-      routeFailure !== undefined
+      routeResult._tag === 'Failure'
         ? selectedPullRequests.map((association) =>
-            unavailablePullRequest(association, routeFailure),
+            unavailablePullRequest(association, routeResult.issue),
           )
         : yield* Effect.forEach(selectedPullRequests, (association) =>
-            observePullRequest(input.cwd, association, defaultBranch),
+            observePullRequest(input.cwd, association, defaultBranch, routeResult.route),
           );
     const rateLimit = yield* hostedMetadata.snapshot();
     return {

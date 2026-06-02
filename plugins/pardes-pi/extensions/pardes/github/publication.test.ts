@@ -9,6 +9,24 @@ import {
 import { result, scriptedRunner } from './test-fixtures.ts';
 import type { GitHubCommandRunnerShape, ProcessInvocation } from './transport.ts';
 
+function withoutBoundRepoArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {
+  return args.at(-2) === '--repo' && args.at(-1) === 'acme/project' ? args.slice(0, -2) : args;
+}
+
+function withoutBoundRepo(
+  invocation: ProcessInvocation | undefined,
+): ProcessInvocation | undefined {
+  return invocation === undefined
+    ? undefined
+    : { ...invocation, args: withoutBoundRepoArgs(invocation.args) };
+}
+
+function withoutBoundRepos(
+  invocations: ReadonlyArray<ProcessInvocation>,
+): ReadonlyArray<ProcessInvocation> {
+  return invocations.map(withoutBoundRepo) as ReadonlyArray<ProcessInvocation>;
+}
+
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     baseRefName: 'main',
@@ -64,7 +82,12 @@ describe('GitHub publication boundary', () => {
       cwd: input.cwd,
     });
     expect(fixture.invocations[0]?.args).not.toContain('--force');
-    expect(fixture.invocations[1]).toEqual({
+    expect(
+      fixture.invocations
+        .filter(({ args, command }) => command === 'gh' && args[0] === 'pr')
+        .every(({ args }) => args.at(-2) === '--repo' && args.at(-1) === 'acme/project'),
+    ).toBe(true);
+    expect(withoutBoundRepo(fixture.invocations[1])).toEqual({
       args: [
         'pr',
         'list',
@@ -82,7 +105,7 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
-    expect(fixture.invocations[2]).toEqual({
+    expect(withoutBoundRepo(fixture.invocations[2])).toEqual({
       args: [
         'pr',
         'create',
@@ -98,21 +121,21 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
-    expect(fixture.invocations[3]?.args).toEqual([
+    expect(withoutBoundRepoArgs(fixture.invocations[3]?.args ?? [])).toEqual([
       'pr',
       'view',
       input.headBranch,
       '--json',
       'number,url,state,isDraft,headRefName,headRefOid,baseRefName',
     ]);
-    expect(fixture.invocations.at(-1)).toEqual({
+    expect(withoutBoundRepo(fixture.invocations.at(-1))).toEqual({
       args: ['pr', 'view', '42', '--web'],
       command: 'gh',
       cwd: input.cwd,
     });
   });
 
-  test('conservatively accounts for CLI-only hosted requests without changing exact-SHA publication', async () => {
+  test('causally settles completed CLI-only hosted requests without changing exact-SHA publication', async () => {
     const fallback = scriptedRunner([
       result(
         JSON.stringify({
@@ -139,7 +162,7 @@ describe('GitHub publication boundary', () => {
     await Effect.runPromise(service.publish(input));
     const rateLimit = await Effect.runPromise(hostedMetadata.snapshot());
 
-    expect(rateLimit.graphql).toMatchObject({ remaining: 3_985, source: 'local_estimate' });
+    expect(rateLimit.graphql).toMatchObject({ remaining: 4_000, source: 'rest_fallback' });
     expect(rateLimit.rest).toMatchObject({ remaining: 3_000, source: 'rest_fallback' });
     expect(fixture.invocations[0]).toEqual({
       args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
@@ -194,7 +217,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
       false,
     );
-    expect(fixture.invocations[2]).toEqual({
+    expect(withoutBoundRepo(fixture.invocations[2])).toEqual({
       args: [
         'pr',
         'edit',
@@ -209,7 +232,7 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
-    expect(fixture.invocations[1]?.args).toEqual([
+    expect(withoutBoundRepoArgs(fixture.invocations[1]?.args ?? [])).toEqual([
       'pr',
       'list',
       '--state',
@@ -223,7 +246,7 @@ describe('GitHub publication boundary', () => {
       '--json',
       'number,headRefName,baseRefName',
     ]);
-    expect(fixture.invocations[3]?.args).toEqual([
+    expect(withoutBoundRepoArgs(fixture.invocations[3]?.args ?? [])).toEqual([
       'pr',
       'view',
       '42',
@@ -302,7 +325,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(published).toMatchObject({ action: 'updated', headBranch: legacyHeadBranch });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: [
           'pr',
@@ -370,7 +393,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(failure._tag).toBe('GitHubResponseError');
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: [
           'pr',
@@ -404,7 +427,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(failure._tag).toBe('GitHubResponseError');
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: [
           'pr',
@@ -437,7 +460,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(synced).toEqual({ status: 'synced' });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
@@ -651,7 +674,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(synced).toEqual({ status: 'synced' });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
@@ -684,7 +707,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(synced).toEqual({ pullRequestStatus: 'merged', status: 'terminal' });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
@@ -727,13 +750,30 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(mismatchFailure._tag).toBe('GitHubResponseError');
-    expect(mismatch.invocations).toEqual([
+    expect(withoutBoundRepos(mismatch.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
         cwd: input.cwd,
       },
     ]);
+  });
+
+  test('rejects a same-host cross-repository final publication URL', async () => {
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ url: 'https://github.com/other/project/pull/42' }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for association URL',
+    });
   });
 
   test('rejects oversized final publication URLs instead of projecting them', async () => {

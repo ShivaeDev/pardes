@@ -8,6 +8,7 @@ import {
 } from './errors.ts';
 import {
   type GitHubHostedMetadataShape,
+  type GitHubRepositoryIdentity,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -154,8 +155,11 @@ export function makeGitHubPublicationService(
     runner.run({ args, command: executable, cwd });
   const github = makeGitHubCli(runner);
   const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
-  const runGitHub = (cwd: string, args: ReadonlyArray<string>) =>
-    hostedMetadata.noteUnmeteredGraphQLRequest().pipe(Effect.andThen(github.run(cwd, args)));
+  const runGitHub = (route: GitHubRepositoryIdentity, cwd: string, args: ReadonlyArray<string>) =>
+    hostedMetadata.accountOpaqueRequest(
+      'graphql',
+      github.run(cwd, [...args, '--repo', route.slug]),
+    );
   const pushedHeadVerificationDelayMillis = boundedVerificationOverride(
     'pushedHeadVerificationDelayMillis',
     options.pushedHeadVerificationDelayMillis,
@@ -169,8 +173,11 @@ export function makeGitHubPublicationService(
     true,
   );
 
-  const verifyPushedHead = Effect.fnUntraced(function* (input: SyncExistingPullRequestInput) {
-    const verified = yield* runGitHub(input.cwd, [
+  const verifyPushedHead = Effect.fnUntraced(function* (
+    input: SyncExistingPullRequestInput,
+    route: GitHubRepositoryIdentity,
+  ) {
+    const verified = yield* runGitHub(route, input.cwd, [
       'pr',
       'view',
       String(input.pullRequestNumber),
@@ -202,8 +209,8 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(SyncExistingPullRequestInputSchema)(
       rawInput,
     ).pipe(Effect.mapError((cause) => new GitHubSyncInputError({ cause })));
-    yield* hostedMetadata.ensureFixedGitHubComRepository(input.cwd);
-    const viewed = yield* runGitHub(input.cwd, [
+    const route = yield* hostedMetadata.fixedRoute(input.cwd);
+    const viewed = yield* runGitHub(route, input.cwd, [
       'pr',
       'view',
       String(input.pullRequestNumber),
@@ -237,7 +244,7 @@ export function makeGitHubPublicationService(
     // `gh pr view` may briefly report the previous hosted OID after the exact
     // remote ref update. Retry only that decoded OID mismatch: identity drift,
     // malformed metadata, and transport failures still fail immediately.
-    yield* verifyPushedHead(input).pipe(
+    yield* verifyPushedHead(input, route).pipe(
       Effect.retry(
         Schedule.both(
           Schedule.spaced(pushedHeadVerificationDelayMillis),
@@ -265,7 +272,7 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(PublishPullRequestInputSchema)(rawInput).pipe(
       Effect.mapError((cause) => new GitHubPublicationInputError({ cause })),
     );
-    yield* hostedMetadata.ensureFixedGitHubComRepository(input.cwd);
+    const route = yield* hostedMetadata.fixedRoute(input.cwd);
     const opaqueHeadBranch = isOpaquePublishedReviewBranch(input.headBranch);
     let existing: { readonly number: number } | undefined;
     if (!opaqueHeadBranch) {
@@ -274,7 +281,7 @@ export function makeGitHubPublicationService(
           cause: 'legacy published review branch requires an existing pull-request number',
         });
       }
-      const viewed = yield* runGitHub(input.cwd, [
+      const viewed = yield* runGitHub(route, input.cwd, [
         'pr',
         'view',
         String(input.legacyExistingPullRequestNumber),
@@ -286,7 +293,7 @@ export function makeGitHubPublicationService(
         GitHubPublicationMetadataSchema,
         viewed.stdout,
       );
-      yield* hostedMetadata.ensureFixedGitHubComUrl(pullRequest.url);
+      yield* hostedMetadata.fixedRoute(input.cwd, [pullRequest.url]);
       if (
         pullRequest.number !== input.legacyExistingPullRequestNumber ||
         status(pullRequest.state) !== 'open' ||
@@ -306,7 +313,7 @@ export function makeGitHubPublicationService(
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
     if (opaqueHeadBranch) {
-      const listed = yield* runGitHub(input.cwd, [
+      const listed = yield* runGitHub(route, input.cwd, [
         'pr',
         'list',
         '--state',
@@ -333,7 +340,7 @@ export function makeGitHubPublicationService(
     }
     const action = existing ? ('updated' as const) : ('created' as const);
     if (existing) {
-      yield* runGitHub(input.cwd, [
+      yield* runGitHub(route, input.cwd, [
         'pr',
         'edit',
         String(existing.number),
@@ -345,7 +352,7 @@ export function makeGitHubPublicationService(
         input.baseBranch,
       ]);
     } else {
-      yield* runGitHub(input.cwd, [
+      yield* runGitHub(route, input.cwd, [
         'pr',
         'create',
         '--title',
@@ -359,7 +366,7 @@ export function makeGitHubPublicationService(
       ]);
     }
     const identifier = existing ? String(existing.number) : input.headBranch;
-    const viewed = yield* runGitHub(input.cwd, [
+    const viewed = yield* runGitHub(route, input.cwd, [
       'pr',
       'view',
       identifier,
@@ -371,7 +378,7 @@ export function makeGitHubPublicationService(
       GitHubPublicationMetadataSchema,
       viewed.stdout,
     );
-    yield* hostedMetadata.ensureFixedGitHubComUrl(pullRequest.url);
+    yield* hostedMetadata.fixedRoute(input.cwd, [pullRequest.url]);
     if (
       pullRequest.headRefName !== input.headBranch ||
       pullRequest.headRefOid !== input.headSha ||
@@ -383,7 +390,7 @@ export function makeGitHubPublicationService(
       });
     }
     if (input.openInBrowser === true)
-      yield* runGitHub(input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
+      yield* runGitHub(route, input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
     return {
       action,
       baseBranch: pullRequest.baseRefName,

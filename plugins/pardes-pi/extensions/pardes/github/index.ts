@@ -19,7 +19,6 @@ export {
   GITHUB_WATCHER_PAUSE_THRESHOLD,
   GITHUB_WATCHER_RATE_LIMIT_RESERVE,
   GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
-  type GitHubGraphQLRequestReservation,
   type GitHubHostedMetadataShape,
   type GitHubRateLimitBudget,
   type GitHubRateLimitBudgetObservation,
@@ -28,8 +27,12 @@ export {
   type GitHubRateLimitFallbackStatus,
   type GitHubRateLimitHealth,
   type GitHubRateLimitPressure,
+  type GitHubRateLimitResource,
+  type GitHubRepositoryIdentity,
+  type GitHubRequestReservation,
   type GitHubWatcherRateLimitStatus,
   type GitHubWatcherThrottleTier,
+  MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 export {

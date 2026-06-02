@@ -19,12 +19,14 @@ export const GITHUB_WATCHER_PAUSE_INTERVAL_MILLIS = 60_000;
 export const GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST = 10;
 export const GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST = 1;
 export const GITHUB_CLI_GRAPHQL_ESTIMATED_COST = 5;
+export const MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS = 64;
 export const GITHUB_HOSTED_METADATA_HOSTNAME = 'github.com';
 export const GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT = 'github_com_controller_lifetime';
 
 export type GitHubRateLimitBudgetSource = 'graphql' | 'rest_fallback' | 'local_estimate';
 export type GitHubRateLimitPressure = 'ready' | 'near_exhaustion' | 'exhausted';
 export type GitHubRateLimitFallbackStatus = 'not_requested' | 'available' | 'unavailable';
+export type GitHubRateLimitResource = 'graphql' | 'rest';
 
 export interface GitHubRateLimitBudget {
   readonly limit: number;
@@ -38,8 +40,14 @@ export type GitHubRateLimitBudgetObservation =
   | ({ readonly availability: 'available' } & GitHubRateLimitBudget)
   | { readonly availability: 'unavailable' };
 
-export interface GitHubGraphQLRequestReservation {
+export interface GitHubRequestReservation {
   readonly id: string;
+}
+
+export interface GitHubRepositoryIdentity {
+  readonly owner: string;
+  readonly repo: string;
+  readonly slug: string;
 }
 
 export type GitHubWatcherThrottleTier =
@@ -80,7 +88,7 @@ export interface GitHubRateLimitHealth {
 }
 
 export interface GitHubHostedMetadataShape {
-  /** Decode one server-selected GraphQL envelope and retain only its bounded rate metadata. */
+  /** Decode one server-selected GraphQL envelope and settle only its exact launched reservation. */
   readonly decodeGraphQL: <
     A extends { readonly data: { readonly rateLimit: GitHubGraphQLRateLimit } },
     I,
@@ -91,34 +99,42 @@ export interface GitHubHostedMetadataShape {
     source: string,
     reservationId?: string,
   ) => Effect.Effect<A, GitHubResponseError, R>;
-  /** Reserve one GraphQL request before launch; exact decoded metadata settles only this identity. */
+  /** Reserve GraphQL work before launch; a bounded cap fails closed after repeated unobserved launches. */
   readonly reserveGraphQLRequest: (
     estimatedCost?: number,
-  ) => Effect.Effect<GitHubGraphQLRequestReservation>;
-  readonly cancelGraphQLReservation: (reservationId: string) => Effect.Effect<void>;
-  /** Conservatively debit CLI or REST paths whose selected response cannot carry GraphQL `rateLimit`. */
-  readonly noteUnmeteredGraphQLRequest: (estimatedCost?: number) => Effect.Effect<void>;
-  readonly noteUnmeteredRestRequest: (estimatedCost?: number) => Effect.Effect<void>;
-  /** Reject unsupported repository or association routes before any hosted request. */
-  readonly ensureFixedGitHubComRepository: (
+  ) => Effect.Effect<GitHubRequestReservation, GitHubResponseError>;
+  readonly launchGraphQLRequest: (reservationId: string) => Effect.Effect<void>;
+  /** Cleanup only known-unlaunched work. Launched-but-unobserved debt remains conservative. */
+  readonly cancelUnlaunchedGraphQLReservation: (reservationId: string) => Effect.Effect<void>;
+  /** Reserve, launch, and causally settle one opaque CLI or REST request only after success. */
+  readonly accountOpaqueRequest: <A, E, R>(
+    resource: GitHubRateLimitResource,
+    request: Effect.Effect<A, E, R>,
+    estimatedCost?: number,
+  ) => Effect.Effect<A, E | GitHubResponseError, R>;
+  /** Derive and prove the one supported repository identity before any hosted request. */
+  readonly fixedRoute: (
     cwd: string,
-  ) => Effect.Effect<void, GitHubCommandError | GitHubResponseError>;
-  readonly ensureFixedGitHubComUrl: (url: string) => Effect.Effect<void, GitHubResponseError>;
+    urls?: ReadonlyArray<string>,
+  ) => Effect.Effect<GitHubRepositoryIdentity, GitHubCommandError | GitHubResponseError>;
   /** Refresh bounded REST and GraphQL budgets from GitHub's metadata-only fallback endpoint. */
   readonly refreshFallback: (
     cwd: string,
+    route?: GitHubRepositoryIdentity,
   ) => Effect.Effect<void, GitHubCommandError | GitHubResponseError>;
-  /** Atomically reserve one bounded watcher cycle or defer it before any watched PR request runs. */
+  /** Atomically reserve one bounded watcher cycle or defer it before any watched GitHub request. */
   readonly reserveWatcherPoll: (
     cwd: string,
     pullRequestCount: number,
-  ) => Effect.Effect<GitHubWatcherRateLimitStatus>;
+    route?: GitHubRepositoryIdentity,
+  ) => Effect.Effect<GitHubWatcherRateLimitStatus, GitHubCommandError | GitHubResponseError>;
   readonly snapshot: () => Effect.Effect<GitHubRateLimitHealth>;
   /** Bounded transient UI sample only; never persist this controller-scoped telemetry. */
   readonly compactStatusUnsafe: () => GitHubRateLimitCompactStatus;
 }
 
 type InternalObservedBudgetSource = Exclude<GitHubRateLimitBudgetSource, 'local_estimate'>;
+type InternalReservationPhase = 'reserved' | 'launched';
 
 interface InternalObservedBudget {
   readonly limit: number;
@@ -129,10 +145,11 @@ interface InternalObservedBudget {
 
 interface InternalDebtBucket {
   readonly amount: number;
-  /** Undefined only until the first decoded observation can bind the debt to one reset window. */
+  /** Undefined only until one decoded observation can bind debt to a reset window. */
   readonly resetAt?: string;
-  /** Identity-bearing GraphQL reservations settle only after their exact response decodes. */
+  /** Identity-bearing requests remain distinct until causal settlement or conservative reset pruning. */
   readonly reservationId?: string;
+  readonly phase?: InternalReservationPhase;
 }
 
 interface InternalDebtLedger {
@@ -202,7 +219,12 @@ function debtAmount(debt: ReadonlyArray<InternalDebtBucket>): number {
   return debt.reduce((total, bucket) => saturatedAdd(total, bucket.amount), 0);
 }
 
-/** Collapse unmetered estimates while retaining identity-bearing in-flight reservations. */
+function identityDebtCount(debt: InternalDebtLedger): number {
+  return [...debt.graphql, ...debt.rest].filter(({ reservationId }) => reservationId !== undefined)
+    .length;
+}
+
+/** Collapse anonymous estimates while retaining bounded identity-bearing in-flight requests. */
 function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<InternalDebtBucket> {
   let unknownAmount = 0;
   let knownAmount = 0;
@@ -235,6 +257,13 @@ function pruneDebt(
   return debt.filter(({ resetAt }) => resetAt === undefined || Date.parse(resetAt) > nowMillis);
 }
 
+function pruneLedger(debt: InternalDebtLedger, nowMillis: number): InternalDebtLedger {
+  return {
+    graphql: pruneDebt(debt.graphql, nowMillis),
+    rest: pruneDebt(debt.rest, nowMillis),
+  };
+}
+
 function bindUnknownDebt(
   debt: ReadonlyArray<InternalDebtBucket>,
   resetAt: string,
@@ -257,35 +286,35 @@ function debtResetAt(
 function addDebt(
   debt: ReadonlyArray<InternalDebtBucket>,
   amount: number,
-  resetAt: string | undefined,
-  reservationId?: string,
+  resetAt?: string,
+  reservation?: { readonly id: string; readonly phase: InternalReservationPhase },
 ): ReadonlyArray<InternalDebtBucket> {
   return compactDebt([
     ...debt,
     {
       amount,
       ...(resetAt === undefined ? {} : { resetAt }),
-      ...(reservationId === undefined ? {} : { reservationId }),
+      ...(reservation === undefined
+        ? {}
+        : { phase: reservation.phase, reservationId: reservation.id }),
     },
   ]);
 }
 
-/** Exact GraphQL metadata represents this request's decoded cost; settle this identity only. */
-function settleGraphqlReservation(
-  debt: ReadonlyArray<InternalDebtBucket>,
-  reservationId: string | undefined,
-  decodedCost: number,
-): ReadonlyArray<InternalDebtBucket> {
-  return reservationId === undefined || !Number.isSafeInteger(decodedCost) || decodedCost < 0
-    ? debt
-    : compactDebt(debt.filter((bucket) => bucket.reservationId !== reservationId));
-}
-
-function pruneLedger(debt: InternalDebtLedger, nowMillis: number): InternalDebtLedger {
-  return {
-    graphql: pruneDebt(debt.graphql, nowMillis),
-    rest: pruneDebt(debt.rest, nowMillis),
-  };
+function updateReservation(
+  debt: InternalDebtLedger,
+  reservationId: string,
+  update: (bucket: InternalDebtBucket) => InternalDebtBucket | undefined,
+): InternalDebtLedger {
+  const map = (values: ReadonlyArray<InternalDebtBucket>) =>
+    compactDebt(
+      values.flatMap((bucket) => {
+        if (bucket.reservationId !== reservationId) return [bucket];
+        const updated = update(bucket);
+        return updated === undefined ? [] : [updated];
+      }),
+    );
+  return { graphql: map(debt.graphql), rest: map(debt.rest) };
 }
 
 function effectiveBudget(
@@ -294,10 +323,11 @@ function effectiveBudget(
 ): GitHubRateLimitBudget | undefined {
   if (observed === undefined) return undefined;
   const outstanding = debtAmount(debt);
+  const remaining = Math.max(0, observed.remaining - outstanding);
   return {
     ...observed,
-    pressure: pressure(Math.max(0, observed.remaining - outstanding)),
-    remaining: Math.max(0, observed.remaining - outstanding),
+    pressure: pressure(remaining),
+    remaining,
     source: outstanding === 0 ? observed.source : 'local_estimate',
   };
 }
@@ -314,8 +344,7 @@ function compactStatus(
   state: HostedMetadataState,
   nowMillis: number,
 ): GitHubRateLimitCompactStatus {
-  const debt = pruneLedger(state.debt, nowMillis);
-  const remaining = effectiveRemaining(state, debt);
+  const remaining = effectiveRemaining(state, pruneLedger(state.debt, nowMillis));
   return {
     ...(remaining === undefined ? {} : { effectiveRemaining: remaining }),
     throttle: remaining === undefined ? 'unavailable' : watcherThrottleTier(remaining),
@@ -354,7 +383,7 @@ function restFallbackBudget(value: {
   };
 }
 
-/** Retain monotonic conservative hosted observations so delayed responses cannot restore spent budget. */
+/** Retain monotonic hosted observations so delayed responses cannot restore spent budget. */
 function mergeObservedBudget(
   current: InternalObservedBudget | undefined,
   incoming: InternalObservedBudget,
@@ -370,21 +399,18 @@ function mergeObservedBudget(
 function observeGraphql(
   state: HostedMetadataState,
   incoming: InternalObservedBudget,
-  decodedCost: number,
   nowMillis: number,
   reservationId?: string,
 ): HostedMetadataState {
   const debt = pruneLedger(state.debt, nowMillis);
+  const settled =
+    reservationId === undefined ? debt : updateReservation(debt, reservationId, () => undefined);
   const graphql = mergeObservedBudget(state.graphql, incoming);
   return {
     ...state,
     debt: {
-      ...debt,
-      graphql: bindUnknownDebt(
-        settleGraphqlReservation(debt.graphql, reservationId, decodedCost),
-        graphql.resetAt,
-        nowMillis,
-      ),
+      ...settled,
+      graphql: bindUnknownDebt(settled.graphql, graphql.resetAt, nowMillis),
     },
     graphql,
   };
@@ -417,29 +443,80 @@ function validEstimatedCost(value: number): number {
 }
 
 function metadataUnavailable(value: HostedMetadataState): HostedMetadataState {
-  return { ...value, fallback: 'unavailable' };
+  return {
+    ...value,
+    fallback: 'unavailable',
+    watcherPolling: {
+      reason: 'rate_metadata_unavailable',
+      status: 'deferred',
+      tier: 'unavailable',
+    },
+  };
+}
+
+function responseError(operation: string, cause: unknown): GitHubResponseError {
+  return new GitHubResponseError({ cause, operation });
 }
 
 function fixedRouteError(route: string): GitHubResponseError {
-  return new GitHubResponseError({
-    cause: 'unsupported hosted route',
-    operation: `enforce fixed ${GITHUB_HOSTED_METADATA_HOSTNAME} route for ${route}`,
-  });
-}
-
-function isFixedGitHubComUrl(value: string): boolean {
-  if (!URL.canParse(value)) return false;
-  const parsed = new URL(value);
-  return (
-    (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'ssh:') &&
-    parsed.hostname === GITHUB_HOSTED_METADATA_HOSTNAME &&
-    parsed.port === ''
+  return responseError(
+    `enforce fixed ${GITHUB_HOSTED_METADATA_HOSTNAME} route for ${route}`,
+    'unsupported hosted route',
   );
 }
 
-function isFixedGitHubComRemote(value: string): boolean {
+function reservationCapacityError(): GitHubResponseError {
+  return responseError(
+    'reserve hosted GitHub request',
+    `outstanding request reservation cap ${MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS} reached`,
+  );
+}
+
+function repositoryParts(
+  owner: string,
+  repoWithSuffix: string,
+): GitHubRepositoryIdentity | undefined {
+  const repo = repoWithSuffix.endsWith('.git') ? repoWithSuffix.slice(0, -4) : repoWithSuffix;
+  const safe = /^[a-zA-Z0-9_.-]+$/;
+  return safe.test(owner) && safe.test(repo) && owner.length > 0 && repo.length > 0
+    ? { owner, repo, slug: `${owner}/${repo}` }
+    : undefined;
+}
+
+function remoteIdentity(value: string): GitHubRepositoryIdentity | undefined {
   const remote = value.trim();
-  return isFixedGitHubComUrl(remote) || /^git@github\.com:[^/\s]+\/[^/\s]+(?:\.git)?$/.test(remote);
+  const scp = /^git@github\.com:([^/\s]+)\/([^/\s]+)$/.exec(remote);
+  if (scp) return repositoryParts(scp[1] ?? '', scp[2] ?? '');
+  if (!URL.canParse(remote)) return undefined;
+  const parsed = new URL(remote);
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  return (parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
+    parsed.hostname === GITHUB_HOSTED_METADATA_HOSTNAME &&
+    parsed.port === '' &&
+    (parsed.username !== '') === (parsed.protocol === 'ssh:') &&
+    parts.length === 2
+    ? repositoryParts(parts[0] ?? '', parts[1] ?? '')
+    : undefined;
+}
+
+function routeUrlMatches(identity: GitHubRepositoryIdentity, value: string): boolean {
+  if (!URL.canParse(value)) return false;
+  const parsed = new URL(value);
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  return (
+    parsed.protocol === 'https:' &&
+    parsed.hostname === GITHUB_HOSTED_METADATA_HOSTNAME &&
+    parsed.port === '' &&
+    parsed.username === '' &&
+    parsed.password === '' &&
+    parsed.search === '' &&
+    parsed.hash === '' &&
+    parts.length === 4 &&
+    parts[0]?.toLowerCase() === identity.owner.toLowerCase() &&
+    parts[1]?.toLowerCase() === identity.repo.toLowerCase() &&
+    parts[2] === 'pull' &&
+    /^\d+$/.test(parts[3] ?? '')
+  );
 }
 
 function fallbackUsable(
@@ -482,32 +559,35 @@ export function makeGitHubHostedMetadataAdapter(
       tier: 'unavailable',
     },
   });
+  let canonicalIdentity: GitHubRepositoryIdentity | undefined;
   const fixedRouteSemaphore = Semaphore.makeUnsafe(1);
   const refreshSemaphore = Semaphore.makeUnsafe(1);
 
-  const ensureFixedGitHubComUrl: GitHubHostedMetadataShape['ensureFixedGitHubComUrl'] = (url) =>
-    isFixedGitHubComUrl(url) && new URL(url).protocol === 'https:'
-      ? Effect.void
-      : Effect.fail(fixedRouteError('association URL'));
+  const fixedRoute: GitHubHostedMetadataShape['fixedRoute'] = (cwd, urls = []) =>
+    fixedRouteSemaphore.withPermit(
+      runner.run({ args: ['remote', 'get-url', 'origin'], command: 'git', cwd }).pipe(
+        Effect.flatMap(({ stdout }) => {
+          const identity = remoteIdentity(stdout);
+          if (
+            identity === undefined ||
+            (canonicalIdentity !== undefined &&
+              identity.slug.toLowerCase() !== canonicalIdentity.slug.toLowerCase())
+          )
+            return Effect.fail(fixedRouteError('repository origin'));
+          const admitted = canonicalIdentity ?? identity;
+          if (urls.some((url) => !routeUrlMatches(admitted, url)))
+            return Effect.fail(fixedRouteError('association URL'));
+          canonicalIdentity = admitted;
+          return Effect.succeed(admitted);
+        }),
+        Effect.tapError(() => Ref.update(state, metadataUnavailable)),
+      ),
+    );
 
-  const ensureFixedGitHubComRepository: GitHubHostedMetadataShape['ensureFixedGitHubComRepository'] =
-    (cwd) =>
-      fixedRouteSemaphore.withPermit(
-        runner
-          .run({ args: ['remote', 'get-url', 'origin'], command: 'git', cwd })
-          .pipe(
-            Effect.flatMap(({ stdout }) =>
-              isFixedGitHubComRemote(stdout)
-                ? Effect.void
-                : Effect.fail(fixedRouteError('repository origin')),
-            ),
-          ),
-      );
-
-  const refreshFallback: GitHubHostedMetadataShape['refreshFallback'] = (cwd) =>
+  const refreshFallback: GitHubHostedMetadataShape['refreshFallback'] = (cwd, route) =>
     refreshSemaphore.withPermit(
       Effect.gen(function* () {
-        yield* ensureFixedGitHubComRepository(cwd);
+        yield* route === undefined ? fixedRoute(cwd) : Effect.succeed(route);
         const now = yield* nowMillis;
         const current = yield* Ref.get(state);
         const resetReached =
@@ -539,6 +619,88 @@ export function makeGitHubHostedMetadataAdapter(
       }),
     );
 
+  const reserveIdentityRequest = (
+    resource: GitHubRateLimitResource,
+    estimatedCost: number,
+  ): Effect.Effect<GitHubRequestReservation, GitHubResponseError> =>
+    Effect.flatMap(nowMillis, (now) =>
+      Ref.modify(state, (value) => {
+        const debt = pruneLedger(value.debt, now);
+        if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS)
+          return [undefined, { ...value, debt }] as const;
+        const id = `request-${value.nextReservation}`;
+        return [
+          { id },
+          {
+            ...value,
+            debt: {
+              ...debt,
+              [resource]: addDebt(
+                debt[resource],
+                validEstimatedCost(estimatedCost),
+                debtResetAt(value[resource], now),
+                { id, phase: 'reserved' },
+              ),
+            },
+            nextReservation: value.nextReservation + 1,
+          },
+        ] as const;
+      }).pipe(
+        Effect.flatMap((reservation) =>
+          reservation === undefined
+            ? Effect.fail(reservationCapacityError())
+            : Effect.succeed(reservation),
+        ),
+      ),
+    );
+
+  const launchRequest = (reservationId: string) =>
+    Ref.update(state, (value) => ({
+      ...value,
+      debt: updateReservation(value.debt, reservationId, (bucket) => ({
+        ...bucket,
+        phase: 'launched',
+      })),
+    }));
+
+  const settleRequest = (reservationId: string) =>
+    Ref.update(state, (value) => ({
+      ...value,
+      debt: updateReservation(value.debt, reservationId, () => undefined),
+    }));
+
+  const cancelUnlaunchedGraphQLReservation: GitHubHostedMetadataShape['cancelUnlaunchedGraphQLReservation'] =
+    (reservationId) =>
+      Ref.update(state, (value) => ({
+        ...value,
+        debt: updateReservation(value.debt, reservationId, (bucket) =>
+          bucket.phase === 'reserved' ? undefined : bucket,
+        ),
+      }));
+
+  const reserveGraphQLRequest: GitHubHostedMetadataShape['reserveGraphQLRequest'] = (
+    estimatedCost = GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
+  ) => reserveIdentityRequest('graphql', estimatedCost);
+
+  const launchGraphQLRequest: GitHubHostedMetadataShape['launchGraphQLRequest'] = launchRequest;
+
+  const accountOpaqueRequest: GitHubHostedMetadataShape['accountOpaqueRequest'] = (
+    resource,
+    request,
+    estimatedCost = resource === 'graphql'
+      ? GITHUB_CLI_GRAPHQL_ESTIMATED_COST
+      : GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
+  ) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const reservation = yield* reserveIdentityRequest(resource, estimatedCost);
+        yield* launchRequest(reservation.id);
+        const value = yield* restore(request);
+        yield* settleRequest(reservation.id);
+        return value;
+      }),
+    );
+
   const decodeGraphQL: GitHubHostedMetadataShape['decodeGraphQL'] = (
     operation,
     schema,
@@ -549,86 +711,15 @@ export function makeGitHubHostedMetadataAdapter(
       Effect.tap((decoded) =>
         Effect.flatMap(nowMillis, (now) =>
           Ref.update(state, (value) =>
-            observeGraphql(
-              value,
-              graphqlBudget(decoded.data.rateLimit),
-              decoded.data.rateLimit.cost,
-              now,
-              reservationId,
-            ),
+            observeGraphql(value, graphqlBudget(decoded.data.rateLimit), now, reservationId),
           ),
         ),
       ),
     );
 
-  const reserveGraphQLRequest: GitHubHostedMetadataShape['reserveGraphQLRequest'] = (
-    estimatedCost = GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
-  ) =>
-    Effect.flatMap(nowMillis, (now) =>
-      Ref.modify(
-        state,
-        (value): readonly [GitHubGraphQLRequestReservation, HostedMetadataState] => {
-          const debt = pruneLedger(value.debt, now);
-          const id = `graphql-${value.nextReservation}`;
-          return [
-            { id },
-            {
-              ...value,
-              debt: {
-                ...debt,
-                graphql: addDebt(
-                  debt.graphql,
-                  validEstimatedCost(estimatedCost),
-                  debtResetAt(value.graphql, now),
-                  id,
-                ),
-              },
-              nextReservation: value.nextReservation + 1,
-            },
-          ];
-        },
-      ),
-    );
-
-  const cancelGraphQLReservation: GitHubHostedMetadataShape['cancelGraphQLReservation'] = (
-    reservationId,
-  ) =>
-    Ref.update(state, (value) => ({
-      ...value,
-      debt: {
-        ...value.debt,
-        graphql: settleGraphqlReservation(value.debt.graphql, reservationId, 0),
-      },
-    }));
-
-  const noteUnmeteredRequest = (resource: keyof InternalDebtLedger, estimatedCost: number) =>
-    Effect.flatMap(nowMillis, (now) =>
-      Ref.update(state, (value) => {
-        const debt = pruneLedger(value.debt, now);
-        return {
-          ...value,
-          debt: {
-            ...debt,
-            [resource]: addDebt(
-              debt[resource],
-              validEstimatedCost(estimatedCost),
-              debtResetAt(value[resource], now),
-            ),
-          },
-        };
-      }),
-    );
-
-  const noteUnmeteredGraphQLRequest: GitHubHostedMetadataShape['noteUnmeteredGraphQLRequest'] = (
-    estimatedCost = GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
-  ) => noteUnmeteredRequest('graphql', estimatedCost);
-
-  const noteUnmeteredRestRequest: GitHubHostedMetadataShape['noteUnmeteredRestRequest'] = (
-    estimatedCost = GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
-  ) => noteUnmeteredRequest('rest', estimatedCost);
-
   const reserveWatcherPoll: GitHubHostedMetadataShape['reserveWatcherPoll'] = Effect.fnUntraced(
-    function* (cwd, pullRequestCount) {
+    function* (cwd, pullRequestCount, route) {
+      const admittedRoute = yield* route === undefined ? fixedRoute(cwd) : Effect.succeed(route);
       const beforeRefresh = yield* nowMillis;
       const deferred = yield* Ref.modify(state, (value) => {
         const debt = pruneLedger(value.debt, beforeRefresh);
@@ -650,7 +741,7 @@ export function makeGitHubHostedMetadataAdapter(
         return [watcherPolling, { ...value, debt, watcherPolling }] as const;
       });
       if (deferred !== undefined) return deferred;
-      yield* Effect.result(refreshFallback(cwd));
+      const refreshed = yield* Effect.result(refreshFallback(cwd, admittedRoute));
       const now = yield* nowMillis;
       const count =
         Number.isSafeInteger(pullRequestCount) && pullRequestCount > 0 ? pullRequestCount : 1;
@@ -661,13 +752,13 @@ export function makeGitHubHostedMetadataAdapter(
         (value): readonly [GitHubWatcherRateLimitStatus, HostedMetadataState] => {
           const debt = pruneLedger(value.debt, now);
           const pruned = { ...value, debt };
-          if (!fallbackUsable(pruned, now, fallbackMaxAgeMillis)) {
+          if (refreshed._tag === 'Failure' || !fallbackUsable(pruned, now, fallbackMaxAgeMillis)) {
             const watcherPolling = {
               reason: 'rate_metadata_unavailable',
               status: 'deferred',
               tier: 'unavailable',
             } as const;
-            return [watcherPolling, { ...pruned, watcherPolling }];
+            return [watcherPolling, { ...metadataUnavailable(pruned), watcherPolling }] as const;
           }
           const graphql = effectiveBudget(pruned.graphql, debt.graphql);
           const rest = effectiveBudget(pruned.rest, debt.rest);
@@ -678,7 +769,7 @@ export function makeGitHubHostedMetadataAdapter(
               status: 'deferred',
               tier: 'unavailable',
             } as const;
-            return [watcherPolling, { ...pruned, watcherPolling }];
+            return [watcherPolling, { ...metadataUnavailable(pruned), watcherPolling }] as const;
           }
           const tier = watcherThrottleTier(remaining);
           const interval = watcherIntervalMillis(tier);
@@ -702,9 +793,24 @@ export function makeGitHubHostedMetadataAdapter(
             return [
               watcherPolling,
               { ...pruned, nextWatcherAdmissionAtMillis: untilMillis, watcherPolling },
-            ];
+            ] as const;
           }
-          const graphqlReservationId = `graphql-${pruned.nextReservation}`;
+          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS) {
+            const watcherPolling = proactiveWatcherThrottle(
+              'paused',
+              remaining,
+              now + GITHUB_WATCHER_PAUSE_INTERVAL_MILLIS,
+            );
+            return [
+              watcherPolling,
+              {
+                ...pruned,
+                nextWatcherAdmissionAtMillis: now + GITHUB_WATCHER_PAUSE_INTERVAL_MILLIS,
+                watcherPolling,
+              },
+            ] as const;
+          }
+          const graphqlReservationId = `request-${pruned.nextReservation}`;
           const watcherPolling = {
             effectiveRemaining: remaining,
             graphqlReservationId,
@@ -719,18 +825,16 @@ export function makeGitHubHostedMetadataAdapter(
               ...withoutNext,
               debt: {
                 ...debt,
-                graphql: addDebt(
-                  debt.graphql,
-                  graphqlCost,
-                  debtResetAt(pruned.graphql, now),
-                  graphqlReservationId,
-                ),
+                graphql: addDebt(debt.graphql, graphqlCost, debtResetAt(pruned.graphql, now), {
+                  id: graphqlReservationId,
+                  phase: 'reserved',
+                }),
               },
               nextReservation: pruned.nextReservation + 1,
               ...(interval === 0 ? {} : { nextWatcherAdmissionAtMillis: now + interval }),
               watcherPolling,
             },
-          ];
+          ] as const;
         },
       );
     },
@@ -759,13 +863,12 @@ export function makeGitHubHostedMetadataAdapter(
     );
 
   return {
-    cancelGraphQLReservation,
+    accountOpaqueRequest,
+    cancelUnlaunchedGraphQLReservation,
     compactStatusUnsafe,
     decodeGraphQL,
-    ensureFixedGitHubComRepository,
-    ensureFixedGitHubComUrl,
-    noteUnmeteredGraphQLRequest,
-    noteUnmeteredRestRequest,
+    fixedRoute,
+    launchGraphQLRequest,
     refreshFallback,
     reserveGraphQLRequest,
     reserveWatcherPoll,

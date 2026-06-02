@@ -14,6 +14,7 @@ import { type GitHubCommandError, GitHubResponseError, GitHubWatcherInputError }
 import {
   GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
+  type GitHubRepositoryIdentity,
   type GitHubWatcherRateLimitStatus,
   type GitHubWatcherThrottleTier,
   makeGitHubHostedMetadataAdapter,
@@ -354,19 +355,25 @@ export function makeGitHubWatcherService(
   const inspect = Effect.fnUntraced(function* (
     cwd: string,
     rawAssociation: PullRequestWatcherAssociation,
+    route: GitHubRepositoryIdentity,
   ) {
     const association = yield* Schema.decodeUnknownEffect(PullRequestAssociationSchema)(
       rawAssociation,
     ).pipe(Effect.mapError(watcherInputError));
     const identifier =
       association.number === undefined ? association.url : String(association.number);
-    const viewed = yield* github.run(cwd, [
-      'pr',
-      'view',
-      identifier,
-      '--json',
-      WATCHER_JSON_FIELDS,
-    ]);
+    const viewed = yield* hostedMetadata.accountOpaqueRequest(
+      'graphql',
+      github.run(cwd, [
+        'pr',
+        'view',
+        identifier,
+        '--json',
+        WATCHER_JSON_FIELDS,
+        '--repo',
+        route.slug,
+      ]),
+    );
     const decoded = yield* decodeGitHubJson(
       'watch pull request',
       GitHubPullRequestObservationSchema,
@@ -403,7 +410,9 @@ export function makeGitHubWatcherService(
     cwd: string,
     number: number,
     graphqlReservationId: string,
+    route: GitHubRepositoryIdentity,
   ) {
+    yield* hostedMetadata.launchGraphQLRequest(graphqlReservationId);
     const discussionResponse = yield* github.run(cwd, [
       'api',
       'graphql',
@@ -412,9 +421,9 @@ export function makeGitHubWatcherService(
       '--raw-field',
       `query=${DISCUSSION_GRAPHQL_QUERY}`,
       '--field',
-      'owner={owner}',
+      `owner=${route.owner}`,
       '--field',
-      'repo={repo}',
+      `repo=${route.repo}`,
       '--field',
       `number=${number}`,
       '--field',
@@ -426,13 +435,15 @@ export function makeGitHubWatcherService(
       discussionResponse.stdout,
       graphqlReservationId,
     );
-    yield* hostedMetadata.noteUnmeteredRestRequest();
-    const inlineResponse = yield* github.run(cwd, [
-      'api',
-      `repos/{owner}/{repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
-      '--hostname',
-      GITHUB_HOSTED_METADATA_HOSTNAME,
-    ]);
+    const inlineResponse = yield* hostedMetadata.accountOpaqueRequest(
+      'rest',
+      github.run(cwd, [
+        'api',
+        `repos/${route.owner}/${route.repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
+        '--hostname',
+        GITHUB_HOSTED_METADATA_HOSTNAME,
+      ]),
+    );
     const inlineComments = yield* decodeGitHubJson(
       'watch inline pull request comments',
       GitHubInlineReviewCommentsSchema,
@@ -485,6 +496,12 @@ export function makeGitHubWatcherService(
     } satisfies PullRequestDiscussionSnapshot;
   });
 
+  const metadataUnavailable = {
+    reason: 'rate_metadata_unavailable',
+    status: 'deferred',
+    tier: 'unavailable',
+  } as const;
+
   const pollUnlocked = (callbacks: GitHubWatcherCallbacks) =>
     Effect.suspend(() =>
       Effect.forEach(
@@ -494,47 +511,43 @@ export function makeGitHubWatcherService(
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
           const failure = (error: GitHubWatcherError) =>
             callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error });
+          const operationalFailure = (error: GitHubWatcherError) =>
+            notifyThrottleDiagnostic(callbacks, metadataUnavailable).pipe(
+              Effect.andThen(failure(error)),
+            );
           return Schema.decodeUnknownEffect(PullRequestAssociationSchema)(pullRequest).pipe(
             Effect.mapError(watcherInputError),
             Effect.matchEffect({
               onFailure: failure,
               onSuccess: (association) =>
-                hostedMetadata.ensureFixedGitHubComUrl(association.url).pipe(
-                  Effect.andThen(
-                    Effect.suspend(() => hostedMetadata.ensureFixedGitHubComRepository(cwd)),
-                  ),
+                hostedMetadata.fixedRoute(cwd, [association.url]).pipe(
                   Effect.matchEffect({
-                    onFailure: failure,
-                    onSuccess: () =>
-                      hostedMetadata.reserveWatcherPoll(cwd, 1).pipe(
-                        Effect.flatMap((reservation) =>
-                          notifyThrottleDiagnostic(callbacks, reservation).pipe(
-                            Effect.andThen(
-                              Effect.suspend(() => {
-                                if (
-                                  reservation.status === 'deferred' ||
-                                  reservation.graphqlReservationId === undefined
-                                )
-                                  return Effect.void;
-                                const reservationId = reservation.graphqlReservationId;
-                                return hostedMetadata.noteUnmeteredGraphQLRequest().pipe(
-                                  Effect.andThen(inspect(cwd, pullRequest)),
-                                  Effect.matchEffect({
-                                    onFailure: (error) =>
-                                      hostedMetadata
-                                        .cancelGraphQLReservation(reservationId)
-                                        .pipe(Effect.andThen(failure(error))),
-                                    onSuccess: (inspected) => {
-                                      if (inspected._tag === 'HeadDivergence') {
-                                        const divergence = callbacks.onHeadDivergence({
-                                          expectedHeadSha: inspected.expectedHeadSha,
-                                          observedHeadSha: inspected.observedHeadSha,
-                                          pullRequestId: pullRequest.id,
-                                        });
-                                        return hostedMetadata
-                                          .cancelGraphQLReservation(reservationId)
-                                          .pipe(
-                                            Effect.andThen(divergence),
+                    onFailure: operationalFailure,
+                    onSuccess: (route) =>
+                      hostedMetadata.reserveWatcherPoll(cwd, 1, route).pipe(
+                        Effect.matchEffect({
+                          onFailure: operationalFailure,
+                          onSuccess: (reservation) =>
+                            notifyThrottleDiagnostic(callbacks, reservation).pipe(
+                              Effect.andThen(
+                                Effect.suspend(() => {
+                                  if (
+                                    reservation.status === 'deferred' ||
+                                    reservation.graphqlReservationId === undefined
+                                  )
+                                    return Effect.void;
+                                  const reservationId = reservation.graphqlReservationId;
+                                  return inspect(cwd, pullRequest, route).pipe(
+                                    Effect.matchEffect({
+                                      onFailure: failure,
+                                      onSuccess: (inspected) => {
+                                        if (inspected._tag === 'HeadDivergence') {
+                                          const divergence = callbacks.onHeadDivergence({
+                                            expectedHeadSha: inspected.expectedHeadSha,
+                                            observedHeadSha: inspected.observedHeadSha,
+                                            pullRequestId: pullRequest.id,
+                                          });
+                                          return divergence.pipe(
                                             Effect.andThen(
                                               inspected.terminalObservation === undefined
                                                 ? Effect.void
@@ -546,42 +559,51 @@ export function makeGitHubWatcherService(
                                                   }),
                                             ),
                                           );
-                                      }
-                                      return callbacks
-                                        .onObservation({
-                                          pullRequestId: pullRequest.id,
-                                          ...generation,
-                                          complete: false,
-                                          observation: inspected.observation,
-                                        })
-                                        .pipe(
-                                          Effect.andThen(
-                                            inspectDiscussion(
-                                              cwd,
-                                              inspected.number,
-                                              reservationId,
-                                            ).pipe(
-                                              Effect.matchEffect({
-                                                onFailure: failure,
-                                                onSuccess: (discussion) =>
-                                                  callbacks.onObservation({
-                                                    pullRequestId: pullRequest.id,
-                                                    ...generation,
-                                                    complete: true,
-                                                    discussion,
-                                                    observation: inspected.observation,
-                                                  }),
-                                              }),
+                                        }
+                                        return callbacks
+                                          .onObservation({
+                                            pullRequestId: pullRequest.id,
+                                            ...generation,
+                                            complete: false,
+                                            observation: inspected.observation,
+                                          })
+                                          .pipe(
+                                            Effect.andThen(
+                                              inspectDiscussion(
+                                                cwd,
+                                                inspected.number,
+                                                reservationId,
+                                                route,
+                                              ).pipe(
+                                                Effect.matchEffect({
+                                                  onFailure: failure,
+                                                  onSuccess: (discussion) =>
+                                                    callbacks.onObservation({
+                                                      pullRequestId: pullRequest.id,
+                                                      ...generation,
+                                                      complete: true,
+                                                      discussion,
+                                                      observation: inspected.observation,
+                                                    }),
+                                                }),
+                                              ),
                                             ),
-                                          ),
-                                        );
-                                    },
-                                  }),
-                                );
-                              }),
+                                          );
+                                      },
+                                    }),
+                                  );
+                                }),
+                              ),
+                              Effect.ensuring(
+                                reservation.status === 'ready' &&
+                                  reservation.graphqlReservationId !== undefined
+                                  ? hostedMetadata.cancelUnlaunchedGraphQLReservation(
+                                      reservation.graphqlReservationId,
+                                    )
+                                  : Effect.void,
+                              ),
                             ),
-                          ),
-                        ),
+                        }),
                       ),
                   }),
                 ),

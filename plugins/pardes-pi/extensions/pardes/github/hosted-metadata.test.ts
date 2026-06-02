@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import {
   GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS,
   GitHubCommandError,
+  MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
   makeGitHubHostedMetadataAdapter,
 } from './index.ts';
 import { GitHubAdvertisedDefaultBranchGraphQLSchema } from './schemas.ts';
@@ -144,6 +145,63 @@ describe('GitHub hosted metadata adapter', () => {
     ]);
   });
 
+  test('invalidates young fallback metadata when the current fixed-route proof fails', async () => {
+    let originChecks = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git') {
+          originChecks += 1;
+          return Effect.succeed(
+            result(
+              originChecks === 1
+                ? 'git@github.com:acme/project.git\n'
+                : 'git@github.com:other/project.git\n',
+            ),
+          );
+        }
+        return Effect.succeed(fallbackResult());
+      },
+    };
+    const adapter = makeGitHubHostedMetadataAdapter({ runner });
+    const first = await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1));
+    if (first.status !== 'ready' || first.graphqlReservationId === undefined)
+      throw new Error('fixture watcher reservation was not admitted');
+    await Effect.runPromise(adapter.cancelUnlaunchedGraphQLReservation(first.graphqlReservationId));
+
+    const failure = await Effect.runPromise(
+      adapter.reserveWatcherPoll('/tmp/project', 1).pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      fallback: 'unavailable',
+      watcherPolling: {
+        reason: 'rate_metadata_unavailable',
+        status: 'deferred',
+        tier: 'unavailable',
+      },
+    });
+    expect(originChecks).toBe(2);
+  });
+
+  test('bounds launched-but-unobserved identity debt after repeated failed health-style requests', async () => {
+    const adapter = makeGitHubHostedMetadataAdapter();
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS; index += 1) {
+      const reservation = await Effect.runPromise(adapter.reserveGraphQLRequest());
+      await Effect.runPromise(adapter.launchGraphQLRequest(reservation.id));
+    }
+
+    const failure = await Effect.runPromise(adapter.reserveGraphQLRequest().pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'reserve hosted GitHub request',
+    });
+  });
+
   test('rejects malformed fallback metadata with a typed operation-specific response error', async () => {
     const fixture = scriptedRunner([
       result(JSON.stringify({ resources: { core: { remaining: 'credential-shaped-secret' } } })),
@@ -221,7 +279,9 @@ describe('GitHub hosted metadata adapter', () => {
       runner: fixture.runner,
     });
 
-    await Effect.runPromise(adapter.noteUnmeteredGraphQLRequest());
+    await Effect.runPromise(
+      adapter.accountOpaqueRequest('graphql', Effect.fail('fixture outage')).pipe(Effect.flip),
+    );
     await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
 
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
@@ -247,7 +307,9 @@ describe('GitHub hosted metadata adapter', () => {
         graphQlEnvelope(),
       ),
     );
-    await Effect.runPromise(adapter.noteUnmeteredGraphQLRequest());
+    await Effect.runPromise(
+      adapter.accountOpaqueRequest('graphql', Effect.fail('fixture outage')).pipe(Effect.flip),
+    );
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 3_985, source: 'local_estimate' },
       rest: { remaining: 3_000, source: 'rest_fallback' },
@@ -467,7 +529,9 @@ describe('GitHub hosted metadata adapter', () => {
         }),
       ),
     );
-    await Effect.runPromise(adapter.noteUnmeteredGraphQLRequest());
+    await Effect.runPromise(
+      adapter.accountOpaqueRequest('graphql', Effect.fail('fixture outage')).pipe(Effect.flip),
+    );
     const health = await Effect.runPromise(adapter.snapshot());
 
     expect(decoded.data.repository.defaultBranchRef).toBeNull();

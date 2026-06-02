@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import {
   GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS,
   GitHubCommandError,
+  MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
   makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
 } from './index.ts';
@@ -216,9 +217,9 @@ describe('GitHub integration-health inspection', () => {
           availability: 'available',
           limit: 5_000,
           pressure: 'ready',
-          remaining: 4_994,
+          remaining: 4_999,
           resetAt: '2026-06-01T01:00:00Z',
-          source: 'local_estimate',
+          source: 'graphql',
         },
         observation: 'bounded_hosted_rate_budget',
         rest: { availability: 'unavailable' },
@@ -238,6 +239,8 @@ describe('GitHub integration-health inspection', () => {
     ]);
     expect(fixture.invocations[1]?.args).toContain('expression=main');
     expect(fixture.invocations[1]?.args).toContain('limit=50');
+    expect(fixture.invocations[0]?.args).toContain('owner=acme');
+    expect(fixture.invocations[0]?.args).toContain('repo=project');
     expect(
       fixture.invocations
         .filter(({ args }) => args[0] === 'api')
@@ -257,6 +260,8 @@ describe('GitHub integration-health inspection', () => {
       '42',
       '--json',
       'number,headRefOid',
+      '--repo',
+      'acme/project',
     ]);
     expect(fixture.invocations[3]?.args).toContain(`expression=${association().headBranch}`);
     expect(fixture.invocations.flatMap(({ args }) => args).join(' ')).not.toContain('actions/runs');
@@ -410,12 +415,12 @@ describe('GitHub integration-health inspection', () => {
     expect(JSON.stringify(inspection)).not.toContain('private diagnostics');
   });
 
-  test('rejects unsupported association routes before mixing opt-in health metadata', async () => {
+  test('rejects same-host cross-repository association routes before mixing opt-in health metadata', async () => {
     const fixture = scriptedRunner([]);
     const inspection = await Effect.runPromise(
       makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
         cwd: '/tmp/project',
-        pullRequests: [association({ url: 'https://github.enterprise.test/acme/project/pull/42' })],
+        pullRequests: [association({ url: 'https://github.com/other/project/pull/42' })],
       }),
     );
 
@@ -452,6 +457,28 @@ describe('GitHub integration-health inspection', () => {
       graphql: { remaining: 3_995, source: 'local_estimate' },
     });
     await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
+  test('bounds repeated failed health GraphQL launches and then fails closed before another request', async () => {
+    let graphqlRequests = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        graphqlRequests += 1;
+        return Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }));
+      },
+    };
+    const service = makeGitHubIntegrationHealthService({ runner });
+
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS + 3; index += 1) {
+      const inspection = await Effect.runPromise(
+        service.inspect({ cwd: '/tmp/project', pullRequests: [] }),
+      );
+      expect(inspection.defaultBranch).toMatchObject({ availability: 'unavailable' });
+    }
+
+    expect(graphqlRequests).toBe(MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS);
   });
 
   test('continues bounded PR observation when default-branch metadata is unavailable', async () => {

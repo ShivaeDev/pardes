@@ -13,7 +13,7 @@ import {
   PullRequestTitleSchema as SharedPullRequestTitleSchema,
 } from '../github/index.ts';
 import { ReportExcerptRequestFields, ReportHandoffNoteSchema } from '../reporting/index.ts';
-import { MANAGER_EVENT_DETAILS_MAX_CHARS, WorkerTitleSchema } from './domain.ts';
+import { WorkerTitleSchema } from './domain.ts';
 
 export const MANAGER_INPUT_ID_MAX_LENGTH = 100;
 export const MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH = PULL_REQUEST_TITLE_MAX_LENGTH;
@@ -25,7 +25,8 @@ export const MANAGER_INPUT_BASELINE_BRANCH_PATTERN = REMOTE_BASELINE_BRANCH_PATT
 export const MANAGER_INPUT_PULL_REQUEST_BRANCH_PATTERN = PULL_REQUEST_BRANCH_PATTERN;
 export const INBOX_EVENT_EXCERPT_DEFAULT_MAX_CHARS = 4_000;
 export const INBOX_EVENT_EXCERPT_MAX_CHARS = 12_000;
-export const INBOX_EVENT_EXCERPT_MAX_OFFSET = MANAGER_EVENT_DETAILS_MAX_CHARS;
+/** Calibrated to the wider restored-state allocation breaker for legacy summary-only rows. */
+export const INBOX_EVENT_EXCERPT_MAX_OFFSET = 64 * 1_024 * 1_024;
 
 const NonEmptyStringSchema = Schema.String.check(Schema.isMinLength(1));
 const ShortTextSchema = NonEmptyStringSchema.check(

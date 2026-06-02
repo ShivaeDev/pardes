@@ -6,8 +6,10 @@ import {
   type AgentRecord,
   type AgentStatus,
   AUTONOMOUS_INBOX_PATH,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   INBOX_TWO_PATH_GUIDANCE,
   initialManagerState,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerController,
   type ManagerEvent,
   type PluginActivationStatus,
@@ -2678,6 +2680,58 @@ describe('Pardes model-visible tools', () => {
       summaryChars: 5_000,
       summaryTruncated: true,
     });
+  });
+
+  test('traverses every decodable continuation for a restored legacy summary-only row beyond the detail cap', async () => {
+    const summary = `legacy summary ${'x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 2 * REPORT_EXCERPT_MAX_CHARS)} tail`;
+    const event: ManagerEvent = {
+      createdAt,
+      id: 'event-legacy-large-summary',
+      summary,
+      type: 'legacy_attention',
+    };
+    let maximumRequestedOffset = 0;
+    const manager = {
+      getInboxEvent: (params: { readonly offset?: number }) =>
+        Effect.sync(() => {
+          maximumRequestedOffset = Math.max(maximumRequestedOffset, params.offset ?? 0);
+          if ((params.offset ?? 0) > INBOX_EVENT_EXCERPT_MAX_OFFSET)
+            throw new Error('Continuation pointer was not decodable.');
+          return event;
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerWorkstreamTools(pi, manager);
+    const inboxGet = requiredValue(tools.get('inbox_get'));
+    let offset = 0;
+    let returnedTotal = 0;
+
+    while (true) {
+      const result = await inboxGet.execute(
+        'call-legacy-summary',
+        { eventId: event.id, maxChars: REPORT_EXCERPT_MAX_CHARS, offset },
+        signal,
+        onUpdate,
+        ctx,
+      );
+      const details = result.details as {
+        readonly hasMore: boolean;
+        readonly offset: number;
+        readonly returnedChars: number;
+        readonly totalChars: number;
+      };
+      expect(details).toMatchObject({ offset, totalChars: summary.length });
+      returnedTotal += details.returnedChars;
+      if (!details.hasMore) break;
+      offset += details.returnedChars;
+      expect(offset).toBeLessThanOrEqual(INBOX_EVENT_EXCERPT_MAX_OFFSET);
+      expect(result.content[0]?.text).toContain(
+        `next: inbox_get({ eventId: "${event.id}", offset: ${offset}, maxChars: ${REPORT_EXCERPT_MAX_CHARS} })`,
+      );
+    }
+
+    expect(returnedTotal).toBe(summary.length);
+    expect(maximumRequestedOffset).toBeGreaterThan(MANAGER_EVENT_DETAILS_MAX_CHARS);
   });
 
   test('submits valid feedback but disarms cancelled, blank, and oversized handoffs without consuming unseen rows', async () => {

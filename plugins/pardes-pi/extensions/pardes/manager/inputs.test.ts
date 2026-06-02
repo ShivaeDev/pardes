@@ -169,6 +169,11 @@ describe('manager input schemas', () => {
     });
     expect(
       await Effect.runPromise(
+        decodeInboxGetInput({ eventId: 'event-legacy-summary', offset: 2 * 1_024 * 1_024 }),
+      ),
+    ).toEqual({ eventId: 'event-legacy-summary', offset: 2 * 1_024 * 1_024 });
+    expect(
+      await Effect.runPromise(
         decodeVerificationRequestInput({
           sourceAgentId: 'agent-12345678',
           task: 'Review this head.',

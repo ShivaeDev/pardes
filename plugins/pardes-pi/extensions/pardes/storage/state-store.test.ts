@@ -108,6 +108,29 @@ describe('filesystem state store', () => {
     expect(await Effect.runPromise(store.load())).toEqual(state);
   });
 
+  test('restores a legacy summary-only inbox row beyond the new detail cap without clipping', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    const summary = `legacy summary ${'x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 123)} tail`;
+    const event: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-large-summary',
+      summary,
+      type: 'legacy_attention',
+    };
+    await Effect.runPromise(store.initialize(initialState()));
+    await writeFile(
+      store.statePath,
+      `${JSON.stringify({ ...initialState(), inbox: [event] }, null, 2)}\n`,
+      'utf8',
+    );
+
+    const restored = (await Effect.runPromise(store.load())).inbox[0];
+    expect(restored).toEqual(event);
+    expect(restored?.summary.length).toBeGreaterThan(MANAGER_EVENT_DETAILS_MAX_CHARS);
+    expect(restored).not.toHaveProperty('details');
+  });
+
   test('rejects oversized inbox detail and serialized state or event growth before durable allocation', async () => {
     const directory = await temporaryDirectory();
     const store = await Effect.runPromise(makeFileSystemStateStore(directory));

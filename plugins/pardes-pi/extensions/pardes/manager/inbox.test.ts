@@ -254,6 +254,22 @@ describe('manager inbox notification projection', () => {
     expect(row.endsWith('…')).toBe(true);
   });
 
+  test('keeps a routine merge retirement outcome self-contained in one bounded external-metadata row', () => {
+    const message = render([
+      event(
+        'event-merge',
+        'merged',
+        '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge.',
+      ),
+    ]);
+    const row = requiredValue(message.content.split('\n')[1]);
+
+    expect(row).toContain(
+      '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+    );
+    expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
+  });
+
   test('normalizes and truncates each digest row predictably', () => {
     const message = render([
       event('event-1', 'agent_report_blocked', `agent-1:\n${'x'.repeat(400)}`),
@@ -263,6 +279,29 @@ describe('manager inbox notification projection', () => {
     expect(row.length).toBe(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
     expect(row).not.toContain('\n');
     expect(row.endsWith('…')).toBe(true);
+  });
+
+  test('mints a cursor only through the ready prefix before a presentation-blocked merge row', () => {
+    const inbox = [
+      event('event-ready', 'agent_question', 'A ready prefix row.'),
+      {
+        ...event('event-merge', 'merged', 'Merge refinement is pending.'),
+        presentationBlocked: true,
+      },
+      event('event-suffix', 'agent_question', 'A suffix row held behind merge refinement.'),
+    ];
+    const wake = requiredValue(makeInboxWake('manager-notification', inbox, createdAt));
+    const message = renderInboxWakeMessage({ inbox, wake });
+
+    expect(wake).toMatchObject({ cursor: 'event-ready', pendingCount: 1 });
+    expect(message.content).toContain('- agent_question: [child question] A ready prefix row.');
+    expect(message.content).toContain(
+      '- queued suffix: +2 durable events await the next cursor release.',
+    );
+    expect(message.content).not.toContain('Merge refinement is pending.');
+    expect(message.content).not.toContain('A suffix row held behind merge refinement.');
+    expect(message.details).toMatchObject({ digestCount: 1, queuedSuffixCount: 2 });
+    expect(makeInboxWake('manager-notification', inbox.slice(1), createdAt)).toBeUndefined();
   });
 
   test('leaves overflow as an explicit queued suffix instead of minting a cursor across hidden rows', () => {

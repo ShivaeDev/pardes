@@ -301,23 +301,145 @@ function hasUnresolvedAgentHandoffAudit(state: ManagerState, workstreamId: strin
   );
 }
 
+interface MergedRetirementProjection {
+  readonly compact: string;
+  readonly detail: string;
+}
+
+interface MergedWorkstreamPreservationReason {
+  readonly compact: string;
+  readonly detail: string;
+}
+
+function mergedWorkflowBlockingAttention(
+  state: ManagerState,
+  workstreamId: string,
+): ReadonlyArray<ManagerEvent> {
+  return state.inbox.filter(
+    (event) =>
+      !MERGED_WORKFLOW_NON_BLOCKING_EVENT_TYPES.has(event.type) &&
+      eventRelatedToWorkstream(event, state, workstreamId),
+  );
+}
+
+function mergedWorkstreamPreservationReasons(
+  state: ManagerState,
+  workstreamId: string,
+  liveRuntimes: ReadonlyMap<string, WorkerRuntimeSnapshot>,
+): ReadonlyArray<MergedWorkstreamPreservationReason> {
+  return [
+    ...(hasUnresolvedAgentHandoffAudit(state, workstreamId)
+      ? [{ compact: 'audit', detail: 'an unresolved handoff Git audit' }]
+      : []),
+    ...(Object.values(state.pullRequests).some(
+      (pullRequest) => pullRequest.workstreamId === workstreamId && pullRequest.status === 'open',
+    )
+      ? [{ compact: 'open-PR', detail: 'an open review gate' }]
+      : []),
+    ...(hasAttachedWorker(state, workstreamId, liveRuntimes)
+      ? [{ compact: 'worker', detail: 'an attached worker' }]
+      : []),
+    ...(mergedWorkflowBlockingAttention(state, workstreamId).length > 0
+      ? [{ compact: 'attention', detail: 'unresolved blocking attention' }]
+      : []),
+  ];
+}
+
 function canAutoCompleteMergedWorkstream(
   state: ManagerState,
   workstreamId: string,
   liveRuntimes: ReadonlyMap<string, WorkerRuntimeSnapshot>,
 ): boolean {
-  return (
-    !hasAttachedWorker(state, workstreamId, liveRuntimes) &&
-    !hasUnresolvedAgentHandoffAudit(state, workstreamId) &&
-    !Object.values(state.pullRequests).some(
-      (pullRequest) => pullRequest.workstreamId === workstreamId && pullRequest.status === 'open',
-    ) &&
-    !state.inbox.some(
-      (event) =>
-        !MERGED_WORKFLOW_NON_BLOCKING_EVENT_TYPES.has(event.type) &&
-        eventRelatedToWorkstream(event, state, workstreamId),
-    )
+  return mergedWorkstreamPreservationReasons(state, workstreamId, liveRuntimes).length === 0;
+}
+
+function compactMergedReasons(reasons: ReadonlyArray<MergedWorkstreamPreservationReason>): string {
+  const visible = reasons.slice(0, 1).map((reason) => reason.compact);
+  return `${visible.join('+')}${reasons.length > visible.length ? `+${reasons.length - visible.length}` : ''}`;
+}
+
+function projectMergedWorkstreamRetirement(
+  state: ManagerState,
+  workstreamId: string,
+  liveRuntimes: ReadonlyMap<string, WorkerRuntimeSnapshot>,
+): MergedRetirementProjection {
+  const workstream = state.workstreams[workstreamId];
+  if (!workstream)
+    return {
+      compact: 'stream:preserved(unavailable)',
+      detail: `Workstream ${workstreamId} was preserved because its durable projection is unavailable.`,
+    };
+  if (workstream.status === 'complete')
+    return {
+      compact: 'stream:complete',
+      detail: `Workstream ${workstreamId} is complete.`,
+    };
+  if (workstream.status === 'cancelled')
+    return {
+      compact: 'stream:preserved(cancelled)',
+      detail: `Workstream ${workstreamId} remained cancelled.`,
+    };
+  const reasons = mergedWorkstreamPreservationReasons(state, workstreamId, liveRuntimes);
+  return {
+    compact: `stream:preserved(${reasons.length === 0 ? 'guard' : compactMergedReasons(reasons)})`,
+    detail:
+      reasons.length === 0
+        ? `Workstream ${workstreamId} was conservatively preserved because completion was not confirmed.`
+        : `Workstream ${workstreamId} was preserved because of ${reasons.map((reason) => reason.detail).join(', ')}.`,
+  };
+}
+
+function mergedRetirementSummary(
+  pullRequest: PullRequestRecord,
+  owner: MergedRetirementProjection,
+  state: ManagerState,
+  liveRuntimes: ReadonlyMap<string, WorkerRuntimeSnapshot>,
+): string {
+  const workstream = projectMergedWorkstreamRetirement(
+    state,
+    pullRequest.workstreamId,
+    liveRuntimes,
   );
+  const followUp = mergedWorkflowBlockingAttention(state, pullRequest.workstreamId);
+  const followUpTypes = [...new Set(followUp.map((event) => truncateModelFacingText(event.type)))];
+  return boundedEventSummary([
+    `${pullRequestLabel(pullRequest)} merge observed; ${owner.compact}; ${workstream.compact}; follow-up:${followUp.length}.`,
+    'External GitHub merge metadata was observed only; Pardes did not merge.',
+    owner.detail,
+    workstream.detail,
+    followUp.length === 0
+      ? 'No follow-up attention remains.'
+      : `Follow-up attention remains: ${followUpTypes.slice(0, 3).join(', ')}${followUpTypes.length > 3 ? `, +${followUpTypes.length - 3} more types` : ''}.`,
+  ]);
+}
+
+function hasMergedRetirementSummary(state: ManagerState, pullRequestId: string): boolean {
+  return state.inbox.some(
+    (event) =>
+      event.type === 'merged' &&
+      event.pullRequestId === pullRequestId &&
+      event.summary.includes(
+        'External GitHub merge metadata was observed only; Pardes did not merge.',
+      ),
+  );
+}
+
+function withMergedRetirementSummary(
+  state: ManagerState,
+  pullRequest: PullRequestRecord,
+  owner: MergedRetirementProjection,
+  liveRuntimes: ReadonlyMap<string, WorkerRuntimeSnapshot>,
+): ManagerState {
+  const summary = mergedRetirementSummary(pullRequest, owner, state, liveRuntimes);
+  let changed = false;
+  const inbox = state.inbox.map((event) => {
+    if (event.type !== 'merged' || event.pullRequestId !== pullRequest.id) return event;
+    const { presentationBlocked: _presentationBlocked, ...readyEvent } = event;
+    if (event.presentationBlocked !== true && event.summary === summary) return event;
+    changed = true;
+    return { ...readyEvent, summary };
+  });
+  return changed ? withInbox(state, inbox) : state;
 }
 
 function pullRequestTransitionSummary(
@@ -331,7 +453,7 @@ function pullRequestTransitionSummary(
     return `${label} for ${pullRequest.agentId} has changes-requested review metadata.`;
   if (transition === 'conflict') return `${label} for ${pullRequest.agentId} has merge conflicts.`;
   if (transition === 'merged')
-    return `${label} for ${pullRequest.agentId} was merged (observation only).`;
+    return `${label} for ${pullRequest.agentId} was merged externally; Pardes observed only and did not merge.`;
   return `${label} for ${pullRequest.agentId} was closed without merge (observation only).`;
 }
 
@@ -436,15 +558,35 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     if (!outcome.persisted) return;
     if (outcome.enqueued && attention) yield* callbacks.appendEventSafely(attention);
     yield* callbacks.refresh();
-    if (outcome.enqueued) yield* callbacks.releaseInboxWake();
   });
 
   const stopMergedPullRequestIdleWorker = Effect.fnUntraced(function* (
     pullRequest: PullRequestRecord,
   ) {
     const agent = namespace.state.agents[pullRequest.agentId];
-    if (!agent || agent.workstreamId !== pullRequest.workstreamId || agent.status !== 'idle')
-      return;
+    if (!agent)
+      return {
+        compact: 'owner:preserved(unavailable)',
+        detail: `Owner ${pullRequest.agentId} was preserved because its durable projection is unavailable.`,
+      };
+    if (agent.workstreamId !== pullRequest.workstreamId)
+      return {
+        compact: 'owner:preserved(reassociated)',
+        detail: `Owner ${agent.id} was preserved because its workstream association changed.`,
+      };
+    if (agent.status === 'stopped')
+      return {
+        compact: 'owner:stopped',
+        detail:
+          agent.worktree === undefined && agent.leaseCleanup !== undefined
+            ? `Owner ${agent.id} was already stopped; managed worktree was cleaned or is absent (${agent.leaseCleanup.worktreeOutcome}); retained Pi session metadata is history-only.`
+            : `Owner ${agent.id} was already stopped; managed worktree and session remain preserved.`,
+      };
+    if (agent.status !== 'idle')
+      return {
+        compact: `owner:preserved(${agent.status})`,
+        detail: `Owner ${agent.id} was preserved because its status is ${agent.status}, not idle.`,
+      };
     const audit = yield* callbacks.auditAutoStop(agent);
     if (audit?.status === 'failed') {
       const summary = boundedEventSummary([
@@ -461,7 +603,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           pullRequestEventAssociation(pullRequest),
         ),
       );
-      return;
+      return {
+        compact: 'idle-owner:preserved(audit)',
+        detail: `Idle owner ${agent.id} was preserved because its managed-worktree Git audit failed.`,
+      };
     }
     if (audit?.status === 'succeeded' && audit.gitAudit.dirty) {
       const summary = boundedEventSummary([
@@ -478,7 +623,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           pullRequestEventAssociation(pullRequest),
         ),
       );
-      return;
+      return {
+        compact: 'idle-owner:preserved(dirty)',
+        detail: `Idle owner ${agent.id} was preserved because its managed worktree is dirty.`,
+      };
     }
     const stoppedResult = yield* callbacks.stopIdleWorker(agent.id).pipe(Effect.exit);
     if (Exit.isFailure(stoppedResult)) {
@@ -497,12 +645,18 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           pullRequestEventAssociation(pullRequest),
         ),
       );
-      return;
+      return {
+        compact: 'idle-owner:preserved(stop)',
+        detail: `Idle owner ${agent.id} was preserved because guarded auto-stop failed.`,
+      };
     }
     const stopped = stoppedResult.value;
     if (!stopped || stopped.status !== 'stopped') {
       yield* persistAutoStopAudit(agent.id, audit);
-      return;
+      return {
+        compact: 'idle-owner:preserved(guard)',
+        detail: `Idle owner ${agent.id} was preserved because guarded auto-stop did not confirm a stopped runtime.`,
+      };
     }
     callbacks.recordStoppedRuntime(agent.id, stopped);
     const timestamp = yield* nowIso;
@@ -525,7 +679,13 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         },
       ] as const);
     });
-    if (!persisted) return;
+    if (!persisted) {
+      yield* callbacks.refresh();
+      return {
+        compact: 'idle-owner:preserved(raced)',
+        detail: `Idle owner ${agent.id} was conservatively preserved because its durable lifecycle changed during auto-stop.`,
+      };
+    }
     yield* callbacks.appendEventSafely(
       makeEvent(
         'agent_auto_stopped',
@@ -538,37 +698,25 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       ),
     );
     yield* callbacks.refresh();
+    return {
+      compact: 'idle-owner:stopped',
+      detail: `Stopped idle owner ${agent.id}; managed worktree and session remain preserved.`,
+    };
   });
 
   const retireMergedPullRequest = Effect.fnUntraced(function* (pullRequestId: string) {
     const known = namespace.state.pullRequests[pullRequestId];
     if (!known || known.status !== 'merged') return;
-    yield* stopMergedPullRequestIdleWorker(known);
+    if (
+      namespace.state.workstreams[known.workstreamId]?.status === 'complete' &&
+      hasMergedRetirementSummary(namespace.state, pullRequestId)
+    ) {
+      yield* callbacks.releaseInboxWake();
+      return;
+    }
+    const ownerRetirement = yield* stopMergedPullRequestIdleWorker(known);
     const pullRequest = namespace.state.pullRequests[pullRequestId];
     if (!pullRequest || pullRequest.status !== 'merged') return;
-    const inbox = namespace.state.inbox.filter(
-      (event) => !isMergedWorkflowConsumableEvent(event, pullRequest),
-    );
-    const workstream = namespace.state.workstreams[pullRequest.workstreamId];
-    const stateWithoutRoutineWorkerAttention =
-      inbox.length === namespace.state.inbox.length
-        ? namespace.state
-        : withInbox(namespace.state, inbox);
-    const shouldComplete =
-      workstream !== undefined &&
-      workstream.status !== 'complete' &&
-      workstream.status !== 'cancelled' &&
-      canAutoCompleteMergedWorkstream(
-        stateWithoutRoutineWorkerAttention,
-        workstream.id,
-        callbacks.liveRuntimes(),
-      );
-    if (
-      stateWithoutRoutineWorkerAttention === namespace.state &&
-      !shouldComplete &&
-      workstream?.status !== 'complete'
-    )
-      return;
     const timestamp = yield* nowIso;
     const outcome = yield* namespace.store.mutate((state) => {
       const currentPullRequest = state.pullRequests[pullRequestId];
@@ -607,7 +755,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         nextInbox.length === stateWithoutRoutineWorkerAttention.inbox.length
           ? stateWithoutRoutineWorkerAttention
           : withInbox(stateWithoutRoutineWorkerAttention, nextInbox);
-      const nextState = complete
+      const stateWithWorkstream = complete
         ? {
             ...stateWithConsumedInbox,
             workstreams: {
@@ -620,12 +768,17 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
             },
           }
         : stateWithConsumedInbox;
+      const nextState = withMergedRetirementSummary(
+        stateWithWorkstream,
+        currentPullRequest,
+        ownerRetirement,
+        callbacks.liveRuntimes(),
+      );
       return Effect.succeed([
         { changed: nextState !== state, completed: complete },
         nextState,
       ] as const);
     });
-    if (!outcome.changed) return;
     if (outcome.completed) {
       yield* callbacks.appendEventSafely(
         makeEvent(
@@ -636,7 +789,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         ),
       );
     }
-    yield* callbacks.refresh();
+    if (outcome.changed) yield* callbacks.refresh();
     yield* callbacks.releaseInboxWake();
   });
 
@@ -762,14 +915,15 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         updatedAt: timestamp,
       };
       const attention = [
-        ...nextTransitions.map((transition) =>
-          makeEvent(
+        ...nextTransitions.map((transition) => ({
+          ...makeEvent(
             transition,
             pullRequestTransitionSummary(nextPullRequest, transition),
             timestamp,
             pullRequestEventAssociation(nextPullRequest),
           ),
-        ),
+          ...(transition === 'merged' ? { presentationBlocked: true } : {}),
+        })),
         ...(newlyDetectedPaginationGap
           ? [
               makeEvent(

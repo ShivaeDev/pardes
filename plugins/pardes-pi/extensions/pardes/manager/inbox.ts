@@ -73,13 +73,15 @@ export function inboxWakeToken(managerId: string, cursor: string): string {
   return `wake-${digest}`;
 }
 
-/** Mint one cursor only across rows the compact wake can present individually. */
+/** Mint one cursor only across the ready prefix the compact wake can present individually. */
 export function makeInboxWake(
   managerId: string,
   inbox: ReadonlyArray<ManagerEvent>,
   createdAt: string,
 ): InboxWake | undefined {
-  const pendingCount = Math.min(inbox.length, MANAGER_INBOX_WAKE_MAX_ROWS);
+  const firstBlockedIndex = inbox.findIndex((event) => event.presentationBlocked === true);
+  const readyPrefixLength = firstBlockedIndex === -1 ? inbox.length : firstBlockedIndex;
+  const pendingCount = Math.min(readyPrefixLength, MANAGER_INBOX_WAKE_MAX_ROWS);
   const cursor = inbox[pendingCount - 1]?.id;
   return cursor === undefined
     ? undefined

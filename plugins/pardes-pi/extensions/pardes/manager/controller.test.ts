@@ -343,6 +343,35 @@ function toggledInspectionWorktrees() {
   };
 }
 
+async function barrierInspectionWorktrees() {
+  const service = makeManagedWorktreeService();
+  const entered = await Effect.runPromise(Deferred.make<void>());
+  const release = await Effect.runPromise(Deferred.make<void>());
+  let blocked = false;
+  const worktrees: ManagedWorktreeShape = {
+    ...service,
+    inspect: (owner, lease) =>
+      Effect.gen(function* () {
+        if (blocked) {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+        }
+        return yield* service.inspect(owner, lease);
+      }),
+  };
+  return {
+    block: () => {
+      blocked = true;
+    },
+    entered,
+    release: () => {
+      blocked = false;
+      return Effect.runPromise(Deferred.succeed(release, undefined));
+    },
+    worktrees,
+  };
+}
+
 function failingWorkers(onSpawn?: (input: WorkerSpawnInput) => void) {
   const makeWorkers = (_onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>) =>
     ({
@@ -4696,6 +4725,12 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.agents[agent.id]).not.toHaveProperty('changedPaths');
     expect(controller.snapshot()?.agents[agent.id]).not.toHaveProperty('worktree');
     expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    const refinedMerge = controller.snapshot()?.inbox.find(({ type }) => type === 'merged');
+    expect(refinedMerge?.summary).toContain('owner:stopped; stream:complete;');
+    expect(refinedMerge?.summary).toContain(
+      'managed worktree was cleaned or is absent (discarded_dirty); retained Pi session metadata is history-only.',
+    );
+    expect(refinedMerge?.summary).not.toContain('managed worktree and session remain preserved');
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
@@ -5639,7 +5674,13 @@ describe('manager controller', () => {
     const mergeAttention = controller.snapshot()?.inbox[0];
     expect(controller.snapshot()?.inboxWake?.cursor).toBe(mergeAttention?.id);
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(wakesBeforeMerge + 1);
+    expect(mergeAttention?.summary).toContain(
+      '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+    );
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+      ),
       details: { cursor: mergeAttention?.id, pendingCount: 1, type: 'manager_inbox_wake' },
     });
 
@@ -5679,6 +5720,178 @@ describe('manager controller', () => {
     expect(restored.snapshot()?.inbox).toEqual([]);
     expect(restored.snapshot()).not.toHaveProperty('inboxWake');
     await Effect.runPromise(restored.shutdown(fixture.ctx));
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('holds blocked merge and suffix acknowledgements until suspended retirement durably refines its routine outcome', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const worktrees = await barrierInspectionWorktrees();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+      worktrees: worktrees.worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent, published } = await publishManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+    );
+    const unrelated = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'queued suffix behind suspended merge refinement',
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    expect(controller.snapshot()?.inbox).toEqual([]);
+    fixture.messages.length = 0;
+    fixture.setManagerIdle(false);
+    await Effect.runPromise(
+      workers.emit({
+        agentId: unrelated.agent.id,
+        question: 'A ready prefix remains independently acknowledgeable.',
+        type: 'question',
+      }),
+    );
+    const readyPrefix = requiredValue(controller.snapshot()?.inbox[0]);
+    worktrees.block();
+
+    const merge = Effect.runFork(
+      watcher.observe(published.pullRequest.id, observedPullRequest({ status: 'merged' })),
+    );
+    await Effect.runPromise(Deferred.await(worktrees.entered));
+
+    const blockedMerge = requiredValue(controller.snapshot()?.inbox[1]);
+    expect(
+      await Effect.runPromise(controller.getInboxEvent({ eventId: blockedMerge.id }, fixture.ctx)),
+    ).toMatchObject({ id: blockedMerge.id, presentationBlocked: true, type: 'merged' });
+    await Effect.runPromise(
+      workers.emit({
+        agentId: unrelated.agent.id,
+        question: 'Preserve this later suffix while merge refinement is pending.',
+        type: 'question',
+      }),
+    );
+    const suffix = requiredValue(controller.snapshot()?.inbox.at(-1));
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'agent_question',
+      'merged',
+      'agent_question',
+    ]);
+    expect(
+      await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: readyPrefix.id })),
+    ).toMatchObject({
+      acknowledgedCount: 1,
+      cursor: readyPrefix.id,
+      pendingCount: 2,
+      staleCursor: false,
+    });
+    fixture.setManagerIdle(true);
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(managerInboxWakeups(fixture.messages)).toEqual([]);
+    expect(
+      await Effect.runPromise(
+        controller.acknowledgeInbox(fixture.ctx, { cursor: blockedMerge.id }),
+      ),
+    ).toMatchObject({ acknowledgedCount: 0, cursor: blockedMerge.id, staleCursor: true });
+    expect(
+      await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: suffix.id })),
+    ).toMatchObject({ acknowledgedCount: 0, cursor: suffix.id, staleCursor: true });
+    expect(controller.snapshot()?.inbox.map(({ id }) => id)).toEqual([blockedMerge.id, suffix.id]);
+
+    await worktrees.release();
+    await Effect.runPromise(Fiber.join(merge));
+
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('stopped');
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    expect(controller.snapshot()?.inbox.map(({ id }) => id)).toEqual([blockedMerge.id, suffix.id]);
+    expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+    expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+      ),
+      details: { cursor: suffix.id, pendingCount: 2 },
+    });
+    expect(
+      await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: suffix.id })),
+    ).toMatchObject({
+      acknowledgedCount: 2,
+      cursor: suffix.id,
+      pendingCount: 0,
+      staleCursor: false,
+    });
+    expect(controller.snapshot()?.inbox).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('holds a merged wake until suspended retirement durably refines its exceptional outcome', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const worktrees = await barrierInspectionWorktrees();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+      worktrees: worktrees.worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    writeFileSync(
+      join(requiredValue(agent.worktree).path, 'dirty-suspended-retirement.txt'),
+      'preserve exceptional retirement\n',
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    expect(controller.snapshot()?.inbox).toEqual([]);
+    fixture.messages.length = 0;
+    worktrees.block();
+
+    const merge = Effect.runFork(
+      watcher.observe(published.pullRequest.id, observedPullRequest({ status: 'merged' })),
+    );
+    await Effect.runPromise(Deferred.await(worktrees.entered));
+
+    expect(controller.snapshot()?.inbox).toMatchObject([
+      { presentationBlocked: true, type: 'merged' },
+    ]);
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(managerInboxWakeups(fixture.messages)).toEqual([]);
+
+    await worktrees.release();
+    await Effect.runPromise(Fiber.join(merge));
+
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'merged',
+      'agent_git_audit_dirty',
+    ]);
+    expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+    expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
+      ),
+      details: { pendingCount: 2 },
+    });
+    expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
+      content: expect.stringContaining('- agent_git_audit_dirty: [Pardes]'),
+    });
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
@@ -5728,6 +5941,17 @@ describe('manager controller', () => {
       'merged',
       'agent_git_audit_dirty',
     ]);
+    expect(controller.snapshot()?.inbox[0]?.summary).toContain(
+      '#42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
+    );
+    expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
+      ),
+    });
+    expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
+      content: expect.stringContaining('- agent_git_audit_dirty: [Pardes]'),
+    });
     expect(agent.worktree && existsSync(agent.worktree.path)).toBe(true);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
@@ -5866,6 +6090,7 @@ describe('manager controller', () => {
       agentId: agent.id,
       createdAt: '2026-06-01T00:00:00.000Z',
       id: 'event-unpresented-merge',
+      presentationBlocked: true,
       pullRequestId: published.pullRequest.id,
       summary: '#42 was merged (observation only).',
       type: 'merged',
@@ -5885,6 +6110,8 @@ describe('manager controller', () => {
     );
     expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
     expect(restored.snapshot()?.inbox.map(({ type }) => type)).toEqual(['merged']);
+    expect(restored.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
+    expect(restored.snapshot()?.inbox[0]?.summary).toContain('#42 merge observed;');
     expect(restored.snapshot()?.inboxWake?.cursor).toBe('event-unpresented-merge');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
@@ -7562,6 +7789,114 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.verifications[verification.id]?.attempts).toHaveLength(2);
   });
 
+  test('does not let a prior-generation terminal handoff marker suppress one reportless refreshed-verifier warning', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const stateDir = activationStateDir(fixture.entries);
+    const { agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'cross-generation missing advisory terminal report',
+    );
+    const verification = await Effect.runPromise(
+      controller.requestVerification({ sourceAgentId: agent.id }, fixture.ctx),
+    );
+    const verifierAgentId = verification.verifierAgentId;
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
+        details: 'Attempt-one advisory detail.',
+        status: 'completed',
+        summary: 'Attempt-one advisory complete.',
+        type: 'report',
+      }),
+    );
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'agent_report_completed',
+    ]);
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    workers.runtimes.set(verifierAgentId, {
+      ...requiredValue(workers.runtimes.get(verifierAgentId)),
+      isStreaming: false,
+      status: 'idle',
+    });
+    const refreshed = await Effect.runPromise(
+      controller.refreshVerification({ verificationId: verification.id }, fixture.ctx),
+    );
+    expect(currentVerificationAttempt(refreshed)).toMatchObject({ attempt: 2, status: 'running' });
+
+    for (let index = 0; index < 2; index++) {
+      await Effect.runPromise(
+        workers.emit({
+          agentId: verifierAgentId,
+          sessionFile: controller.snapshot()?.agents[verifierAgentId]?.sessionFile,
+          status: 'idle',
+          type: 'status',
+        }),
+      );
+    }
+
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'verification_terminal_report_missing',
+    ]);
+    expect(controller.snapshot()?.inbox[0]?.summary).toContain(
+      'terminal report missing; follow up; do not poll',
+    );
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('idle');
+    expect(
+      currentVerificationAttempt(
+        requiredValue(controller.snapshot()?.verifications[verification.id]),
+      ).status,
+    ).toBe('idle');
+    expect(workers.stops).toEqual([verifierAgentId]);
+    expect(
+      managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
+    ).toHaveLength(1);
+    expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
+    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain('do not poll');
+
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'running', type: 'status' }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
+        details: 'Bounded retained advisory blocker.',
+        status: 'blocked',
+        summary: 'One advisory blocker remains.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'idle', type: 'status' }),
+    );
+
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual(['agent_report_blocked']);
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('idle');
+    expect(
+      currentVerificationAttempt(
+        requiredValue(controller.snapshot()?.verifications[verification.id]),
+      ),
+    ).toMatchObject({ latestReport: { status: 'blocked' }, status: 'blocked' });
+    expect(workers.stops).toEqual([verifierAgentId]);
+    expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
+    expect(
+      managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
+    ).toHaveLength(1);
+    expect(
+      managerEvents(stateDir).filter(({ type }) => type === 'agent_report_blocked'),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('auto-retires an idle retained verifier after merged writer review while preserving durable history and scratch metadata', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -7684,10 +8019,34 @@ describe('manager controller', () => {
       watcher.observe(published.pullRequest.id, observedPullRequest({ status: 'closed' })),
     );
 
-    expect(workers.stops).toEqual([verifierAgentId]);
+    expect(workers.stops).toEqual([]);
     expect(controller.snapshot()?.pullRequests[published.pullRequest.id]?.status).toBe('closed');
-    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('stopped');
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('idle');
     expect(controller.snapshot()?.agents[agent.id]?.status).toBe('running');
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'verification_terminal_report_missing',
+      'closed_unmerged',
+    ]);
+    expect(existsSync(join(reviewCheckout.path, 'closed-scratch.txt'))).toBe(true);
+
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'running', type: 'status' }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
+        details: 'Closed-review verifier detail.',
+        status: 'completed',
+        summary: 'Closed-review advisory complete.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'idle', type: 'status' }),
+    );
+
+    expect(workers.stops).toEqual([verifierAgentId]);
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('stopped');
     expect(
       currentVerificationAttempt(
         requiredValue(controller.snapshot()?.verifications[verification.id]),
@@ -7736,6 +8095,15 @@ describe('manager controller', () => {
     await Effect.runPromise(
       workers.emit({
         agentId: verifierAgentId,
+        details: 'Terminal-review verifier detail.',
+        status: 'completed',
+        summary: 'Terminal-review advisory complete.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
         sessionFile: controller.snapshot()?.agents[verifierAgentId]?.sessionFile,
         status: 'idle',
         type: 'status',
@@ -7778,6 +8146,15 @@ describe('manager controller', () => {
     await Effect.runPromise(
       workers.emit({
         agentId: verifierAgentId,
+        details: 'Compaction-settlement verifier detail.',
+        status: 'completed',
+        summary: 'Compaction-settlement advisory complete.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
         sessionFile: controller.snapshot()?.agents[verifierAgentId]?.sessionFile,
         status: 'idle',
         type: 'status',
@@ -7806,7 +8183,7 @@ describe('manager controller', () => {
       currentVerificationAttempt(
         requiredValue(controller.snapshot()?.verifications[verification.id]),
       ).status,
-    ).toBe('idle');
+    ).toBe('completed');
     expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
 
     const settled = { ...compacting, isCompacting: false };

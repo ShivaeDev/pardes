@@ -229,6 +229,13 @@ export function currentVerificationAttempt(verification: VerificationRecord): Ve
   return attempt;
 }
 
+export function currentVerificationTerminalReportStatus(
+  verification: VerificationRecord | undefined,
+): 'completed' | 'blocked' | undefined {
+  const status = verification && currentVerificationAttempt(verification).latestReport?.status;
+  return status === 'completed' || status === 'blocked' ? status : undefined;
+}
+
 export const PullRequestObservationSchema = Schema.Struct({
   ci: Schema.Literals(['unknown', 'pending', 'passing', 'failing']),
   mergeable: Schema.Literals(['unknown', 'mergeable', 'conflicting']),
@@ -266,6 +273,8 @@ export const ManagerEventSchema = Schema.Struct({
   agentId: Schema.optionalKey(NonEmptyString),
   createdAt: NonEmptyString,
   id: NonEmptyString,
+  /** Presentation cursors stop before this row until its bounded software outcome is durable. */
+  presentationBlocked: Schema.optionalKey(Schema.Boolean),
   pullRequestId: Schema.optionalKey(NonEmptyString),
   reportId: Schema.optionalKey(ReportIdSchema),
   reportPreviewTruncated: Schema.optionalKey(Schema.Boolean),

@@ -78,7 +78,10 @@ function summaryAttentionRows(
 ): ReadonlyArray<SummaryAttentionRow> {
   const inbox: ReadonlyArray<SummaryAttentionRow> = state.inbox.map((event) => ({
     kind: 'inbox',
-    line: `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · judge first: inbox_get({ eventId })`,
+    line:
+      event.presentationBlocked === true
+        ? `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · software refinement pending; judge first: inbox_get({ eventId }); do not acknowledge`
+        : `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · judge first: inbox_get({ eventId })`,
   }));
   const reviews: ReadonlyArray<SummaryAttentionRow> = Object.values(state.pullRequests)
     .filter(pullRequestNeedsAttention)
@@ -139,6 +142,7 @@ export function summaryLines(
   const openReviews = pullRequests.filter((pullRequest) => pullRequest.status === 'open').length;
   const attention = pullRequests.filter(pullRequestNeedsAttention).length;
   const attentionRows = summaryAttentionRows(state, runtimes);
+  const refinementPending = state.inbox.some((event) => event.presentationBlocked === true);
   const visibleAttentionRows = attentionRows.slice(0, SUMMARY_ATTENTION_MAX_ROWS);
   const omittedAttentionRows = attentionRows.slice(visibleAttentionRows.length);
   return boundedRows(
@@ -147,7 +151,9 @@ export function summaryLines(
       `workstreams: ${workstreamCount('active')} active · ${workstreamCount('planned')} planned · ${workstreamCount('complete')} complete · ${workstreamCount('cancelled')} cancelled`,
       `workers: ${agentCount('running')} running · ${agentCount('idle')} idle · ${agentCount('starting')} starting · ${agentCount('crashed')} crashed · ${warnings} warnings`,
       `review gates: ${openReviews} open · ${attention} attention · advisory verifications: ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'current').length} current · ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'stale').length} stale · inbox: ${state.inbox.length} pending`,
-      ...(state.inboxWake || state.inboxHandoff ? [inboxDeliveryLine(state)] : []),
+      ...(state.inboxWake || state.inboxHandoff || refinementPending
+        ? [inboxDeliveryLine(state)]
+        : []),
       ...activationSummaryWarning(activation),
       ...(attentionRows.length === 0
         ? []

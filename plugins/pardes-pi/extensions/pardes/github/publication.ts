@@ -11,6 +11,7 @@ import {
   GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
   type GitHubRepositoryIdentity,
+  githubComRepositorySelector,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -220,7 +221,7 @@ export function makeGitHubPublicationService(
   const runGitHub = (route: GitHubRepositoryIdentity, cwd: string, args: ReadonlyArray<string>) =>
     hostedMetadata.accountOpaqueRequest(
       'graphql',
-      github.run(cwd, [...args, '--repo', route.slug]),
+      github.run(cwd, [...args, '--repo', githubComRepositorySelector(route)]),
     );
   const pushedHeadVerificationDelayMillis = boundedVerificationOverride(
     'pushedHeadVerificationDelayMillis',

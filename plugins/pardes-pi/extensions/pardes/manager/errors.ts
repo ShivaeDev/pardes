@@ -73,6 +73,10 @@ export class InboxEventNotFoundError extends Data.TaggedError('InboxEventNotFoun
   readonly eventId: string;
 }> {}
 
+export class PullRequestNotFoundError extends Data.TaggedError('PullRequestNotFoundError')<{
+  readonly pullRequestId: string;
+}> {}
+
 export class InboxHandoffUnavailableError extends Data.TaggedError('InboxHandoffUnavailableError')<{
   readonly reason: 'no_delivered_cursor' | 'stale_delivered_cursor';
 }> {}
@@ -148,6 +152,7 @@ export type PardesError =
   | WorkstreamNotFoundError
   | WorkstreamCompletionRejectedError
   | InboxEventNotFoundError
+  | PullRequestNotFoundError
   | InboxHandoffUnavailableError
   | AgentNotFoundError
   | AgentAlreadyRunningError
@@ -216,6 +221,9 @@ export function formatPardesError(error: unknown): string {
     }
     if (tagged._tag === 'InboxEventNotFoundError' && 'eventId' in tagged) {
       return `Unknown pending inbox event: ${String(tagged.eventId)}`;
+    }
+    if (tagged._tag === 'PullRequestNotFoundError' && 'pullRequestId' in tagged) {
+      return `Unknown pull-request review gate: ${String(tagged.pullRequestId)}`;
     }
     if (tagged._tag === 'InboxHandoffUnavailableError') {
       return 'No current delivered Pardes attention cursor is available for user handoff.';

@@ -6,6 +6,7 @@ import {
   type GitHubHostedMetadataShape,
   type GitHubRateLimitHealth,
   type GitHubRepositoryIdentity,
+  githubComRepositorySelector,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -462,7 +463,7 @@ export function makeGitHubIntegrationHealthService(
         '--json',
         PULL_REQUEST_HEALTH_JSON_FIELDS,
         '--repo',
-        route.slug,
+        githubComRepositorySelector(route),
       ]),
     );
     const pullRequest = yield* decodeGitHubJson(

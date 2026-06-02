@@ -154,7 +154,7 @@ describe('GitHub integration-health inspection', () => {
     expect(JSON.stringify(inspection)).not.toContain('GitHubIntegrationHealthTimeoutError');
   });
 
-  test('uses shell-free server-selected GraphQL fields and reports current checks with shared default-branch failure hints', async () => {
+  test('host-qualifies health reads despite alternate GH_HOST and reports current checks with shared hints', async () => {
     const fixture = scriptedRunner([
       defaultBranchResult(),
       hostedChecksResult({
@@ -167,12 +167,21 @@ describe('GitHub integration-health inspection', () => {
       }),
     ]);
 
-    const inspection = await Effect.runPromise(
-      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
-        cwd: '/tmp/project',
-        pullRequests: [{ ...association(), watcherFailure: AUTH_WATCHER_FAILURE }],
-      }),
-    );
+    const inspection = await (async () => {
+      const previousGitHubHost = process.env.GH_HOST;
+      process.env.GH_HOST = 'github.enterprise.test';
+      try {
+        return await Effect.runPromise(
+          makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+            cwd: '/tmp/project',
+            pullRequests: [{ ...association(), watcherFailure: AUTH_WATCHER_FAILURE }],
+          }),
+        );
+      } finally {
+        if (previousGitHubHost === undefined) delete process.env.GH_HOST;
+        else process.env.GH_HOST = previousGitHubHost;
+      }
+    })();
 
     expect(inspection).toEqual({
       bounds: { maxHostedChecksPerRef: 50, maxPullRequests: 12 },
@@ -266,7 +275,7 @@ describe('GitHub integration-health inspection', () => {
       '--json',
       'number,headRefOid',
       '--repo',
-      'acme/project',
+      'github.com/acme/project',
     ]);
     expect(fixture.invocations[3]?.args).toContain(`expression=${association().headBranch}`);
     expect(fixture.invocations.flatMap(({ args }) => args).join(' ')).not.toContain('actions/runs');

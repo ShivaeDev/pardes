@@ -514,9 +514,11 @@ export function makeGitHubWatcherService(
       const offset = associations.length === 0 ? 0 : nextAssociationOffset % associations.length;
       const indexed = associations.map((pullRequest, index) => [index, pullRequest] as const);
       const ordered = [...indexed.slice(offset), ...indexed.slice(0, offset)];
+      let pollingDeferred = false;
       return Effect.forEach(
         ordered,
         ([associationIndex, pullRequest]) => {
+          if (pollingDeferred) return Effect.void;
           const cwd = callbacks.cwd();
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
           const failure = (error: GitHubWatcherError) =>
@@ -536,14 +538,16 @@ export function makeGitHubWatcherService(
                     onSuccess: (route) =>
                       hostedMetadata.reserveWatcherPoll(cwd, 1, route).pipe(
                         Effect.tap((reservation) =>
-                          reservation.status === 'ready'
-                            ? Effect.sync(() => {
-                                nextAssociationOffset =
-                                  associations.length === 0
-                                    ? 0
-                                    : (associationIndex + 1) % associations.length;
-                              })
-                            : Effect.void,
+                          Effect.sync(() => {
+                            if (reservation.status === 'deferred') {
+                              pollingDeferred = true;
+                              return;
+                            }
+                            nextAssociationOffset =
+                              associations.length === 0
+                                ? 0
+                                : (associationIndex + 1) % associations.length;
+                          }),
                         ),
                         Effect.matchEffect({
                           onFailure: operationalFailure,

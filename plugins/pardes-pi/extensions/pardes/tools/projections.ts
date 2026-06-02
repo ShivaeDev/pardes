@@ -691,7 +691,7 @@ function rateLimitHealthLines(
   const watcher = rateLimit.watcherPolling;
   const watcherLabel = watcher.status === 'ready' ? 'ready' : `deferred(${watcher.reason})`;
   return [
-    'rate scope: GitHub.com credentials fixed/controller lifetime · gh credential switch unsupported · reload manager for fresh cache',
+    'rate scope: GitHub.com repository pinned/controller lifetime · caller must not switch gh credentials in place · reload manager first for fresh cache',
     `rate budget: graphql:${rateLimitBudgetLabel(rateLimit.graphql)}`,
     `rate fallback: rest:${rateLimitBudgetLabel(rateLimit.rest)} · endpoint:${rateLimit.fallback} · watcher-last-disposition:${watcherLabel}`,
   ];

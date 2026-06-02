@@ -52,7 +52,7 @@ const input = {
 };
 
 describe('GitHub publication boundary', () => {
-  test('pushes exactly the audited SHA with an explicit branch refspec before creating a ready-for-review PR', async () => {
+  test('pushes exactly the audited SHA to the proved immutable remote target before creating a ready-for-review PR', async () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
@@ -77,7 +77,11 @@ describe('GitHub publication boundary', () => {
       url: 'https://github.com/acme/project/pull/42',
     });
     expect(fixture.invocations[0]).toEqual({
-      args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+      args: [
+        'push',
+        'git@github.com:acme/project.git',
+        `${input.headSha}:refs/heads/${input.headBranch}`,
+      ],
       command: 'git',
       cwd: input.cwd,
     });
@@ -165,7 +169,11 @@ describe('GitHub publication boundary', () => {
     expect(rateLimit.graphql).toMatchObject({ remaining: 3_985, source: 'local_estimate' });
     expect(rateLimit.rest).toMatchObject({ remaining: 3_000, source: 'rest_fallback' });
     expect(fixture.invocations[0]).toEqual({
-      args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+      args: [
+        'push',
+        'git@github.com:acme/project.git',
+        `${input.headSha}:refs/heads/${input.headBranch}`,
+      ],
       command: 'git',
       cwd: input.cwd,
     });
@@ -338,7 +346,11 @@ describe('GitHub publication boundary', () => {
         cwd: input.cwd,
       },
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${legacyHeadBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${legacyHeadBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -467,7 +479,11 @@ describe('GitHub publication boundary', () => {
         cwd: input.cwd,
       },
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${input.headBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -507,7 +523,11 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(4);
     expect(fixture.invocations.filter(({ command }) => command === 'git')).toEqual([
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${input.headBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -681,7 +701,11 @@ describe('GitHub publication boundary', () => {
         cwd: input.cwd,
       },
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${legacyHeadBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${legacyHeadBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },

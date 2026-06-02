@@ -780,6 +780,51 @@ describe('GitHub watcher service', () => {
     }
   });
 
+  test('stops low-tier passes after global deferral instead of proving every gate route', async () => {
+    let originProofs = 0;
+    const fixture = scriptedRunner([
+      rateLimitFallbackResult(1_500),
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 1,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult({ rateLimit: { ...RATE_LIMIT, remaining: 1_500 } }),
+      inlineCommentsResult(),
+    ]);
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command !== 'git') return fixture.runner.run(invocation);
+        originProofs += 1;
+        return Effect.succeed(result('git@github.com:acme/project.git\n'));
+      },
+    };
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner });
+    const service = makeGitHubWatcherServiceProduction({ hostedMetadata, runner });
+    const received = callbacks(
+      Array.from({ length: 12 }, (_, index) =>
+        pullRequest({
+          id: `pr-${index + 1}`,
+          number: index + 1,
+          url: `https://github.com/acme/project/pull/${index + 1}`,
+        }),
+      ),
+    );
+
+    await Effect.runPromise(service.poll(received.callbacks));
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.failures).toEqual([]);
+    expect(received.observations).toHaveLength(2);
+    expect(originProofs).toBe(3);
+    expect(fixture.invocations).toHaveLength(4);
+  });
+
   test('settles each healthy watcher GraphQL reservation after its exact decoded observation', async () => {
     const metadata = result(
       JSON.stringify({

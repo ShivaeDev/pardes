@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import { Deferred, Effect, Fiber } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
   GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS,
@@ -119,6 +119,21 @@ describe('GitHub hosted metadata adapter', () => {
         status: 'deferred',
         tier: 'unavailable',
       },
+    });
+  });
+
+  test('normalizes one proved HTTPS origin into an immutable hosted push target', async () => {
+    const adapter = makeGitHubHostedMetadataAdapter({
+      runner: {
+        run: () => Effect.succeed(result('https://github.com/acme/project.git\n')),
+      },
+    });
+
+    expect(await Effect.runPromise(adapter.fixedRoute('/tmp/project'))).toEqual({
+      owner: 'acme',
+      pushTarget: 'https://github.com/acme/project.git',
+      repo: 'project',
+      slug: 'acme/project',
     });
   });
 
@@ -413,6 +428,47 @@ describe('GitHub hosted metadata adapter', () => {
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 3_900, source: 'rest_fallback' },
       rest: { remaining: 2_900, source: 'rest_fallback' },
+    });
+  });
+
+  test('retains opaque spend that completes while an authoritative GraphQL response is in flight', async () => {
+    const opaqueEntered = await Effect.runPromise(Deferred.make<void>());
+    const releaseOpaque = await Effect.runPromise(Deferred.make<void>());
+    const fixture = scriptedRunner([fallbackResult(5_000, 5_000)]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.succeed(1_700_000_000_000),
+      runner: fixture.runner,
+    });
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    const opaque = Effect.runFork(
+      adapter.accountOpaqueRequest(
+        'graphql',
+        Deferred.succeed(opaqueEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseOpaque)),
+        ),
+      ),
+    );
+    await Effect.runPromise(Deferred.await(opaqueEntered));
+    const authoritative = await Effect.runPromise(adapter.reserveGraphQLRequest());
+    await Effect.runPromise(adapter.launchGraphQLRequest(authoritative.id));
+    const capturedBeforeOpaqueCompletion = graphQlEnvelope({ remaining: 4_999 });
+
+    await Effect.runPromise(Deferred.succeed(releaseOpaque, undefined));
+    await Effect.runPromise(Fiber.join(opaque));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 4_990, source: 'local_estimate' },
+    });
+    await Effect.runPromise(
+      adapter.decodeGraphQL(
+        'overlapping GraphQL budget fixture',
+        GitHubAdvertisedDefaultBranchGraphQLSchema,
+        capturedBeforeOpaqueCompletion,
+        authoritative.id,
+      ),
+    );
+
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 4_994, source: 'local_estimate' },
     });
   });
 

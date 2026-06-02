@@ -238,7 +238,7 @@ export function makeGitHubPublicationService(
     }
     yield* command(input.cwd, 'git', [
       'push',
-      'origin',
+      route.pushTarget,
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
     // `gh pr view` may briefly report the previous hosted OID after the exact
@@ -309,7 +309,7 @@ export function makeGitHubPublicationService(
     }
     yield* command(input.cwd, 'git', [
       'push',
-      'origin',
+      route.pushTarget,
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
     if (opaqueHeadBranch) {

@@ -46,6 +46,7 @@ export interface GitHubRequestReservation {
 
 export interface GitHubRepositoryIdentity {
   readonly owner: string;
+  readonly pushTarget: string;
   readonly repo: string;
   readonly slug: string;
 }
@@ -78,7 +79,7 @@ export interface GitHubRateLimitCompactStatus {
 }
 
 export interface GitHubRateLimitHealth {
-  /** One adapter belongs to one fresh controller and its fixed GitHub.com credential context. */
+  /** One adapter belongs to one fresh controller; callers must keep its GitHub.com credentials fixed. */
   readonly credentialContext: typeof GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT;
   readonly observation: 'bounded_hosted_rate_budget';
   readonly fallback: GitHubRateLimitFallbackStatus;
@@ -158,12 +159,12 @@ interface InternalDebtBucket {
   readonly amount: number;
   /** Undefined only until one decoded observation can bind debt to a reset window. */
   readonly resetAt?: string;
-  /** Monotonic local launch ordering permits only causally later observations to reconcile debt. */
-  readonly sequence?: number;
+  /** Only locally completed debt may be reconciled by a causally later authoritative launch. */
+  readonly completedSequence?: number;
   /** Identity-bearing requests remain distinct until causal settlement or conservative reset pruning. */
   readonly reservationId?: string;
   readonly phase?: InternalReservationPhase;
-  /** A GraphQL response may reconcile only completed local debt present when its request launched. */
+  /** A GraphQL response may reconcile only debt already completed when its request launched. */
   readonly causalBoundarySequence?: number;
 }
 
@@ -178,6 +179,7 @@ interface HostedMetadataState {
   readonly fallbackObservedAtMillis?: number;
   readonly graphql?: InternalObservedBudget;
   readonly rest?: InternalObservedBudget;
+  readonly nextCompletedSequence: number;
   readonly nextReservation: number;
   readonly nextWatcherAdmissionAtMillis?: number;
   readonly watcherPolling: GitHubWatcherRateLimitStatus;
@@ -242,9 +244,9 @@ function identityDebtCount(debt: InternalDebtLedger): number {
 /** Collapse anonymous estimates while retaining bounded identity-bearing in-flight requests. */
 function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<InternalDebtBucket> {
   let unknownAmount = 0;
-  let unknownSequence: number | undefined;
+  let unknownCompletedSequence: number | undefined;
   let knownAmount = 0;
-  let knownSequence: number | undefined;
+  let knownCompletedSequence: number | undefined;
   let latestResetAt: string | undefined;
   const reservations: InternalDebtBucket[] = [];
   for (const bucket of debt) {
@@ -254,11 +256,14 @@ function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<Int
     }
     if (bucket.resetAt === undefined) {
       unknownAmount = saturatedAdd(unknownAmount, bucket.amount);
-      unknownSequence = maximumSequence(unknownSequence, bucket.sequence);
+      unknownCompletedSequence = maximumSequence(
+        unknownCompletedSequence,
+        bucket.completedSequence,
+      );
       continue;
     }
     knownAmount = saturatedAdd(knownAmount, bucket.amount);
-    knownSequence = maximumSequence(knownSequence, bucket.sequence);
+    knownCompletedSequence = maximumSequence(knownCompletedSequence, bucket.completedSequence);
     if (latestResetAt === undefined || Date.parse(bucket.resetAt) > Date.parse(latestResetAt))
       latestResetAt = bucket.resetAt;
   }
@@ -269,7 +274,9 @@ function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<Int
       : [
           {
             amount: unknownAmount,
-            ...(unknownSequence === undefined ? {} : { sequence: unknownSequence }),
+            ...(unknownCompletedSequence === undefined
+              ? {}
+              : { completedSequence: unknownCompletedSequence }),
           },
         ]),
     ...(latestResetAt === undefined
@@ -278,7 +285,9 @@ function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<Int
           {
             amount: knownAmount,
             resetAt: latestResetAt,
-            ...(knownSequence === undefined ? {} : { sequence: knownSequence }),
+            ...(knownCompletedSequence === undefined
+              ? {}
+              : { completedSequence: knownCompletedSequence }),
           },
         ]),
   ];
@@ -330,7 +339,6 @@ function addDebt(
   reservation?: {
     readonly id: string;
     readonly phase: InternalReservationPhase;
-    readonly sequence: number;
   },
 ): ReadonlyArray<InternalDebtBucket> {
   return compactDebt([
@@ -343,7 +351,6 @@ function addDebt(
         : {
             phase: reservation.phase,
             reservationId: reservation.id,
-            sequence: reservation.sequence,
           }),
     },
   ]);
@@ -365,6 +372,36 @@ function updateReservation(
   return { graphql: map(debt.graphql), rest: map(debt.rest) };
 }
 
+function findReservation(
+  debt: InternalDebtLedger,
+  reservationId: string,
+): InternalDebtBucket | undefined {
+  return [...debt.graphql, ...debt.rest].find((bucket) => bucket.reservationId === reservationId);
+}
+
+function completeRequest(
+  value: HostedMetadataState,
+  reservationId: string,
+  cancelReserved: boolean,
+): HostedMetadataState {
+  const reservation = findReservation(value.debt, reservationId);
+  if (reservation === undefined || reservation.phase === 'completed_unobserved') return value;
+  if (reservation.phase === 'reserved')
+    return cancelReserved
+      ? { ...value, debt: updateReservation(value.debt, reservationId, () => undefined) }
+      : value;
+  const completedSequence = value.nextCompletedSequence;
+  return {
+    ...value,
+    debt: updateReservation(value.debt, reservationId, (bucket) => ({
+      ...bucket,
+      completedSequence,
+      phase: 'completed_unobserved',
+    })),
+    nextCompletedSequence: completedSequence + 1,
+  };
+}
+
 function reconcileObservedDebt(
   debt: ReadonlyArray<InternalDebtBucket>,
   causalBoundarySequence: number | undefined,
@@ -373,10 +410,7 @@ function reconcileObservedDebt(
   return compactDebt(
     debt.filter(
       (bucket) =>
-        bucket.sequence === undefined ||
-        bucket.sequence > causalBoundarySequence ||
-        bucket.phase === 'reserved' ||
-        bucket.phase === 'launched',
+        bucket.completedSequence === undefined || bucket.completedSequence > causalBoundarySequence,
     ),
   );
 }
@@ -386,8 +420,7 @@ function reservationCausalBoundary(
   reservationId: string | undefined,
 ): number | undefined {
   if (reservationId === undefined) return undefined;
-  return [...debt.graphql, ...debt.rest].find((bucket) => bucket.reservationId === reservationId)
-    ?.causalBoundarySequence;
+  return findReservation(debt, reservationId)?.causalBoundarySequence;
 }
 
 function effectiveBudget(
@@ -564,6 +597,7 @@ function reservationCapacityError(): GitHubResponseError {
 function repositoryParts(
   owner: string,
   repoWithSuffix: string,
+  transport: 'https' | 'ssh',
 ): GitHubRepositoryIdentity | undefined {
   const repo = repoWithSuffix.endsWith('.git') ? repoWithSuffix.slice(0, -4) : repoWithSuffix;
   const safe = /^[a-zA-Z0-9_.-]+$/;
@@ -575,23 +609,32 @@ function repositoryParts(
     owner !== '..' &&
     repo !== '.' &&
     repo !== '..'
-    ? { owner, repo, slug: `${owner}/${repo}` }
+    ? {
+        owner,
+        pushTarget:
+          transport === 'ssh'
+            ? `git@${GITHUB_HOSTED_METADATA_HOSTNAME}:${owner}/${repo}.git`
+            : `https://${GITHUB_HOSTED_METADATA_HOSTNAME}/${owner}/${repo}.git`,
+        repo,
+        slug: `${owner}/${repo}`,
+      }
     : undefined;
 }
 
 function remoteIdentity(value: string): GitHubRepositoryIdentity | undefined {
   const remote = value.trim();
   const scp = /^git@github\.com:([^/\s]+)\/([^/\s]+)$/.exec(remote);
-  if (scp) return repositoryParts(scp[1] ?? '', scp[2] ?? '');
+  if (scp) return repositoryParts(scp[1] ?? '', scp[2] ?? '', 'ssh');
   if (!URL.canParse(remote)) return undefined;
   const parsed = new URL(remote);
   const parts = parsed.pathname.split('/').filter(Boolean);
   return (parsed.protocol === 'https:' || parsed.protocol === 'ssh:') &&
     parsed.hostname === GITHUB_HOSTED_METADATA_HOSTNAME &&
     parsed.port === '' &&
-    (parsed.username !== '') === (parsed.protocol === 'ssh:') &&
+    parsed.password === '' &&
+    parsed.username === (parsed.protocol === 'ssh:' ? 'git' : '') &&
     parts.length === 2
-    ? repositoryParts(parts[0] ?? '', parts[1] ?? '')
+    ? repositoryParts(parts[0] ?? '', parts[1] ?? '', parsed.protocol === 'ssh:' ? 'ssh' : 'https')
     : undefined;
 }
 
@@ -650,6 +693,7 @@ export function makeGitHubHostedMetadataAdapter(
   const state = Ref.makeUnsafe<HostedMetadataState>({
     debt: { graphql: [], rest: [] },
     fallback: 'not_requested',
+    nextCompletedSequence: 1,
     nextReservation: 1,
     watcherPolling: {
       reason: 'rate_metadata_unavailable',
@@ -708,7 +752,7 @@ export function makeGitHubHostedMetadataAdapter(
           !resetReached
         )
           return;
-        const causalBoundarySequence = current.nextReservation - 1;
+        const causalBoundarySequence = current.nextCompletedSequence - 1;
         const response = yield* cli
           .run(cwd, ['api', 'rate_limit', '--hostname', GITHUB_HOSTED_METADATA_HOSTNAME])
           .pipe(Effect.tapError(() => Ref.update(state, metadataUnavailable)));
@@ -757,7 +801,7 @@ export function makeGitHubHostedMetadataAdapter(
                 debt[resource],
                 validEstimatedCost(estimatedCost),
                 debtResetAt(value[resource], now),
-                { id, phase: 'reserved', sequence: value.nextReservation },
+                { id, phase: 'reserved' },
               ),
             },
             nextReservation: value.nextReservation + 1,
@@ -777,19 +821,13 @@ export function makeGitHubHostedMetadataAdapter(
       ...value,
       debt: updateReservation(value.debt, reservationId, (bucket) => ({
         ...bucket,
-        causalBoundarySequence: value.nextReservation - 1,
+        causalBoundarySequence: value.nextCompletedSequence - 1,
         phase: 'launched',
       })),
     }));
 
   const completeUnobservedRequest = (reservationId: string) =>
-    Ref.update(state, (value) => ({
-      ...value,
-      debt: updateReservation(value.debt, reservationId, (bucket) => ({
-        ...bucket,
-        phase: bucket.phase === 'reserved' ? 'reserved' : 'completed_unobserved',
-      })),
-    }));
+    Ref.update(state, (value) => completeRequest(value, reservationId, false));
 
   const retainCompletedOpaqueDebt = (reservationId: string) =>
     Ref.update(state, (value) => ({
@@ -797,7 +835,9 @@ export function makeGitHubHostedMetadataAdapter(
       debt: updateReservation(value.debt, reservationId, (bucket) => ({
         amount: bucket.amount,
         ...(bucket.resetAt === undefined ? {} : { resetAt: bucket.resetAt }),
-        ...(bucket.sequence === undefined ? {} : { sequence: bucket.sequence }),
+        ...(bucket.completedSequence === undefined
+          ? {}
+          : { completedSequence: bucket.completedSequence }),
       })),
     }));
 
@@ -812,13 +852,7 @@ export function makeGitHubHostedMetadataAdapter(
 
   const finalizeGraphQLRequest: GitHubHostedMetadataShape['finalizeGraphQLRequest'] = (
     reservationId,
-  ) =>
-    Ref.update(state, (value) => ({
-      ...value,
-      debt: updateReservation(value.debt, reservationId, (bucket) =>
-        bucket.phase === 'reserved' ? undefined : { ...bucket, phase: 'completed_unobserved' },
-      ),
-    }));
+  ) => Ref.update(state, (value) => completeRequest(value, reservationId, true));
 
   const reserveGraphQLRequest: GitHubHostedMetadataShape['reserveGraphQLRequest'] = (
     estimatedCost = GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
@@ -985,7 +1019,6 @@ export function makeGitHubHostedMetadataAdapter(
                 graphql: addDebt(debt.graphql, graphqlCost, debtResetAt(pruned.graphql, now), {
                   id: graphqlReservationId,
                   phase: 'reserved',
-                  sequence: pruned.nextReservation,
                 }),
               },
               nextReservation: pruned.nextReservation + 1,

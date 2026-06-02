@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schema } from 'effect';
+import { Context, Data, Effect, Layer, Schedule, Schema } from 'effect';
 import { decodeGitHubJson } from './codecs.ts';
 import {
   type GitHubCommandError,
@@ -30,8 +30,24 @@ const SYNC_EXISTING_JSON_FIELDS = 'number,state,headRefName';
 const PUBLICATION_METADATA_JSON_FIELDS =
   'number,url,state,isDraft,headRefName,headRefOid,baseRefName';
 const PUSHED_HEAD_JSON_FIELDS = 'number,headRefName,headRefOid';
+const DEFAULT_PUSHED_HEAD_VERIFICATION_DELAY_MILLIS = 250;
+const DEFAULT_PUSHED_HEAD_VERIFICATION_RETRIES = 4;
 
 type GitHubPullRequestState = 'OPEN' | 'CLOSED' | 'MERGED';
+
+class GitHubPushedHeadMetadataLag extends Data.TaggedError('GitHubPushedHeadMetadataLag')<{
+  readonly expected: SyncExistingPullRequestInput;
+  readonly pullRequest: {
+    readonly number: number;
+    readonly headRefName: string;
+    readonly headRefOid: string;
+  };
+}> {}
+
+type PushedHeadVerificationError =
+  | GitHubCommandError
+  | GitHubResponseError
+  | GitHubPushedHeadMetadataLag;
 
 export interface PublishPullRequestInput {
   readonly cwd: string;
@@ -155,13 +171,78 @@ function safeGitHubActor(value: string): string | undefined {
   return actor.length <= 64 && SAFE_GITHUB_LOGIN.test(actor) ? actor.toLowerCase() : undefined;
 }
 
+function boundedVerificationOverride(
+  name: string,
+  value: number | undefined,
+  maximum: number,
+  integer: boolean,
+): number {
+  const resolved = value ?? maximum;
+  if (
+    !Number.isFinite(resolved) ||
+    resolved < 0 ||
+    resolved > maximum ||
+    (integer && !Number.isSafeInteger(resolved))
+  ) {
+    throw new RangeError(
+      `${name} must be a finite non-negative${integer ? ' safe integer' : ' number'} no greater than ${maximum}.`,
+    );
+  }
+  return resolved;
+}
+
 export function makeGitHubPublicationService(
-  options: { readonly runner?: GitHubCommandRunnerShape } = {},
+  options: {
+    readonly runner?: GitHubCommandRunnerShape;
+    /** Test seam: production callers may only tighten the bounded convergence window. */
+    readonly pushedHeadVerificationDelayMillis?: number;
+    /** Test seam: production callers may only tighten the bounded convergence window. */
+    readonly pushedHeadVerificationRetries?: number;
+  } = {},
 ): GitHubPublicationShape {
   const runner = options.runner ?? makeExecFileGitHubCommandRunner();
   const command = (cwd: string, executable: string, args: ReadonlyArray<string>) =>
     runner.run({ args, command: executable, cwd });
   const github = makeGitHubCli(runner);
+  const pushedHeadVerificationDelayMillis = boundedVerificationOverride(
+    'pushedHeadVerificationDelayMillis',
+    options.pushedHeadVerificationDelayMillis,
+    DEFAULT_PUSHED_HEAD_VERIFICATION_DELAY_MILLIS,
+    false,
+  );
+  const pushedHeadVerificationRetries = boundedVerificationOverride(
+    'pushedHeadVerificationRetries',
+    options.pushedHeadVerificationRetries,
+    DEFAULT_PUSHED_HEAD_VERIFICATION_RETRIES,
+    true,
+  );
+
+  const verifyPushedHead = Effect.fnUntraced(function* (input: SyncExistingPullRequestInput) {
+    const verified = yield* github.run(input.cwd, [
+      'pr',
+      'view',
+      String(input.pullRequestNumber),
+      '--json',
+      PUSHED_HEAD_JSON_FIELDS,
+    ]);
+    const pushedHead = yield* decodeGitHubJson(
+      'verify pushed pull request head',
+      GitHubPushedHeadMetadataSchema,
+      verified.stdout,
+    );
+    if (
+      pushedHead.number !== input.pullRequestNumber ||
+      pushedHead.headRefName !== input.headBranch
+    ) {
+      return yield* responseError('verify pushed pull request head', {
+        expected: input,
+        pullRequest: pushedHead,
+      });
+    }
+    if (pushedHead.headRefOid !== input.headSha) {
+      return yield* new GitHubPushedHeadMetadataLag({ expected: input, pullRequest: pushedHead });
+    }
+  });
 
   const fallbackActor = Effect.fnUntraced(function* (cwd: string) {
     const configured = yield* command(cwd, 'git', ['config', '--get', 'user.name']).pipe(
@@ -339,28 +420,28 @@ export function makeGitHubPublicationService(
       'origin',
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
-    const verified = yield* github.run(input.cwd, [
-      'pr',
-      'view',
-      String(input.pullRequestNumber),
-      '--json',
-      PUSHED_HEAD_JSON_FIELDS,
-    ]);
-    const pushedHead = yield* decodeGitHubJson(
-      'verify pushed pull request head',
-      GitHubPushedHeadMetadataSchema,
-      verified.stdout,
+    // `gh pr view` may briefly report the previous hosted OID after the exact
+    // remote ref update. Retry only that decoded OID mismatch: identity drift,
+    // malformed metadata, and transport failures still fail immediately.
+    yield* verifyPushedHead(input).pipe(
+      Effect.retry(
+        Schedule.both(
+          Schedule.spaced(pushedHeadVerificationDelayMillis),
+          Schedule.recurs(pushedHeadVerificationRetries),
+        ).pipe(
+          Schedule.setInputType<PushedHeadVerificationError>(),
+          Schedule.while(({ input: error }) => error._tag === 'GitHubPushedHeadMetadataLag'),
+        ),
+      ),
+      Effect.mapError((error) =>
+        error._tag === 'GitHubPushedHeadMetadataLag'
+          ? responseError('verify pushed pull request head', {
+              expected: error.expected,
+              pullRequest: error.pullRequest,
+            })
+          : error,
+      ),
     );
-    if (
-      pushedHead.number !== input.pullRequestNumber ||
-      pushedHead.headRefName !== input.headBranch ||
-      pushedHead.headRefOid !== input.headSha
-    ) {
-      return yield* responseError('verify pushed pull request head', {
-        expected: input,
-        pullRequest: pushedHead,
-      });
-    }
     return { status: 'synced' };
   });
 

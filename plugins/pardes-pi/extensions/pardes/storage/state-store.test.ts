@@ -178,6 +178,66 @@ describe('filesystem state store', () => {
     expect(existsSync(aggregateStore.statePath)).toBe(false);
   });
 
+  test('allows restore-only stale cursor cleanup to strictly shrink admitted legacy state above the current write cap', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    const summary = `legacy oversized projection ${'x'.repeat(STORAGE_STATE_WRITE_MAX_BYTES + 1_024)} tail`;
+    const event: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-oversized-state',
+      summary,
+      type: 'legacy_attention',
+    };
+    const inboxWake = {
+      createdAt: event.createdAt,
+      cursor: 'event-stale-cursor',
+      pendingCount: 1,
+      token: 'wake-stale-cursor',
+    };
+    const legacy = { ...initialState(), inbox: [event], inboxWake };
+    await writeFile(store.statePath, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8');
+    const before = await readFile(store.statePath, 'utf8');
+    expect(Buffer.byteLength(before)).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
+    expect(Buffer.byteLength(before)).toBeLessThan(STORAGE_STATE_ARTIFACT_MAX_BYTES);
+    expect(await Effect.runPromise(store.load())).toEqual(legacy);
+
+    expect(
+      await Effect.runPromise(
+        store
+          .mutate((current) => {
+            const { inboxWake: _inboxWake, ...withoutWake } = current;
+            return Effect.succeed([undefined, withoutWake] as const);
+          })
+          .pipe(Effect.flip),
+      ),
+    ).toMatchObject({ _tag: 'StoreError', operation: 'validate serialized state size' });
+    expect(
+      await Effect.runPromise(
+        store.dropStaleInboxCursorsForRestore({
+          dropInboxHandoff: false,
+          dropInboxWake: true,
+        }),
+      ),
+    ).toBe(true);
+
+    const after = await readFile(store.statePath, 'utf8');
+    expect(Buffer.byteLength(after)).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
+    expect(Buffer.byteLength(after)).toBeLessThan(Buffer.byteLength(before));
+    const restored = await Effect.runPromise(store.load());
+    expect(restored.inbox).toEqual([event]);
+    expect(restored).not.toHaveProperty('inboxWake');
+    expect(restored.revision).toBe(1);
+    expect(
+      await Effect.runPromise(
+        store.dropStaleInboxCursorsForRestore({
+          dropInboxHandoff: false,
+          dropInboxWake: true,
+        }),
+      ),
+    ).toBe(false);
+  });
+
   test('refuses an oversized restored state artifact before reading its contents', async () => {
     const directory = await temporaryDirectory();
     const store = await Effect.runPromise(makeFileSystemStateStore(directory));

@@ -1219,9 +1219,10 @@ export class ManagerController {
       state.inboxHandoff,
     );
     if (retainedWake !== state.inboxWake || retainedHandoff !== state.inboxHandoff) {
-      yield* store.mutate((current) =>
-        Effect.succeed([undefined, withInbox(current, current.inbox)] as const),
-      );
+      yield* store.dropStaleInboxCursorsForRestore({
+        dropInboxHandoff: retainedHandoff !== state.inboxHandoff,
+        dropInboxWake: retainedWake !== state.inboxWake,
+      });
       state = yield* store.load();
       yield* validateManagerStateNamespace(namespace, state);
     }

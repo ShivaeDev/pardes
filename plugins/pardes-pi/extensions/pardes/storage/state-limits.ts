@@ -48,6 +48,26 @@ export function validateSerializedEventWrite(
   );
 }
 
+/** Restore-only cursor cleanup may rewrite an admitted legacy projection only when it strictly shrinks. */
+export function validateSerializedLegacyStateShrinkWrite(
+  path: string,
+  previousSource: string,
+  nextSource: string,
+): Effect.Effect<void, StoreError> {
+  const previousBytes = Buffer.byteLength(previousSource, 'utf8');
+  const nextBytes = Buffer.byteLength(nextSource, 'utf8');
+  if (nextBytes <= STORAGE_STATE_WRITE_MAX_BYTES) return Effect.void;
+  return nextBytes <= STORAGE_STATE_ARTIFACT_MAX_BYTES && nextBytes < previousBytes
+    ? Effect.void
+    : Effect.fail(
+        storeError(
+          'validate serialized legacy state shrink',
+          path,
+          `restore-only legacy normalization must strictly shrink beneath ${STORAGE_STATE_ARTIFACT_MAX_BYTES} bytes`,
+        ),
+      );
+}
+
 function noFollowReadOnlyFlags(): number {
   return constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 }

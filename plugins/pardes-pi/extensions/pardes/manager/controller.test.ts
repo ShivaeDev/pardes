@@ -38,7 +38,7 @@ import {
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
-import { makeFileSystemStateStore } from '../storage/index.ts';
+import { makeFileSystemStateStore, STORAGE_STATE_WRITE_MAX_BYTES } from '../storage/index.ts';
 import { requiredValue } from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
@@ -3294,6 +3294,51 @@ describe('manager controller', () => {
     expect(
       managerEvents(stateDir).filter(({ type }) => type === 'inbox_cursor_acknowledged'),
     ).toHaveLength(2);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('restores an admitted oversized legacy state after shrink-only stale cursor normalization', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const stateDir = activationStateDir(fixture.entries);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+
+    const statePath = join(stateDir, 'state.json');
+    const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      inbox: Array<Record<string, unknown>>;
+      inboxWake?: unknown;
+    };
+    const summary = `legacy oversized projection ${'x'.repeat(STORAGE_STATE_WRITE_MAX_BYTES + 1_024)} tail`;
+    persisted.inbox.push({
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-oversized-state',
+      summary,
+      type: 'legacy_attention',
+    });
+    persisted.inboxWake = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      cursor: 'event-stale-cursor',
+      pendingCount: 1,
+      token: 'wake-stale-cursor',
+    };
+    writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+    expect(readFileSync(statePath).byteLength).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
+
+    const restored = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(restored.snapshot()?.inbox).toHaveLength(1);
+    expect(restored.snapshot()?.inbox[0]?.summary).toBe(summary);
+    expect(restored.snapshot()).not.toHaveProperty('inboxWake');
+    const normalized = JSON.parse(readFileSync(statePath, 'utf8')) as Record<string, unknown>;
+    expect(normalized).not.toHaveProperty('inboxWake');
+    expect(readFileSync(statePath).byteLength).toBeGreaterThan(STORAGE_STATE_WRITE_MAX_BYTES);
     await Effect.runPromise(restored.shutdown(fixture.ctx));
   });
 

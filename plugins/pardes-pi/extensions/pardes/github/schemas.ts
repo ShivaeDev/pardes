@@ -26,8 +26,13 @@ export const MAX_GITHUB_STATUS_CHECKS = 200;
 export const MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE = 100;
 export const MAX_GITHUB_INTEGRATION_HEALTH_PULL_REQUESTS = 12;
 export const MAX_GITHUB_HOSTED_CHECKS = 50;
+export const MAX_GITHUB_HOSTED_DRILLDOWN_CHECKS = 50;
+export const MAX_GITHUB_HOSTED_DRILLDOWN_PAGE = 100;
+export const MAX_GITHUB_DISCUSSION_DRILLDOWN_ITEMS_PER_PAGE = 10;
 export const GITHUB_DISCUSSION_BODY_MAX_LENGTH = 65_536;
 export const GITHUB_DISCUSSION_AUTHOR_MAX_LENGTH = 100;
+export const GITHUB_HOSTED_EXCERPT_DEFAULT_CHARS = 2_000;
+export const GITHUB_HOSTED_EXCERPT_MAX_CHARS = 4_000;
 export const GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH = 160;
 export const PULL_REQUEST_BROWSER_MODES = ['none', 'background', 'foreground'] as const;
 
@@ -126,6 +131,9 @@ const GitHubDiscussionAuthorSchema = Schema.Union([
   }),
   Schema.Null,
 ]);
+const GitHubHostedDrilldownPageSchema = PositiveIntegerSchema.check(
+  Schema.isLessThanOrEqualTo(MAX_GITHUB_HOSTED_DRILLDOWN_PAGE),
+);
 
 export const PullRequestTitleSchema = NonEmptyStringSchema.check(
   Schema.isMaxLength(PULL_REQUEST_TITLE_MAX_LENGTH),
@@ -425,13 +433,11 @@ export type GitHubPullRequestObservation = typeof GitHubPullRequestObservationSc
 
 const GitHubDiscussionNodeSchema = Schema.Struct({
   author: GitHubDiscussionAuthorSchema,
-  body: BoundedDiscussionBodySchema,
   databaseId: PositiveIntegerSchema,
 });
 
 const GitHubReviewNodeSchema = Schema.Struct({
   author: GitHubDiscussionAuthorSchema,
-  body: BoundedDiscussionBodySchema,
   databaseId: PositiveIntegerSchema,
   submittedAt: Schema.Union([NonEmptyStringSchema, Schema.Null]),
 });
@@ -454,6 +460,17 @@ export const GitHubPullRequestDiscussionGraphQLSchema = Schema.Struct({
           ),
           pageInfo: Schema.Struct({ hasPreviousPage: Schema.Boolean }),
         }),
+        reviewThreads: Schema.Struct({
+          nodes: Schema.Array(
+            Schema.Struct({
+              comments: Schema.Struct({
+                nodes: Schema.Array(GitHubDiscussionNodeSchema).check(Schema.isMaxLength(1)),
+                pageInfo: Schema.Struct({ hasPreviousPage: Schema.Boolean }),
+              }),
+            }),
+          ).check(Schema.isMaxLength(MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE)),
+          pageInfo: Schema.Struct({ hasPreviousPage: Schema.Boolean }),
+        }),
       }),
     }),
   }),
@@ -462,11 +479,102 @@ export const GitHubPullRequestDiscussionGraphQLSchema = Schema.Struct({
 /** Bounded REST response for inline pull-request review comments. */
 export const GitHubInlineReviewCommentsSchema = Schema.Array(
   Schema.Struct({
-    body: BoundedDiscussionBodySchema,
     id: PositiveIntegerSchema,
     user: GitHubDiscussionAuthorSchema,
   }),
 ).check(Schema.isMaxLength(MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE));
+
+const GitHubHostedDrilldownCheckStatusSchema = Schema.Literals([
+  'COMPLETED',
+  'IN_PROGRESS',
+  'PENDING',
+  'QUEUED',
+  'REQUESTED',
+  'WAITING',
+]);
+const GitHubHostedDrilldownCheckConclusionSchema = Schema.Literals([
+  'ACTION_REQUIRED',
+  'CANCELLED',
+  'FAILURE',
+  'NEUTRAL',
+  'SKIPPED',
+  'STALE',
+  'STARTUP_FAILURE',
+  'SUCCESS',
+  'TIMED_OUT',
+]);
+const GitHubHostedDrilldownStatusContextStateSchema = Schema.Literals([
+  'ERROR',
+  'EXPECTED',
+  'FAILURE',
+  'PENDING',
+  'SUCCESS',
+]);
+const GitHubHostedDrilldownUrlSchema = NonEmptyStringSchema.check(
+  Schema.isMaxLength(PULL_REQUEST_URL_MAX_LENGTH),
+  Schema.isPattern(/^https:\/\/github\.com\/[a-zA-Z0-9._/-]+$/),
+);
+const GitHubHostedDrilldownWorkflowRunSchema = Schema.Struct({
+  databaseId: PositiveIntegerSchema,
+  url: GitHubHostedDrilldownUrlSchema,
+});
+const GitHubHostedDrilldownCheckRunSchema = Schema.Struct({
+  __typename: Schema.Literal('CheckRun'),
+  checkSuite: Schema.Union([
+    Schema.Struct({
+      workflowRun: Schema.Union([GitHubHostedDrilldownWorkflowRunSchema, Schema.Null]),
+    }),
+    Schema.Null,
+  ]),
+  conclusion: Schema.Union([GitHubHostedDrilldownCheckConclusionSchema, Schema.Null]),
+  databaseId: PositiveIntegerSchema,
+  detailsUrl: GitHubHostedDrilldownUrlSchema,
+  name: NonEmptyStringSchema.check(Schema.isMaxLength(160)),
+  status: GitHubHostedDrilldownCheckStatusSchema,
+});
+const GitHubHostedDrilldownStatusContextSchema = Schema.Struct({
+  __typename: Schema.Literal('StatusContext'),
+  state: GitHubHostedDrilldownStatusContextStateSchema,
+});
+export const GitHubHostedDrilldownChecksGraphQLSchema = Schema.Struct({
+  data: Schema.Struct({
+    rateLimit: GitHubGraphQLRateLimitSchema,
+    repository: Schema.Struct({
+      object: Schema.Union([
+        Schema.Struct({
+          oid: FullCommitShaSchema,
+          statusCheckRollup: Schema.Union([
+            Schema.Struct({
+              contexts: Schema.Struct({
+                nodes: Schema.Array(
+                  Schema.Union([
+                    GitHubHostedDrilldownCheckRunSchema,
+                    GitHubHostedDrilldownStatusContextSchema,
+                  ]),
+                ).check(Schema.isMaxLength(MAX_GITHUB_HOSTED_DRILLDOWN_CHECKS)),
+                pageInfo: Schema.Struct({ hasNextPage: Schema.Boolean }),
+              }),
+            }),
+            Schema.Null,
+          ]),
+        }),
+        Schema.Null,
+      ]),
+    }),
+  }),
+});
+
+export const GitHubHostedDiscussionDrilldownItemSchema = Schema.Struct({
+  body: BoundedDiscussionBodySchema,
+  id: PositiveIntegerSchema,
+  user: GitHubDiscussionAuthorSchema,
+});
+export const GitHubHostedDiscussionDrilldownPageSchema = Schema.Array(
+  GitHubHostedDiscussionDrilldownItemSchema,
+).check(Schema.isMaxLength(MAX_GITHUB_DISCUSSION_DRILLDOWN_ITEMS_PER_PAGE));
+export const GitHubHostedDrilldownPageInputSchema = Schema.Struct({
+  page: GitHubHostedDrilldownPageSchema,
+});
 
 /** Additive schema-v1 watcher high-water marks. Bodies never enter this cursor. */
 export const GitHubDiscussionCursorSchema = Schema.Struct({

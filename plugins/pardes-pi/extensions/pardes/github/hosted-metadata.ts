@@ -51,6 +51,11 @@ export interface GitHubRepositoryIdentity {
   readonly slug: string;
 }
 
+/** Keep proved GitHub.com PR traffic fixed even when the ambient gh host targets an enterprise instance. */
+export function githubComRepositorySelector(route: GitHubRepositoryIdentity): string {
+  return `${GITHUB_HOSTED_METADATA_HOSTNAME}/${route.slug}`;
+}
+
 export type GitHubWatcherThrottleTier =
   | 'normal'
   | 'moderate'
@@ -65,7 +70,6 @@ export type GitHubWatcherRateLimitStatus =
       readonly effectiveRemaining: number;
       readonly graphqlReservationId?: string;
       readonly watcherCliReservationId?: string;
-      readonly watcherRestReservationId?: string;
     }
   | {
       readonly status: 'deferred';
@@ -204,7 +208,6 @@ function projectWatcherPolling(
   const {
     graphqlReservationId: _graphqlReservationId,
     watcherCliReservationId: _watcherCliReservationId,
-    watcherRestReservationId: _watcherRestReservationId,
     ...projected
   } = watcherPolling;
   return projected;
@@ -1075,10 +1078,6 @@ export function makeGitHubHostedMetadataAdapter(
         count * GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
       );
       const graphqlCycleCost = saturatedAdd(graphqlCost, graphqlCliCost);
-      const restCost = Math.min(
-        Number.MAX_SAFE_INTEGER,
-        count * GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
-      );
       return yield* Ref.modify(
         state,
         (value): readonly [GitHubWatcherRateLimitStatus, HostedMetadataState] => {
@@ -1107,9 +1106,7 @@ export function makeGitHubHostedMetadataAdapter(
           const interval = watcherIntervalMillis(tier);
           const nextAdmission = pruned.nextWatcherAdmissionAtMillis;
           const insufficient =
-            graphql.remaining <=
-              saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, graphqlCycleCost) ||
-            rest.remaining <= saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, restCost);
+            graphql.remaining <= saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, graphqlCycleCost);
           const newlyPaused = tier === 'paused' && pruned.watcherPolling.tier !== 'paused';
           if (
             insufficient ||
@@ -1135,9 +1132,9 @@ export function makeGitHubHostedMetadataAdapter(
               { ...pruned, nextWatcherAdmissionAtMillis: untilMillis, watcherPolling },
             ] as const;
           }
-          // A ready watcher cycle needs discussion, pre-discussion CLI, and inline REST identities.
-          // Lease capacity for the mandatory trio before any watched request can launch.
-          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2) {
+          // A ready metadata-only watcher cycle needs discussion and pre-discussion CLI identities.
+          // Lease capacity for the mandatory pair before any watched request can launch.
+          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 1) {
             const watcherPolling = proactiveWatcherThrottle(
               'paused',
               remaining,
@@ -1154,14 +1151,12 @@ export function makeGitHubHostedMetadataAdapter(
           }
           const graphqlReservationId = `request-${pruned.nextReservation}`;
           const watcherCliReservationId = `request-${pruned.nextReservation + 1}`;
-          const watcherRestReservationId = `request-${pruned.nextReservation + 2}`;
           const watcherPolling = {
             effectiveRemaining: remaining,
             graphqlReservationId,
             status: 'ready',
             tier,
             watcherCliReservationId,
-            watcherRestReservationId,
           } as const;
           const { nextWatcherAdmissionAtMillis: _nextWatcherAdmissionAtMillis, ...withoutNext } =
             pruned;
@@ -1179,12 +1174,9 @@ export function makeGitHubHostedMetadataAdapter(
                   debtResetAt(pruned.graphql, now),
                   { id: watcherCliReservationId, phase: 'reserved' },
                 ),
-                rest: addDebt(debt.rest, restCost, debtResetAt(pruned.rest, now), {
-                  id: watcherRestReservationId,
-                  phase: 'reserved',
-                }),
+                rest: debt.rest,
               },
-              nextReservation: pruned.nextReservation + 3,
+              nextReservation: pruned.nextReservation + 2,
               ...(interval === 0 ? {} : { nextWatcherAdmissionAtMillis: now + interval }),
               watcherPolling,
             },

@@ -746,6 +746,65 @@ describe('GitHub watcher service', () => {
     });
   });
 
+  test('atomically leases both watcher identities so a foreground overlap cannot steal the CLI slot', async () => {
+    const fixture = scriptedRunner([
+      rateLimitFallbackResult(),
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 42,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult(),
+      inlineCommentsResult(),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2; index += 1) {
+      const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
+      await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
+    }
+    const service = makeGitHubWatcherServiceProduction({
+      hostedMetadata,
+      runner: fixture.runner,
+    });
+    const received = callbacks([pullRequest()]);
+    const foregroundAttempts: string[] = [];
+
+    await Effect.runPromise(
+      service.poll({
+        ...received.callbacks,
+        onThrottleDiagnostic: (event) =>
+          received.callbacks.onThrottleDiagnostic(event).pipe(
+            Effect.andThen(
+              event.status !== 'rate_metadata_recovered'
+                ? Effect.void
+                : hostedMetadata.reserveGraphQLRequest().pipe(
+                    Effect.matchEffect({
+                      onFailure: (error) =>
+                        Effect.sync(() => {
+                          foregroundAttempts.push(error._tag);
+                        }),
+                      onSuccess: ({ id }) =>
+                        Effect.sync(() => {
+                          foregroundAttempts.push(`unexpected:${id}`);
+                        }),
+                    }),
+                  ),
+            ),
+          ),
+      }),
+    );
+
+    expect(foregroundAttempts).toEqual(['GitHubResponseError']);
+    expect(received.failures).toEqual([]);
+    expect(received.observations).toHaveLength(2);
+    expect(fixture.invocations).toHaveLength(4);
+  });
+
   test('rechecks the bounded budget between review gates and defers later gates after a low GraphQL observation', async () => {
     const fixture = scriptedRunner([
       rateLimitFallbackResult(),

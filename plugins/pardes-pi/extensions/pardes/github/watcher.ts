@@ -362,14 +362,16 @@ export function makeGitHubWatcherService(
     cwd: string,
     rawAssociation: PullRequestWatcherAssociation,
     route: GitHubRepositoryIdentity,
+    watcherCliReservationId: string,
   ) {
     const association = yield* Schema.decodeUnknownEffect(PullRequestAssociationSchema)(
       rawAssociation,
     ).pipe(Effect.mapError(watcherInputError));
     const identifier =
       association.number === undefined ? association.url : String(association.number);
-    const viewed = yield* hostedMetadata.accountOpaqueRequest(
+    const viewed = yield* hostedMetadata.accountReservedOpaqueRequest(
       'graphql',
+      watcherCliReservationId,
       github.run(cwd, [
         'pr',
         'view',
@@ -557,11 +559,17 @@ export function makeGitHubWatcherService(
                                 Effect.suspend(() => {
                                   if (
                                     reservation.status === 'deferred' ||
-                                    reservation.graphqlReservationId === undefined
+                                    reservation.graphqlReservationId === undefined ||
+                                    reservation.watcherCliReservationId === undefined
                                   )
                                     return Effect.void;
                                   const reservationId = reservation.graphqlReservationId;
-                                  return inspect(cwd, pullRequest, route).pipe(
+                                  return inspect(
+                                    cwd,
+                                    pullRequest,
+                                    route,
+                                    reservation.watcherCliReservationId,
+                                  ).pipe(
                                     Effect.matchEffect({
                                       onFailure: failure,
                                       onSuccess: (inspected) => {
@@ -619,10 +627,17 @@ export function makeGitHubWatcherService(
                                 }),
                               ),
                               Effect.ensuring(
-                                reservation.status === 'ready' &&
-                                  reservation.graphqlReservationId !== undefined
-                                  ? hostedMetadata.finalizeGraphQLRequest(
-                                      reservation.graphqlReservationId,
+                                reservation.status === 'ready'
+                                  ? Effect.all(
+                                      [
+                                        reservation.graphqlReservationId,
+                                        reservation.watcherCliReservationId,
+                                      ].flatMap((reservationId) =>
+                                        reservationId === undefined
+                                          ? []
+                                          : [hostedMetadata.finalizeGraphQLRequest(reservationId)],
+                                      ),
+                                      { discard: true },
                                     )
                                   : Effect.void,
                               ),

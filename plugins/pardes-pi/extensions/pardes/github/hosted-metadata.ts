@@ -64,6 +64,7 @@ export type GitHubWatcherRateLimitStatus =
       readonly tier: Exclude<GitHubWatcherThrottleTier, 'unavailable'>;
       readonly effectiveRemaining: number;
       readonly graphqlReservationId?: string;
+      readonly watcherCliReservationId?: string;
     }
   | {
       readonly status: 'deferred';
@@ -109,6 +110,12 @@ export interface GitHubHostedMetadataShape {
   readonly cancelUnlaunchedGraphQLReservation: (reservationId: string) => Effect.Effect<void>;
   /** Finalize a GraphQL handoff: cancel unlaunched work or retain completed-unobserved debt. */
   readonly finalizeGraphQLRequest: (reservationId: string) => Effect.Effect<void>;
+  /** Consume one already-reserved opaque identity and retain conservative debt until observation. */
+  readonly accountReservedOpaqueRequest: <A, E, R>(
+    resource: GitHubRateLimitResource,
+    reservationId: string,
+    request: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | GitHubResponseError, R>;
   /** Reserve, launch, and retain conservative opaque CLI or REST debt until later observation. */
   readonly accountOpaqueRequest: <A, E, R>(
     resource: GitHubRateLimitResource,
@@ -189,7 +196,11 @@ function projectWatcherPolling(
   watcherPolling: GitHubWatcherRateLimitStatus,
 ): GitHubWatcherRateLimitStatus {
   if (watcherPolling.status === 'deferred') return watcherPolling;
-  const { graphqlReservationId: _graphqlReservationId, ...projected } = watcherPolling;
+  const {
+    graphqlReservationId: _graphqlReservationId,
+    watcherCliReservationId: _watcherCliReservationId,
+    ...projected
+  } = watcherPolling;
   return projected;
 }
 
@@ -611,6 +622,10 @@ function reservationCapacityError(): GitHubResponseError {
   );
 }
 
+function reservedRequestUnavailableError(): GitHubResponseError {
+  return responseError('consume reserved hosted GitHub request', 'request reservation unavailable');
+}
+
 function repositoryParts(
   owner: string,
   repoWithSuffix: string,
@@ -843,6 +858,30 @@ export function makeGitHubHostedMetadataAdapter(
       })),
     }));
 
+  const launchReservedRequest = (resource: GitHubRateLimitResource, reservationId: string) =>
+    Ref.modify(state, (value) => {
+      const reserved = value.debt[resource].some(
+        (bucket) => bucket.reservationId === reservationId && bucket.phase === 'reserved',
+      );
+      return [
+        reserved,
+        reserved
+          ? {
+              ...value,
+              debt: updateReservation(value.debt, reservationId, (bucket) => ({
+                ...bucket,
+                causalBoundarySequence: value.nextCompletedSequence - 1,
+                phase: 'launched',
+              })),
+            }
+          : value,
+      ] as const;
+    }).pipe(
+      Effect.flatMap((reserved) =>
+        reserved ? Effect.void : Effect.fail(reservedRequestUnavailableError()),
+      ),
+    );
+
   const completeUnobservedRequest = (reservationId: string) =>
     Ref.update(state, (value) => completeRequest(value, reservationId, false));
 
@@ -884,6 +923,22 @@ export function makeGitHubHostedMetadataAdapter(
 
   const launchGraphQLRequest: GitHubHostedMetadataShape['launchGraphQLRequest'] = launchRequest;
 
+  const accountReservedOpaqueRequest: GitHubHostedMetadataShape['accountReservedOpaqueRequest'] = (
+    resource,
+    reservationId,
+    request,
+  ) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        yield* launchReservedRequest(resource, reservationId);
+        const value = yield* restore(request).pipe(
+          Effect.ensuring(completeUnobservedRequest(reservationId)),
+        );
+        yield* retainCompletedOpaqueDebt(resource, reservationId);
+        return value;
+      }),
+    );
+
   const accountOpaqueRequest: GitHubHostedMetadataShape['accountOpaqueRequest'] = (
     resource,
     request,
@@ -894,7 +949,7 @@ export function makeGitHubHostedMetadataAdapter(
     Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const reservation = yield* reserveIdentityRequest(resource, estimatedCost);
-        yield* launchRequest(reservation.id);
+        yield* launchReservedRequest(resource, reservation.id);
         const value = yield* restore(request).pipe(
           Effect.ensuring(completeUnobservedRequest(reservation.id)),
         );
@@ -951,10 +1006,11 @@ export function makeGitHubHostedMetadataAdapter(
         Number.MAX_SAFE_INTEGER,
         count * GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST,
       );
-      const graphqlCycleCost = saturatedAdd(
-        graphqlCost,
-        Math.min(Number.MAX_SAFE_INTEGER, count * GITHUB_CLI_GRAPHQL_ESTIMATED_COST),
+      const graphqlCliCost = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        count * GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
       );
+      const graphqlCycleCost = saturatedAdd(graphqlCost, graphqlCliCost);
       const restCost = Math.min(
         Number.MAX_SAFE_INTEGER,
         count * GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
@@ -1033,11 +1089,13 @@ export function makeGitHubHostedMetadataAdapter(
             ] as const;
           }
           const graphqlReservationId = `request-${pruned.nextReservation}`;
+          const watcherCliReservationId = `request-${pruned.nextReservation + 1}`;
           const watcherPolling = {
             effectiveRemaining: remaining,
             graphqlReservationId,
             status: 'ready',
             tier,
+            watcherCliReservationId,
           } as const;
           const { nextWatcherAdmissionAtMillis: _nextWatcherAdmissionAtMillis, ...withoutNext } =
             pruned;
@@ -1047,12 +1105,17 @@ export function makeGitHubHostedMetadataAdapter(
               ...withoutNext,
               debt: {
                 ...debt,
-                graphql: addDebt(debt.graphql, graphqlCost, debtResetAt(pruned.graphql, now), {
-                  id: graphqlReservationId,
-                  phase: 'reserved',
-                }),
+                graphql: addDebt(
+                  addDebt(debt.graphql, graphqlCost, debtResetAt(pruned.graphql, now), {
+                    id: graphqlReservationId,
+                    phase: 'reserved',
+                  }),
+                  graphqlCliCost,
+                  debtResetAt(pruned.graphql, now),
+                  { id: watcherCliReservationId, phase: 'reserved' },
+                ),
               },
-              nextReservation: pruned.nextReservation + 1,
+              nextReservation: pruned.nextReservation + 2,
               ...(interval === 0 ? {} : { nextWatcherAdmissionAtMillis: now + interval }),
               watcherPolling,
             },
@@ -1091,6 +1154,7 @@ export function makeGitHubHostedMetadataAdapter(
 
   return {
     accountOpaqueRequest,
+    accountReservedOpaqueRequest,
     cancelUnlaunchedGraphQLReservation,
     compactStatusUnsafe,
     decodeGraphQL,

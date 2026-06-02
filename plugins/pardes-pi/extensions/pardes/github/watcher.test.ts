@@ -72,6 +72,7 @@ function discussionResult(
     readonly commentsHavePreviousPage?: boolean;
     readonly reviewsHavePreviousPage?: boolean;
     readonly inlineCommentsHavePreviousPage?: boolean;
+    readonly inlineThreadsHavePreviousPage?: boolean;
     readonly rateLimit?: typeof RATE_LIMIT;
   } = {},
 ): ProcessResult {
@@ -99,7 +100,7 @@ function discussionResult(
                   },
                 };
               }),
-              pageInfo: { hasPreviousPage: false },
+              pageInfo: { hasPreviousPage: options.inlineThreadsHavePreviousPage ?? false },
             },
           },
         },
@@ -338,7 +339,7 @@ describe('GitHub watcher service', () => {
     expect(received.failures).toEqual([]);
     expect(received.observations[1]?.discussion?.pageCaps).toEqual([
       { oldestFetchedId: 101, surface: 'issue_comment' },
-      { oldestFetchedId: 301, surface: 'inline_review_comment' },
+      { oldestFetchedId: 301, requiresCursorHold: true, surface: 'inline_review_comment' },
     ]);
     expect(received.observations[1]?.discussion?.feedback).toHaveLength(102);
     expect(fixture.invocations).toHaveLength(2);
@@ -346,6 +347,44 @@ describe('GitHub watcher service', () => {
     expect(fixture.invocations[1]?.args.join(' ')).toContain(
       'rateLimit{cost limit remaining resetAt}',
     );
+  });
+
+  test('forces inline cursor hold when omitted outer review threads make visible overlap unsafe', async () => {
+    const fixture = scriptedRunner([
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 42,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult({
+        inlineComments: [
+          { id: 50, user: { login: 'older-thread' } },
+          { id: 102, user: { login: 'newer-thread' } },
+        ],
+        inlineThreadsHavePreviousPage: true,
+      }),
+    ]);
+    const service = makeGitHubWatcherService({ runner: fixture.runner });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.failures).toEqual([]);
+    expect(received.observations[1]?.discussion).toMatchObject({
+      cursor: { inlineReviewCommentId: 102 },
+      pageCaps: [
+        {
+          oldestFetchedId: 50,
+          requiresCursorHold: true,
+          surface: 'inline_review_comment',
+        },
+      ],
+    });
   });
 
   test('reads currently persisted associations when the manual poll effect executes', async () => {

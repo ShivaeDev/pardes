@@ -158,7 +158,12 @@ function detectGithubDiscussionPaginationGaps(
     pageCaps.some((cap) => {
       if (cap.surface !== surface) return false;
       const previousId = previous?.[discussionSurfaceCursor(surface)];
-      return previousId === undefined || cap.oldestFetchedId > previousId;
+      return (
+        cap.requiresCursorHold === true ||
+        previousId === undefined ||
+        cap.oldestFetchedId === undefined ||
+        cap.oldestFetchedId > previousId
+      );
     }),
   );
 }

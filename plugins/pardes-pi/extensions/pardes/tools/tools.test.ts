@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
+  GITHUB_CHECK_METADATA_TRUST_LABEL,
   GITHUB_CI_LOG_EXCERPT_TRUST_LABEL,
   GITHUB_DISCUSSION_EXCERPT_TRUST_LABEL,
   GITHUB_HOSTED_DRILLDOWN_EXCERPT_MAX_CHARS,
@@ -2098,6 +2099,12 @@ describe('Pardes model-visible tools', () => {
           ],
           observation: 'opt_in_read_only_redacted_discussion_body_excerpts' as const,
           page: 1,
+          provenance: {
+            auditedHeadSha: 'a'.repeat(40),
+            repositoryRoute: 'fixed_github_com_repository' as const,
+            reviewGate: 'state_known' as const,
+            scope: 'pull_request_level_not_commit_bound' as const,
+          },
           pullRequestId: 'pr-42',
           pullRequestNumber: 42,
           surface: 'issue_comment' as const,
@@ -2122,6 +2129,7 @@ describe('Pardes model-visible tools', () => {
           omittedCheckCountAccuracy: 'exact' as const,
           pullRequestId: 'pr-42',
           pullRequestNumber: 42,
+          trust: GITHUB_CHECK_METADATA_TRUST_LABEL,
           unmappedFailingCheckCount: 0,
         }),
     } as unknown as ManagerController;
@@ -2152,6 +2160,7 @@ describe('Pardes model-visible tools', () => {
       onUpdate,
       ctx,
     );
+    expect(checks.content[0]?.text).toContain(`[${GITHUB_CHECK_METADATA_TRUST_LABEL}]`);
     expect(checks.content[0]?.text).toContain(`exactHeadSha:${'a'.repeat(40)}`);
     expect(checks.content[0]?.text).toContain('runId:7001 · jobId:8001');
     expect(checks.content[0]?.text).toContain('no logs or bodies loaded');
@@ -2177,6 +2186,9 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(discussion.content[0]?.text).toContain(`[${GITHUB_DISCUSSION_EXCERPT_TRUST_LABEL}]`);
+    expect(discussion.content[0]?.text).toContain(
+      `provenance: repository-route:fixed_github_com_repository · scope:pull_request_level_not_commit_bound · auditedHeadSha:${'a'.repeat(40)} · discussion bodies are PR-level, not commit-bound`,
+    );
     expect(discussion.content[0]?.text).toContain(
       `excerpt(JSON string): ${JSON.stringify(secretDiscussionExcerpt)}`,
     );

@@ -5795,18 +5795,30 @@ describe('manager controller', () => {
           kind: 'inline_review_comment',
         },
       ],
-      pageCaps: [{ oldestFetchedId: 111, surface: 'issue_comment' }],
+      pageCaps: [
+        { oldestFetchedId: 111, surface: 'issue_comment' },
+        // Per-thread pages cannot prove safe overlap: hidden nested comment IDs may
+        // remain between the prior cursor and the visible latest inline metadata.
+        {
+          oldestFetchedId: 1,
+          requiresCursorHold: true,
+          surface: 'inline_review_comment',
+        },
+      ],
     };
     await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest(), capped));
     await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest(), capped));
 
     const state = requiredValue(controller.snapshot());
     expect(state.pullRequests[pullRequestId]?.discussionCursor).toEqual({
-      inlineReviewCommentId: 31,
+      inlineReviewCommentId: 30,
       issueCommentId: 10,
       reviewId: 21,
     });
-    expect(state.pullRequests[pullRequestId]?.discussionPaginationGaps).toEqual(['issue_comment']);
+    expect(state.pullRequests[pullRequestId]?.discussionPaginationGaps).toEqual([
+      'issue_comment',
+      'inline_review_comment',
+    ]);
     expect(state.inbox.map(({ type }) => type)).toEqual([
       'discussion_pagination_gap',
       'discussion_feedback',
@@ -5814,9 +5826,10 @@ describe('manager controller', () => {
     expect(state.inbox[0]?.summary).toContain(
       'bounded GitHub discussion pagination gap on issue comments',
     );
+    expect(state.inbox[0]?.summary).toContain('inline review comments');
     expect(state.inbox[0]?.summary).toContain('Affected cursors were held');
     expect(state.inbox[1]?.summary).toContain('submitted review id:21 by "@bob"');
-    expect(state.inbox[1]?.summary).toContain('inline review comment id:31 by "@carol"');
+    expect(state.inbox[1]?.summary).not.toContain('inline review comment id:31 by "@carol"');
     expect(JSON.stringify(state)).not.toContain(cappedSurfacePreview);
     expect(workers.sends).toEqual([]);
     expect(
@@ -5828,6 +5841,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox).toEqual([]);
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.discussionPaginationGaps).toEqual([
       'issue_comment',
+      'inline_review_comment',
     ]);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });

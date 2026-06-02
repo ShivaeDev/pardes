@@ -14,6 +14,7 @@ import { managerId, registerPardesTool, runTool, textResult } from './registrati
 
 function failingChecksLines(inspection: GitHubFailingChecksInspection): string {
   return [
+    `[${inspection.trust}]`,
     `github CI drill-down: opt-in read-only hosted check metadata · reviewGateId:${JSON.stringify(inspection.pullRequestId)} · PR:#${inspection.pullRequestNumber}`,
     `exactHeadSha:${inspection.exactHeadSha}`,
     ...inspection.failingChecks.map(
@@ -50,7 +51,8 @@ function discussionExcerptMetadata(page: GitHubDiscussionBodyExcerptPage) {
 function discussionExcerptLines(page: GitHubDiscussionBodyExcerptPage): string {
   return [
     `[${page.trust}]`,
-    `github discussion drill-down: opt-in read-only redacted body excerpts · reviewGateId:${JSON.stringify(page.pullRequestId)} · PR:#${page.pullRequestNumber} · surface:${page.surface}`,
+    `github discussion drill-down: opt-in read-only redacted body excerpts · reviewGateId:${JSON.stringify(page.pullRequestId)} [${page.provenance.reviewGate}] · PR:#${page.pullRequestNumber} · surface:${page.surface}`,
+    `provenance: repository-route:${page.provenance.repositoryRoute} · scope:${page.provenance.scope} · auditedHeadSha:${page.provenance.auditedHeadSha ?? 'unavailable'} · discussion bodies are PR-level, not commit-bound`,
     `pagination: page:${page.page} · items:${page.items.length}/${page.bounds.itemsPerPage} · hasMore:${page.hasMore}`,
     ...page.items.map(
       (item) =>
@@ -133,7 +135,7 @@ export function registerHostedDrilldownTools(pi: ExtensionAPI, manager: ManagerC
   });
 
   registerPardesTool(pi, {
-    description: `Explicitly retrieve one provenance-labelled page of bounded redacted external GitHub discussion body excerpts for one known Pardes review gate and one selected surface. Returns first-${GITHUB_DISCUSSION_DRILLDOWN_PAGE_SIZE} items on that page only. Opt-in read-only network access only; never default-loads bodies, routes feedback, approves, merges, or mutates.`,
+    description: `Explicitly retrieve one provenance-labelled page of bounded redacted external GitHub discussion body excerpts for one state-known Pardes review gate and one selected surface. Discussion is PR-level, not commit-bound; the fixed GitHub.com repository route, pull-request number, and audited head SHA when available remain explicit provenance. Returns first-${GITHUB_DISCUSSION_DRILLDOWN_PAGE_SIZE} items on that page only. Opt-in read-only network access only; never default-loads bodies, routes feedback, approves, merges, or mutates.`,
     async execute(_toolCallId, params) {
       const result = await runTool(manager.getPullRequestDiscussionBodyExcerpts(params));
       return result.ok

@@ -80,7 +80,9 @@ export type PullRequestDiscussionFeedbackKind = GitHubDiscussionSurface;
 /** Content-free signal that a bounded API page may omit older items on one surface. */
 export interface PullRequestDiscussionPageCap {
   readonly surface: GitHubDiscussionSurface;
-  readonly oldestFetchedId: number;
+  readonly oldestFetchedId?: number;
+  /** Nested or non-global pages cannot prove safe cursor overlap; hold this surface unconditionally. */
+  readonly requiresCursorHold?: boolean;
 }
 
 /** Bounded structural metadata for one untrusted external feedback item. Bodies remain opt-in. */
@@ -280,9 +282,14 @@ function pageCap(
   surface: GitHubDiscussionSurface,
   ids: ReadonlyArray<number>,
   mayHaveOlderItems: boolean,
+  requiresCursorHold = false,
 ): PullRequestDiscussionPageCap | undefined {
-  return mayHaveOlderItems && ids.length > 0
-    ? { oldestFetchedId: Math.min(...ids), surface }
+  return mayHaveOlderItems && (ids.length > 0 || requiresCursorHold)
+    ? {
+        ...(ids.length === 0 ? {} : { oldestFetchedId: Math.min(...ids) }),
+        ...(requiresCursorHold ? { requiresCursorHold: true } : {}),
+        surface,
+      }
     : undefined;
 }
 
@@ -461,6 +468,7 @@ export function makeGitHubWatcherService(
         inlineComments.map(({ databaseId }) => databaseId),
         reviewThreads.pageInfo.hasPreviousPage ||
           reviewThreads.nodes.some((thread) => thread.comments.pageInfo.hasPreviousPage),
+        true,
       ),
     ].filter((value): value is PullRequestDiscussionPageCap => value !== undefined);
     return {

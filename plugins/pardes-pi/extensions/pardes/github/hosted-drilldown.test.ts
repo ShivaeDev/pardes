@@ -1,6 +1,7 @@
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
+  GITHUB_CHECK_METADATA_TRUST_LABEL,
   GITHUB_CI_LOG_EXCERPT_TRUST_LABEL,
   GITHUB_DISCUSSION_DRILLDOWN_EXCERPT_MAX_CHARS,
   GITHUB_DISCUSSION_EXCERPT_TRUST_LABEL,
@@ -126,6 +127,7 @@ describe('GitHub hosted drill-down service', () => {
       omittedCheckCountAccuracy: 'lower_bound',
       pullRequestId: 'pr-42',
       pullRequestNumber: 42,
+      trust: GITHUB_CHECK_METADATA_TRUST_LABEL,
       unmappedFailingCheckCount: 2,
     });
     expect(fixture.invocations).toHaveLength(1);
@@ -206,8 +208,12 @@ describe('GitHub hosted drill-down service', () => {
 
   test('retrieves external discussion bodies only through an explicit surface/page path with first-N redacted excerpts', async () => {
     const secret = 'github_pat_abcdefghijklmnop';
+    const temporaryAwsKey = `ASIA${'A'.repeat(16)}`;
     const items = Array.from({ length: 10 }, (_, index) => ({
-      body: index === 0 ? `token=${secret}\n${'x'.repeat(5_000)}` : `body-${index}`,
+      body:
+        index === 0
+          ? `client_secret=do-not-leak password="alpha beta" api_key='gamma delta' token=${secret} aws=${temporaryAwsKey} marker\u061cleft\n${'x'.repeat(5_000)}`
+          : `body-${index}`,
       id: index + 1,
       user: index === 0 ? { login: 'alice' } : index === 1 ? { login: 'evil\u202e' } : null,
     }));
@@ -230,6 +236,12 @@ describe('GitHub hosted drill-down service', () => {
       hasMore: true,
       observation: 'opt_in_read_only_redacted_discussion_body_excerpts',
       page: 2,
+      provenance: {
+        auditedHeadSha: HEAD_SHA,
+        repositoryRoute: 'fixed_github_com_repository',
+        reviewGate: 'state_known',
+        scope: 'pull_request_level_not_commit_bound',
+      },
       pullRequestId: 'pr-42',
       pullRequestNumber: 42,
       surface: 'inline_review_comment',
@@ -240,13 +252,45 @@ describe('GitHub hosted drill-down service', () => {
     expect(page.items[1]).toMatchObject({ author: 'unknown-author', id: 2 });
     expect(page.items[0]?.excerpt.length).toBe(GITHUB_DISCUSSION_DRILLDOWN_EXCERPT_MAX_CHARS);
     expect(JSON.stringify(page)).not.toContain(secret);
+    expect(JSON.stringify(page)).not.toContain(temporaryAwsKey);
+    expect(page.items[0]?.excerpt).toContain('client_secret=[REDACTED]');
+    expect(page.items[0]?.excerpt).toContain('password=[REDACTED]');
+    expect(page.items[0]?.excerpt).toContain('api_key=[REDACTED]');
     expect(page.items[0]?.excerpt).toContain('token=[REDACTED]');
+    expect(page.items[0]?.excerpt).not.toContain('do-not-leak');
+    expect(page.items[0]?.excerpt).not.toContain('alpha beta');
+    expect(page.items[0]?.excerpt).not.toContain('gamma delta');
+    expect(page.items[0]?.excerpt).not.toContain('\u061c');
+    expect(page.items[0]?.excerpt).toContain('\\u061c');
     expect(fixture.invocations[0]?.args).toEqual([
       'api',
       'repos/acme/project/pulls/42/comments?per_page=10&page=2',
       '--hostname',
       'github.com',
     ]);
+  });
+
+  test('labels discussion bodies as PR-level rather than commit-bound when no audited SHA is available', async () => {
+    const { lastPushedHeadSha: _lastPushedHeadSha, ...withoutAuditedHead } = association();
+    const fixture = scriptedRunner([result('[]')]);
+
+    const page = await Effect.runPromise(
+      makeGitHubHostedDrilldownService({ runner: fixture.runner }).getDiscussionBodyExcerpts({
+        cwd: '/tmp/project',
+        pullRequest: withoutAuditedHead,
+        surface: 'issue_comment',
+      }),
+    );
+
+    expect(page.provenance).toEqual({
+      repositoryRoute: 'fixed_github_com_repository',
+      reviewGate: 'state_known',
+      scope: 'pull_request_level_not_commit_bound',
+    });
+    expect(page.provenance).not.toHaveProperty('auditedHeadSha');
+    expect(fixture.invocations[0]?.args).toContain(
+      'repos/acme/project/issues/42/comments?per_page=10&page=1',
+    );
   });
 
   test('rejects cross-repository associations before any hosted request', async () => {

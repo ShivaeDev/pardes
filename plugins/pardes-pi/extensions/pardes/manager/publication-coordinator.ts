@@ -9,8 +9,8 @@ import {
 import {
   type GitHubPublicationError,
   type GitHubPublicationShape,
-  isOpaquePublishedReviewBranch,
-  OPAQUE_PUBLISHED_REVIEW_BRANCH_PREFIX,
+  isManagedPublishedReviewBranch,
+  READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX,
 } from '../github/index.ts';
 import type { StateStoreShape, StoreError } from '../storage/index.ts';
 import type { AgentRecord, ManagerEvent, ManagerState, PullRequestRecord } from './domain.ts';
@@ -130,8 +130,36 @@ export function pullRequestEventAssociation(
   };
 }
 
-function allocateOpaquePublishedReviewBranch(): string {
-  return `${OPAQUE_PUBLISHED_REVIEW_BRANCH_PREFIX}${randomUUID()}`;
+export const PUBLISHED_REVIEW_BRANCH_SLUG_MAX_LENGTH = 64;
+const PUBLISHED_REVIEW_BRANCH_RESERVATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function readablePublishedReviewBranchSlug(value: string, fallback: string): string {
+  const slug = value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, PUBLISHED_REVIEW_BRANCH_SLUG_MAX_LENGTH)
+    .replace(/-+$/g, '');
+  return slug || fallback;
+}
+
+export function readablePublishedReviewBranch(
+  workstreamName: string,
+  taskName: string,
+  reservationId: string,
+): string {
+  if (!PUBLISHED_REVIEW_BRANCH_RESERVATION_ID_PATTERN.test(reservationId))
+    throw new Error('Published review branch reservation ID must be a UUID.');
+  const workstream = readablePublishedReviewBranchSlug(workstreamName, 'workstream');
+  const task = readablePublishedReviewBranchSlug(taskName, 'task');
+  return `${READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX}${workstream}-${task}-${reservationId}`;
+}
+
+function allocateReadablePublishedReviewBranch(workstreamName: string, taskName: string): string {
+  return readablePublishedReviewBranch(workstreamName, taskName, randomUUID());
 }
 
 /** Allocate one coordinator per active manager namespace so both publication paths share one permit. */
@@ -157,11 +185,16 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     if (persisted) yield* callbacks.refresh(ctx);
   });
 
-  const reserveOpaquePublishedReviewBranch = Effect.fnUntraced(function* (
+  const reservePublishedReviewBranch = Effect.fnUntraced(function* (
     agentId: string,
+    workstreamName: string,
     ctx?: ExtensionContext,
   ) {
-    const allocated = allocateOpaquePublishedReviewBranch();
+    const agent = namespace.state.agents[agentId];
+    const allocated = allocateReadablePublishedReviewBranch(
+      workstreamName,
+      agent?.title ?? agent?.task ?? 'task',
+    );
     const timestamp = yield* nowIso;
     const reservation = yield* namespace.store.mutate<
       PublishedReviewBranchReservation,
@@ -278,6 +311,14 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       });
     }
     const existingAssociation = existingAssociations[0];
+    if (
+      existingAssociation?.baseBranch !== undefined &&
+      existingAssociation.baseBranch !== input.baseBranch
+    ) {
+      return yield* new PullRequestPublicationValidationError({
+        reason: `persisted open review gate ${pullRequestLabel(existingAssociation)} targets base ${existingAssociation.baseBranch}; close it before publishing to ${input.baseBranch}`,
+      });
+    }
     if (existingAssociation !== undefined && existingAssociation.headBranch === undefined) {
       return yield* new PullRequestPublicationValidationError({
         reason: `persisted open review gate ${pullRequestLabel(existingAssociation)} has no published head branch`,
@@ -285,7 +326,7 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     }
     if (
       existingAssociation?.headBranch !== undefined &&
-      !isOpaquePublishedReviewBranch(existingAssociation.headBranch) &&
+      !isManagedPublishedReviewBranch(existingAssociation.headBranch) &&
       existingAssociation.number === undefined
     ) {
       return yield* new PullRequestPublicationValidationError({
@@ -293,7 +334,8 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       });
     }
     const headBranch =
-      existingAssociation?.headBranch ?? (yield* reserveOpaquePublishedReviewBranch(agent.id, ctx));
+      existingAssociation?.headBranch ??
+      (yield* reservePublishedReviewBranch(agent.id, workstream.title, ctx));
     const publication = yield* github.publish({
       baseBranch: input.baseBranch,
       body: input.body,
@@ -302,7 +344,7 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       headSha: inspection.headSha,
       title: input.title,
       ...(input.openInBrowser === undefined ? {} : { openInBrowser: input.openInBrowser }),
-      ...(existingAssociation?.number !== undefined && !isOpaquePublishedReviewBranch(headBranch)
+      ...(existingAssociation?.number !== undefined && !isManagedPublishedReviewBranch(headBranch)
         ? { legacyExistingPullRequestNumber: existingAssociation.number }
         : {}),
     });

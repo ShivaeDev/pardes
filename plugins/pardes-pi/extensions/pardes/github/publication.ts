@@ -11,7 +11,7 @@ import {
   GitHubPublicationMetadataSchema,
   GitHubPushedHeadMetadataSchema,
   GitHubSyncExistingPullRequestSchema,
-  isOpaquePublishedReviewBranch,
+  isManagedPublishedReviewBranch,
   PublishPullRequestInputSchema,
   SyncExistingPullRequestInputSchema,
 } from './schemas.ts';
@@ -37,7 +37,7 @@ export interface PublishPullRequestInput {
   readonly title: string;
   readonly body: string;
   readonly openInBrowser?: boolean;
-  /** Required update-only proof for a persisted gate created before opaque published branches. */
+  /** Required update-only proof for a persisted gate created before manager-owned publication refs. */
   readonly legacyExistingPullRequestNumber?: number;
 }
 
@@ -175,9 +175,9 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(PublishPullRequestInputSchema)(rawInput).pipe(
       Effect.mapError((cause) => new GitHubPublicationInputError({ cause })),
     );
-    const opaqueHeadBranch = isOpaquePublishedReviewBranch(input.headBranch);
+    const managedHeadBranch = isManagedPublishedReviewBranch(input.headBranch);
     let existing: { readonly number: number } | undefined;
-    if (!opaqueHeadBranch) {
+    if (!managedHeadBranch) {
       if (input.legacyExistingPullRequestNumber === undefined) {
         return yield* new GitHubPublicationInputError({
           cause: 'legacy published review branch requires an existing pull-request number',
@@ -213,7 +213,7 @@ export function makeGitHubPublicationService(
       'origin',
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
-    if (opaqueHeadBranch) {
+    if (managedHeadBranch) {
       const listed = yield* github.run(input.cwd, [
         'pr',
         'list',
@@ -280,6 +280,7 @@ export function makeGitHubPublicationService(
       viewed.stdout,
     );
     if (
+      (existing !== undefined && pullRequest.number !== existing.number) ||
       pullRequest.headRefName !== input.headBranch ||
       pullRequest.headRefOid !== input.headSha ||
       pullRequest.baseRefName !== input.baseBranch
@@ -287,6 +288,7 @@ export function makeGitHubPublicationService(
       return yield* responseError('verify published pull request head and base', {
         expected: input,
         pullRequest,
+        selectedExistingPullRequest: existing,
       });
     }
     if (input.openInBrowser === true)

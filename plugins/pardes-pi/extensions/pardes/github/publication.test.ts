@@ -8,7 +8,8 @@ function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     baseRefName: 'main',
     body: 'Summary and validation.',
-    headRefName: 'pardes/review/11111111-1111-4111-8111-111111111111',
+    headRefName:
+      'pardes/review/readable-publish-pr-bounded-slice-11111111-1111-4111-8111-111111111111',
     headRefOid: input.headSha,
     isDraft: false,
     number: 42,
@@ -23,7 +24,8 @@ const input = {
   baseBranch: 'main',
   body: 'Summary and validation.',
   cwd: '/tmp/managed-worker',
-  headBranch: 'pardes/review/11111111-1111-4111-8111-111111111111',
+  headBranch:
+    'pardes/review/readable-publish-pr-bounded-slice-11111111-1111-4111-8111-111111111111',
   headSha: 'a'.repeat(40),
   title: 'Publish the bounded slice',
 };
@@ -105,6 +107,53 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
+  });
+
+  test('keeps schema-v1 opaque reservations publishable without force-pushing', async () => {
+    const opaqueHeadBranch = 'pardes/review/11111111-1111-4111-8111-111111111111';
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefName: opaqueHeadBranch }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const published = await Effect.runPromise(
+      service.publish({ ...input, headBranch: opaqueHeadBranch }),
+    );
+
+    expect(published).toMatchObject({ action: 'created', headBranch: opaqueHeadBranch });
+    expect(fixture.invocations[0]?.args).toEqual([
+      'push',
+      'origin',
+      `${input.headSha}:refs/heads/${opaqueHeadBranch}`,
+    ]);
+    expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
+  });
+
+  test('keeps pre-flat nested readable reservations publishable for stable durable reuse', async () => {
+    const nestedHeadBranch =
+      'pardes/review/readable/publish-pr/bounded-slice-11111111-1111-4111-8111-111111111111';
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefName: nestedHeadBranch }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const published = await Effect.runPromise(
+      service.publish({ ...input, headBranch: nestedHeadBranch }),
+    );
+
+    expect(published).toMatchObject({ action: 'created', headBranch: nestedHeadBranch });
+    expect(fixture.invocations[0]?.args).toEqual([
+      'push',
+      'origin',
+      `${input.headSha}:refs/heads/${nestedHeadBranch}`,
+    ]);
+    expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
   });
 
   test('rejects a published review gate whose final remote head OID diverges from the audited push', async () => {
@@ -190,6 +239,24 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
+  test('rejects an updated review gate whose final PR number differs from the selected existing PR', async () => {
+    const existing = pullRequest();
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      result(JSON.stringify(pullRequest({ number: 43 }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    if (failure._tag !== 'GitHubResponseError') throw failure;
+    expect(failure.operation).toBe('verify published pull request head and base');
+    expect(fixture.invocations).toHaveLength(4);
+  });
+
   test('rejects malformed gh JSON through a typed response error', async () => {
     const fixture = scriptedRunner([result(), result('[{"number":"not-a-number"}]')]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
@@ -217,6 +284,32 @@ describe('GitHub publication boundary', () => {
     expect(branchFailure._tag).toBe('GitHubPublicationInputError');
     expect(shaFailure._tag).toBe('GitHubPublicationInputError');
     expect(localHeadFailure._tag).toBe('GitHubPublicationInputError');
+    expect(fixture.invocations).toEqual([]);
+  });
+
+  test('rejects invalid Git ref forms in pre-hardening branch compatibility before invoking a child process', async () => {
+    const fixture = scriptedRunner([]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    for (const headBranch of [
+      'pardes/../agent-1',
+      'pardes/manager-1/..',
+      'pardes/manager.lock/agent-1',
+      'pardes/manager-1/agent.lock',
+      'pardes/.manager/agent-1',
+      'pardes/manager-1/.agent',
+      'pardes/manager-1/agent.',
+      'pardes/manager..one/agent-1',
+      'pardes/manager-1/agent..one',
+    ]) {
+      const failure = await Effect.runPromise(
+        service
+          .publish({ ...input, headBranch, legacyExistingPullRequestNumber: 42 })
+          .pipe(Effect.flip),
+      );
+      expect(failure._tag).toBe('GitHubPublicationInputError');
+    }
+
     expect(fixture.invocations).toEqual([]);
   });
 
@@ -356,7 +449,7 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
-  test('syncs an existing opaque review gate by viewing its persisted number and non-force pushing exactly the audited SHA', async () => {
+  test('syncs an existing managed review gate by viewing its persisted number and non-force pushing exactly the audited SHA', async () => {
     const fixture = scriptedRunner([
       result(JSON.stringify(pullRequest())),
       result(),
@@ -561,6 +654,38 @@ describe('GitHub publication boundary', () => {
       expect(failure.operation).toBe('view pull request');
       expect('url' in failure).toBe(false);
     }
+  });
+
+  test('keeps schema-v1 state with an opaque agent branch reservation decodable', async () => {
+    const state = initialManagerState('manager-1', {
+      currentCheckout: '/tmp/project',
+      gitCommonDir: '/tmp/project/.git',
+      key: 'repo-1',
+      primaryCheckout: '/tmp/project',
+    });
+    const opaqueHeadBranch = 'pardes/review/11111111-1111-4111-8111-111111111111';
+    const agent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'agent-1',
+      model: 'fixture-model',
+      publishedReviewBranch: opaqueHeadBranch,
+      role: 'worker' as const,
+      sessionDir: '/tmp/session',
+      status: 'idle' as const,
+      task: 'Preserve the schema-v1 reservation.',
+      thinkingLevel: 'high' as const,
+      updatedAt: '2026-06-01T00:00:00.000Z',
+      workstreamId: 'ws-1',
+    };
+
+    const decoded = await Effect.runPromise(
+      Schema.decodeUnknownEffect(ManagerStateSchema)({
+        ...state,
+        agents: { [agent.id]: agent },
+      }),
+    );
+
+    expect(decoded.agents[agent.id]?.publishedReviewBranch).toBe(opaqueHeadBranch);
   });
 
   test('keeps schema-v1 state with the original minimal PR record decodable', async () => {

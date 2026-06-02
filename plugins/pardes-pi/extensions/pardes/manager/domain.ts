@@ -8,7 +8,7 @@ import {
 import {
   GitHubDiscussionCursorSchema,
   GitHubDiscussionPaginationGapsSchema,
-  OpaquePublishedReviewBranchSchema,
+  ManagedPublishedReviewBranchSchema,
   PersistedPublishedReviewBranchSchema,
 } from '../github/index.ts';
 import { AgentReportReferenceSchema, ReportIdSchema } from '../reporting/index.ts';
@@ -92,8 +92,8 @@ export const AgentRecordSchema = Schema.Struct({
   latestReport: Schema.optionalKey(AgentReportReferenceSchema),
   leaseCleanup: Schema.optionalKey(AgentLeaseCleanupSchema),
   model: NonEmptyString,
-  /** Stable opaque remote branch reservation; the manager-scoped worktree branch remains local. */
-  publishedReviewBranch: Schema.optionalKey(OpaquePublishedReviewBranchSchema),
+  /** Stable manager-owned remote branch reservation; the manager-scoped worktree branch remains local. */
+  publishedReviewBranch: Schema.optionalKey(ManagedPublishedReviewBranchSchema),
   role: Schema.Literals(['explorer', 'worker', 'verifier']),
   sessionDir: NonEmptyString,
   sessionFile: Schema.optionalKey(NonEmptyString),

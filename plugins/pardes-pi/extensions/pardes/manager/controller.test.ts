@@ -27,6 +27,7 @@ import {
   type GitHubPublicationShape,
   type GitHubWatcherCallbacks,
   type GitHubWatcherShape,
+  isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   type PublishedPullRequest,
   type PublishPullRequestInput,
@@ -6344,7 +6345,11 @@ describe('manager controller', () => {
 
     expect(github.publications).toHaveLength(1);
     const publishedHeadBranch = github.publications[0]?.headBranch;
-    expect(isOpaquePublishedReviewBranch(publishedHeadBranch)).toBe(true);
+    expect(isManagedPublishedReviewBranch(publishedHeadBranch)).toBe(true);
+    expect(isOpaquePublishedReviewBranch(publishedHeadBranch)).toBe(false);
+    expect(publishedHeadBranch).toMatch(
+      /^pardes\/review\/readable-publish-pr-commit-the-bounded-publication-fixture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
     expect(publishedHeadBranch).not.toBe(requiredValue(agent.worktree).branch);
     expect(publishedHeadBranch).not.toContain(requiredValue(agent.worktree).managerId);
     expect(publishedHeadBranch).not.toContain(agent.id);
@@ -6396,6 +6401,50 @@ describe('manager controller', () => {
       ),
     );
     expect(github.publications[1]?.headBranch).toBe(publishedHeadBranch);
+  });
+
+  test('rejects base retarget while an owned review gate remains open before reaching GitHub publication', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent, published } = await publishManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+    );
+
+    const failure = await Effect.runPromise(
+      controller
+        .createPullRequest(
+          {
+            agentId: agent.id,
+            baseBranch: 'release',
+            body: 'Do not create a second review gate.',
+            title: 'Reject base retarget',
+            workstreamId: workstream.id,
+          },
+          fixture.ctx,
+        )
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'PullRequestPublicationValidationError',
+      reason: `persisted open review gate #42 targets base main; close it before publishing to release`,
+    });
+    expect(github.publications).toHaveLength(1);
+    expect(controller.snapshot()?.pullRequests).toEqual({
+      [published.pullRequest.id]: published.pullRequest,
+    });
   });
 
   test('passes the exact persisted gate number for update-only legacy publication compatibility', async () => {

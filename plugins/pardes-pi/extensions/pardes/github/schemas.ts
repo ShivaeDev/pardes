@@ -4,9 +4,18 @@ export const PULL_REQUEST_TITLE_MAX_LENGTH = 256;
 export const PULL_REQUEST_BODY_MAX_LENGTH = 10_000;
 export const PULL_REQUEST_BRANCH_MAX_LENGTH = 255;
 export const PULL_REQUEST_BRANCH_PATTERN = '^[a-zA-Z0-9][a-zA-Z0-9._/-]*$';
-export const OPAQUE_PUBLISHED_REVIEW_BRANCH_PREFIX = 'pardes/review/';
+export const PUBLISHED_REVIEW_BRANCH_PREFIX = 'pardes/review/';
+export const READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX = `${PUBLISHED_REVIEW_BRANCH_PREFIX}readable-`;
+/** Retained source-compatible alias for the namespace used by schema-v1 opaque reservations. */
+export const OPAQUE_PUBLISHED_REVIEW_BRANCH_PREFIX = PUBLISHED_REVIEW_BRANCH_PREFIX;
+/** Schema-v1 reservations used an opaque UUID after the shared review namespace. */
 export const OPAQUE_PUBLISHED_REVIEW_BRANCH_PATTERN =
   '^pardes/review/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+export const READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN =
+  '^pardes/review/readable-[a-z0-9]+(?:-[a-z0-9]+)*-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+/** Accepted so durable reservations written before readable refs became flat remain reusable. */
+export const NESTED_READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN =
+  '^pardes/review/readable/[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
 export const PULL_REQUEST_URL_MAX_LENGTH = 2_048;
 export const MAX_GITHUB_STATUS_CHECKS = 200;
 export const MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE = 100;
@@ -55,21 +64,44 @@ export const PullRequestUrlSchema = NonEmptyStringSchema.check(
 
 const FullCommitShaSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40,64}$/));
 const OpaquePublishedReviewBranchPattern = new RegExp(OPAQUE_PUBLISHED_REVIEW_BRANCH_PATTERN);
+const ReadablePublishedReviewBranchPattern = new RegExp(READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN);
+const NestedReadablePublishedReviewBranchPattern = new RegExp(
+  NESTED_READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN,
+);
 export const OpaquePublishedReviewBranchSchema = PullRequestBranchSchema.check(
   Schema.isPattern(OpaquePublishedReviewBranchPattern),
 );
-/** Accepted only for conservative compatibility with review gates published before opaque branches. */
+export const ReadablePublishedReviewBranchSchema = Schema.Union([
+  PullRequestBranchSchema.check(Schema.isPattern(ReadablePublishedReviewBranchPattern)),
+  PullRequestBranchSchema.check(Schema.isPattern(NestedReadablePublishedReviewBranchPattern)),
+]);
+/** New readable reservations and schema-v1 opaque reservations are both manager-owned publication refs. */
+export const ManagedPublishedReviewBranchSchema = Schema.Union([
+  ReadablePublishedReviewBranchSchema,
+  OpaquePublishedReviewBranchSchema,
+]);
+/** Accepted only for conservative compatibility with review gates published before managed publication refs. */
 const LegacyPublishedReviewBranchSchema = PullRequestBranchSchema.check(
-  Schema.isPattern(/^pardes\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/),
+  Schema.isPattern(
+    /^pardes\/(?![a-zA-Z0-9._-]*\.\.)(?![a-zA-Z0-9._-]*\.lock\/)[a-zA-Z0-9_-](?:[a-zA-Z0-9._-]*[a-zA-Z0-9_-])?\/(?![a-zA-Z0-9._-]*\.\.)(?![a-zA-Z0-9._-]*\.lock$)[a-zA-Z0-9_-](?:[a-zA-Z0-9._-]*[a-zA-Z0-9_-])?$/,
+  ),
 );
 export const PersistedPublishedReviewBranchSchema = Schema.Union([
-  OpaquePublishedReviewBranchSchema,
+  ManagedPublishedReviewBranchSchema,
   LegacyPublishedReviewBranchSchema,
 ]);
 const GitHubPullRequestStateSchema = Schema.Literals(['OPEN', 'CLOSED', 'MERGED']);
 
 export function isOpaquePublishedReviewBranch(value: string): boolean {
   return OpaquePublishedReviewBranchPattern.test(value);
+}
+
+export function isManagedPublishedReviewBranch(value: string): boolean {
+  return (
+    isOpaquePublishedReviewBranch(value) ||
+    ReadablePublishedReviewBranchPattern.test(value) ||
+    NestedReadablePublishedReviewBranchPattern.test(value)
+  );
 }
 
 export const PublishPullRequestInputSchema = Schema.Struct({

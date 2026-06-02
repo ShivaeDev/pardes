@@ -6,6 +6,50 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+export function requirePullRequestTarget(
+  pullRequest: { baseRefName?: unknown; headRefOid?: unknown },
+  expectedHead?: string,
+): string {
+  if (pullRequest.baseRefName !== 'main') {
+    throw new Error(`bump PR base must be main, got ${JSON.stringify(pullRequest.baseRefName)}`);
+  }
+  if (
+    typeof pullRequest.headRefOid !== 'string' ||
+    !/^[0-9a-f]{40}$/.test(pullRequest.headRefOid)
+  ) {
+    throw new Error(`bump PR head must be a full commit SHA`);
+  }
+  if (expectedHead && pullRequest.headRefOid !== expectedHead) {
+    throw new Error(
+      `bump PR head ${pullRequest.headRefOid} does not match published head ${expectedHead}`,
+    );
+  }
+  return pullRequest.headRefOid;
+}
+
+export function scopedGitAuthKey(originUrl: string, serverUrl: string): string {
+  let origin: URL;
+  let server: URL;
+  try {
+    origin = new URL(originUrl);
+    server = new URL(serverUrl);
+  } catch {
+    throw new Error(`publication Git origin/server must be absolute URLs`);
+  }
+  if (origin.protocol !== 'https:' || server.protocol !== 'https:') {
+    throw new Error(`publication Git origin/server must use HTTPS`);
+  }
+  if (server.pathname !== '/' || origin.origin !== server.origin) {
+    throw new Error(
+      `publication Git origin must stay on configured GitHub server ${server.origin}`,
+    );
+  }
+  if (!/^\/[^/]+\/[^/]+(?:\.git)?\/?$/.test(origin.pathname)) {
+    throw new Error(`publication Git origin must identify one repository`);
+  }
+  return `http.${server.origin}/.extraheader`;
+}
+
 export function requireSemver(value: unknown): asserts value is string {
   if (
     typeof value !== 'string' ||

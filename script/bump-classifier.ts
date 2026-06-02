@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export const CLASSIFIER_AGENT = 'bump';
+export const OPENCODE_PREFLIGHT_TIMEOUT_MS = 90_000;
+export const OPENCODE_RUN_TIMEOUT_MS = 300_000;
 export const SUBMISSION_TOOL = 'submit_verdict';
 export const SUBJECT_BUDGET = 10_000;
 export const SUBJECT_LIMIT = 100;
@@ -19,6 +21,7 @@ export type Classification = {
 
 type ClassifierSandbox = {
   cache: string;
+  classifierConfig: string;
   config: string;
   data: string;
   home: string;
@@ -35,9 +38,9 @@ type ClassifierRun = {
 };
 
 const CLASSIFIER_FILES = [
-  ['.opencode/opencode.json', '.opencode/opencode.json'],
-  ['.opencode/agent/bump.md', '.opencode/agent/bump.md'],
-  ['.opencode/tools/submit_verdict.ts', '.opencode/tools/submit_verdict.ts'],
+  ['.opencode/opencode.json', 'config/opencode/opencode.json'],
+  ['.opencode/agent/bump.md', 'config/opencode/agent/bump.md'],
+  ['.opencode/tools/submit_verdict.ts', 'config/opencode/tools/submit_verdict.ts'],
 ] as const;
 const SECTIONS = ['added', 'changed', 'fixed', 'removed'] as const;
 const FALLBACK_WARNING = /falling back to default agent/i;
@@ -203,9 +206,14 @@ export function preflightClassifierSandbox(
       encoding: 'utf8',
       env,
       maxBuffer: 16 * 1024 * 1024,
+      timeout: OPENCODE_PREFLIGHT_TIMEOUT_MS,
     });
-    if (result.error)
+    if (result.error) {
+      if ((result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+        throw new Error(`opencode preflight timed out after ${OPENCODE_PREFLIGHT_TIMEOUT_MS}ms`);
+      }
       throw new Error(`could not launch opencode preflight: ${result.error.message}`);
+    }
     if (result.status !== 0) {
       const detail =
         (result.stderr ?? '').trim().split('\n').slice(-1)[0] || `exit ${result.status}`;
@@ -233,6 +241,7 @@ export function createClassifierSandbox(sourceRoot = '.', parent = tmpdir()): Cl
   const root = mkdtempSync(join(parent, 'pardes-opencode-classifier-'));
   const sandbox = {
     cache: join(root, 'cache'),
+    classifierConfig: join(root, 'config', 'opencode'),
     config: join(root, 'config'),
     data: join(root, 'data'),
     home: join(root, 'home'),
@@ -253,7 +262,9 @@ export function createClassifierSandbox(sourceRoot = '.', parent = tmpdir()): Cl
   // Defense in depth around OpenCode v1.15.12 discovery: non-VCS directories
   // use `/` as worktree and scan ancestor `.opencode` directories. A local Git
   // root closes that walk. The narrowed child env below additionally disables
-  // project discovery and explicitly routes config to this sandbox's `.opencode`.
+  // project discovery and explicitly routes config to the single isolated XDG
+  // config root below. OPENCODE_CONFIG_DIR equals Global.Path.config, so OpenCode
+  // deduplicates it instead of materializing its helper package in two roots.
   // OS-managed OpenCode policy remains part of the trusted runner boundary.
   const initialized = spawnSync('git', ['init', '--quiet', root], {
     encoding: 'utf8',
@@ -286,7 +297,7 @@ export function classifierEnvironment(
     GIT_CONFIG_NOSYSTEM: '1',
     HOME: sandbox.home,
     OPENCODE_API_KEY: apiKey,
-    OPENCODE_CONFIG_DIR: join(sandbox.root, '.opencode'),
+    OPENCODE_CONFIG_DIR: sandbox.classifierConfig,
     OPENCODE_DISABLE_AUTOUPDATE: 'true',
     OPENCODE_DISABLE_MODELS_FETCH: 'true',
     OPENCODE_DISABLE_PROJECT_CONFIG: 'true',

@@ -24,15 +24,18 @@
  *   schema-first custom tool (`submit_verdict`) and no read/edit/shell access.
  *   The child gets only OPENCODE_API_KEY plus isolated runtime paths/config
  *   controls — never GH_TOKEN, persisted credentials, or publication secrets.
- *   Prose is never salvaged.
+ *   One config root avoids duplicate helper installs; startup/model execution
+ *   have bounded timeouts. Prose is never salvaged.
  * - Deterministic release writes are allowlisted, staged by exact path, checked
  *   by the same `bun run ready` gate as human PRs, and guarded by clean-worktree
  *   assertions before branch or tag publication. Classification aggregates to a
  *   fetched main watermark; pre-merge advancement aborts, and post-merge parent/
  *   tree verification refuses any raced same-plugin tag. The inline gate is
  *   necessary: GITHUB_TOKEN-created bump PR events do not launch normal lint.
- * - Checkout credentials are not persisted. GH_TOKEN is removed from this
- *   process env and injected only into explicit remote Git/gh publication ops.
+ * - Checkout credentials are not persisted. GH_TOKEN and OPENCODE_API_KEY are
+ *   removed from this process env and injected only into their narrow children:
+ *   Git/gh publication ops or OpenCode classification respectively. Git's
+ *   ephemeral extraheader is scoped to the proved HTTPS GitHub server.
  * - Everything uses GITHUB_TOKEN (no bypass actor, no standing secret). The merge
  *   is SYNCHRONOUS, not auto-merge: a GITHUB_TOKEN merge doesn't re-trigger any
  *   workflow, so an async "tag on merge" step would never fire — we merge + tag
@@ -56,6 +59,7 @@ import {
   type Classification,
   classifierEnvironment,
   createClassifierSandbox,
+  OPENCODE_RUN_TIMEOUT_MS,
   preflightClassifierSandbox,
   readSubmission,
   removeClassifierSandbox,
@@ -67,7 +71,9 @@ import {
   manifestTouches,
   manifestVersionAtRef,
   nextVersionIntroductionCommit,
+  requirePullRequestTarget,
   requireSemver,
+  scopedGitAuthKey,
   updateManifestVersion,
 } from './bump-release';
 
@@ -83,6 +89,7 @@ const short = afterSha.slice(0, 12);
 const branch = `bump/${short}`;
 delete process.env.GH_TOKEN;
 delete process.env.GITHUB_TOKEN;
+delete process.env.OPENCODE_API_KEY;
 
 if (!afterSha) die('AFTER_SHA missing');
 if (!model) die('OPENCODE_MODEL repo variable not set (provider/model)');
@@ -142,7 +149,10 @@ function publicationGitEnv(): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GIT_CONFIG_COUNT: '1',
-    GIT_CONFIG_KEY_0: 'http.extraheader',
+    GIT_CONFIG_KEY_0: scopedGitAuthKey(
+      git(['remote', 'get-url', 'origin']),
+      process.env.GITHUB_SERVER_URL ?? 'https://github.com',
+    ),
     GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${publicationToken}`).toString('base64')}`,
   };
 }
@@ -170,6 +180,76 @@ function runGh(args: string[]): { status: number | null; stdout: string; stderr:
   });
   if (result.error) die(`could not launch gh: ${result.error.message}`);
   return { status: result.status, stderr: result.stderr ?? '', stdout: result.stdout ?? '' };
+}
+
+type RawPullRequest = {
+  baseRefName?: unknown;
+  headRefOid?: unknown;
+  mergeCommit?: unknown;
+  number?: unknown;
+  state?: unknown;
+};
+
+function pullRequestList(args: string[]): RawPullRequest[] {
+  const result = runGh(args);
+  if (result.status !== 0)
+    return die(
+      `gh pr list failed: ${result.stderr.trim().split('\n')[0] || `exit ${result.status}`}`,
+    );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return die(`gh pr list returned invalid JSON`);
+  }
+  if (!Array.isArray(parsed)) return die(`gh pr list returned a non-array`);
+  return parsed as RawPullRequest[];
+}
+
+function pullRequestNumber(pullRequest: RawPullRequest): string {
+  if (typeof pullRequest.number !== 'number' || !Number.isInteger(pullRequest.number)) {
+    return die(`could not parse bump PR number`);
+  }
+  return String(pullRequest.number);
+}
+
+function openPullRequestForHead(expectedHead: string): string | null {
+  const pullRequests = pullRequestList([
+    'pr',
+    'list',
+    '--head',
+    branch,
+    '--base',
+    'main',
+    '--state',
+    'open',
+    '--limit',
+    '100',
+    '--json',
+    'number,baseRefName,headRefOid',
+  ]);
+  if (pullRequests.length === 0) return null;
+  if (pullRequests.length !== 1) return die(`expected at most one open main PR for ${branch}`);
+  requirePullRequestTarget(pullRequests[0], expectedHead);
+  return pullRequestNumber(pullRequests[0]);
+}
+
+function assertOpenPullRequest(number: string, expectedHead: string): void {
+  const result = runGh(['pr', 'view', number, '--json', 'state,baseRefName,headRefOid']);
+  if (result.status !== 0) die(`could not resolve open bump PR #${number}`);
+  let pullRequest: unknown;
+  try {
+    pullRequest = JSON.parse(result.stdout);
+  } catch {
+    die(`gh pr view #${number} returned invalid JSON`);
+  }
+  if (!pullRequest || typeof pullRequest !== 'object' || Array.isArray(pullRequest)) {
+    die(`gh pr view #${number} returned a non-object`);
+  }
+  const raw = pullRequest as RawPullRequest;
+  if (raw.state !== 'OPEN')
+    die(`bump PR #${number} must be OPEN before merge, got ${JSON.stringify(raw.state)}`);
+  requirePullRequestTarget(raw, expectedHead);
 }
 
 function gitPaths(args: string[]): string[] {
@@ -354,9 +434,15 @@ function classify(name: string, version: string, subjects: string[], diff: strin
         encoding: 'utf8',
         env,
         maxBuffer: 16 * 1024 * 1024,
+        timeout: OPENCODE_RUN_TIMEOUT_MS,
       },
     );
-    if (res.error) throw new Error(`could not launch opencode: ${res.error.message}`);
+    if (res.error) {
+      if ((res.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+        throw new Error(`opencode classification timed out after ${OPENCODE_RUN_TIMEOUT_MS}ms`);
+      }
+      throw new Error(`could not launch opencode: ${res.error.message}`);
+    }
 
     // Audit trail: raw JSON events make selected tool calls reviewable while the
     // verdict itself comes only from the isolated submission file. We never
@@ -544,6 +630,8 @@ function validateBumpCommit(): void {
 
 // If a prior run already merged every plugin's bump (re-run after a tag-only
 // failure), there's nothing to commit/merge — jump straight to the tag step.
+let bumpPrNumber = '';
+let publishedHeadSha = '';
 let validatedCandidateTree = '';
 if (bumped.length > 0) {
   assertAppliedPaths(bumpPaths);
@@ -574,6 +662,7 @@ if (bumped.length > 0) {
   validateBumpCommit();
   assertCleanWorkingTree('working tree must be clean before publishing bump branch');
   assertBaseStable('before publishing bump branch');
+  publishedHeadSha = git(['rev-parse', 'HEAD']);
   validatedCandidateTree = git(['rev-parse', 'HEAD^{tree}']);
 
   // Create-or-update push: a re-run rebuilds the same branch but with a fresh
@@ -597,24 +686,19 @@ if (bumped.length > 0) {
 
   assertBaseStable('before opening bump PR');
 
-  // Reuse an existing PR for this head if a prior run already opened one.
-  const existingPr = runGh([
-    'pr',
-    'list',
-    '--head',
-    branch,
-    '--state',
-    'open',
-    '--json',
-    'number',
-    '--jq',
-    '.[0].number // empty',
-  ]);
-  if (existingPr.status === 0 && existingPr.stdout.trim()) {
-    console.log(`reusing existing bump PR #${existingPr.stdout.trim()} for ${branch}`);
+  // Reuse an existing PR only when both its base and exact head match the
+  // just-published bot branch. Alternate-base or raced-head PRs fail closed.
+  const existingPr = openPullRequestForHead(publishedHeadSha);
+  if (existingPr) {
+    bumpPrNumber = existingPr;
+    console.log(`reusing existing bump PR #${bumpPrNumber} for ${branch}`);
   } else {
     gh(['pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body]);
+    bumpPrNumber =
+      openPullRequestForHead(publishedHeadSha) ??
+      die(`could not resolve newly-created PR for ${branch}`);
   }
+  assertOpenPullRequest(bumpPrNumber, publishedHeadSha);
 }
 
 // SYNCHRONOUS merge — NOT `--auto`. Auto-merge happens asynchronously after this
@@ -629,14 +713,19 @@ if (bumped.length > 0) {
 // (only the branch-delete hiccuped), detect that and stop rather than retrying a
 // PR that's already gone.
 function bumpPrMerged(): boolean {
-  const r = runGh(['pr', 'view', branch, '--json', 'state', '--jq', '.state']);
+  const r = runGh(['pr', 'view', bumpPrNumber, '--json', 'state', '--jq', '.state']);
   return r.status === 0 && r.stdout.trim() === 'MERGED';
 }
 
 function mergeBumpPr(): void {
-  const args = ['pr', 'merge', branch, '--squash', '--delete-branch'];
+  const args = ['pr', 'merge', bumpPrNumber, '--squash', '--delete-branch'];
   const maxAttempts = 6;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (bumpPrMerged()) {
+      console.log('bump PR already merged');
+      return;
+    }
+    assertOpenPullRequest(bumpPrNumber, publishedHeadSha);
     const r = runGh(args);
     if (r.status === 0) {
       console.log('merged bump PR');
@@ -669,23 +758,37 @@ if (bumped.length > 0) {
 // newer release. Both are independent of whatever else `main` HEAD points at.
 type MergedPr = { headSha: string; mergeSha: string };
 
-function mergedPrForBranch(): MergedPr | null {
-  const result = runGh([
+function mergedPrForBranch(expectedHead?: string): MergedPr | null {
+  const pullRequests = pullRequestList([
     'pr',
-    'view',
+    'list',
+    '--head',
     branch,
+    '--base',
+    'main',
+    '--state',
+    'merged',
+    '--limit',
+    '100',
     '--json',
-    'state,mergeCommit,headRefOid',
-    '--jq',
-    '[.state, .mergeCommit.oid // "", .headRefOid] | @tsv',
-  ]);
-  if (result.status !== 0) return null;
-  const [state, mergeSha, headSha] = result.stdout.trim().split('\t');
-  if (state !== 'MERGED') return null;
-  if (!/^[0-9a-f]{40}$/.test(mergeSha) || !/^[0-9a-f]{40}$/.test(headSha)) {
-    die(`could not parse merged PR commits for ${branch}`);
+    'number,state,baseRefName,mergeCommit,headRefOid',
+  ]).filter((pullRequest) => !expectedHead || pullRequest.headRefOid === expectedHead);
+  if (pullRequests.length === 0) return null;
+  if (pullRequests.length !== 1) return die(`expected exactly one merged main PR for ${branch}`);
+  const pullRequest = pullRequests[0];
+  const headSha = requirePullRequestTarget(pullRequest, expectedHead);
+  const mergeCommit = pullRequest.mergeCommit;
+  if (!mergeCommit || typeof mergeCommit !== 'object' || Array.isArray(mergeCommit)) {
+    return die(`could not parse merged PR commit for ${branch}`);
   }
-  gitPublish(['fetch', 'origin', mergeSha, headSha]);
+  const mergeSha = (mergeCommit as { oid?: unknown }).oid;
+  if (typeof mergeSha !== 'string' || !/^[0-9a-f]{40}$/.test(mergeSha)) {
+    return die(`could not parse merged PR SHA for ${branch}`);
+  }
+  gitPublish(['fetch', 'origin', 'main', mergeSha, headSha]);
+  if (run('git', ['merge-base', '--is-ancestor', mergeSha, 'origin/main']).status !== 0) {
+    return die(`merged PR ${mergeSha} for ${branch} is not contained in origin/main`);
+  }
   return { headSha, mergeSha };
 }
 
@@ -704,7 +807,7 @@ function assertNoReleasePathAdvance(
 }
 
 function mergeCommitForBranch(): string {
-  const merged = mergedPrForBranch();
+  const merged = mergedPrForBranch(publishedHeadSha);
   if (!merged) die(`could not resolve merged PR for ${branch} via gh pr view`);
   return merged.mergeSha;
 }
@@ -735,12 +838,20 @@ function verifyFreshMerge(): string {
   // A tiny main-advance race can still occur between the last remote check and
   // GitHub's synchronous merge. Never tag if it touched any releasing plugin;
   // unrelated advancement is acceptable only after gating the exact landed tree.
-  assertNoReleasePathAdvance(
+  const hits = changedReleasePaths(
+    '.',
     baseSha,
     parent,
     bumped.flatMap((plugin) => [plugin.path, join('changelog', `${plugin.name}.md`)]),
-    `refusing to tag ${branch}; main advanced through release paths`,
   );
+  if (hits.length) {
+    die(
+      `POST-MERGE SAME-PLUGIN RACE — ${branch} merged but its immutable tag was REFUSED. ` +
+        `Main advanced through release paths: ${hits.join(', ')}. Do NOT manually tag ${sha}. ` +
+        `Recovery: inspect the raced main integration, reconcile plugin source/changelog on main, ` +
+        `then land a normal non-manifest source commit so version-bump classifies and publishes a clean release.`,
+    );
+  }
   validateDetachedIntegration(sha);
   return sha;
 }

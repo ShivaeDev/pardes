@@ -9,6 +9,8 @@ import {
   manifestTouches,
   manifestVersion,
   nextVersionIntroductionCommit,
+  requirePullRequestTarget,
+  scopedGitAuthKey,
   updateManifestVersion,
   versionIntroductionCommit,
 } from './bump-release';
@@ -95,10 +97,44 @@ describe('inline publication gate', () => {
       script.indexOf("gitPublish(['push'"),
     );
     expect(script).toContain('delete process.env.GH_TOKEN;');
-    expect(script).toContain("GIT_CONFIG_KEY_0: 'http.extraheader'");
+    expect(script).toContain('delete process.env.OPENCODE_API_KEY;');
+    expect(script).toContain('GIT_CONFIG_KEY_0: scopedGitAuthKey(');
+    expect(script).toContain('requirePullRequestTarget(pullRequest, expectedHead);');
+    expect(script).toContain("['merge-base', '--is-ancestor', mergeSha, 'origin/main']");
+    expect(script).toContain('POST-MERGE SAME-PLUGIN RACE');
     expect(workflow).toContain('persist-credentials: false');
+    expect(workflow).toContain('DO NOT manually tag the raced merge');
+    expect(workflow).toContain('are workflow-owned');
     expect(workflow).toContain('run: bun install --frozen-lockfile');
     expect(workflow).toContain('astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b');
+  });
+});
+
+describe('requirePullRequestTarget', () => {
+  const head = 'a'.repeat(40);
+
+  it('requires main base and the exact published head', () => {
+    expect(requirePullRequestTarget({ baseRefName: 'main', headRefOid: head }, head)).toBe(head);
+    expect(() =>
+      requirePullRequestTarget({ baseRefName: 'release', headRefOid: head }, head),
+    ).toThrow('bump PR base must be main');
+    expect(() =>
+      requirePullRequestTarget({ baseRefName: 'main', headRefOid: 'b'.repeat(40) }, head),
+    ).toThrow('does not match published head');
+  });
+});
+
+describe('scopedGitAuthKey', () => {
+  it('scopes publication auth to the proved HTTPS GitHub server', () => {
+    expect(scopedGitAuthKey('https://github.com/ShivaeDev/pardes.git', 'https://github.com')).toBe(
+      'http.https://github.com/.extraheader',
+    );
+    expect(() =>
+      scopedGitAuthKey('https://evil.example/ShivaeDev/pardes.git', 'https://github.com'),
+    ).toThrow('publication Git origin must stay on configured GitHub server');
+    expect(() =>
+      scopedGitAuthKey('git@github.com:ShivaeDev/pardes.git', 'https://github.com'),
+    ).toThrow('publication Git origin/server must be absolute URLs');
   });
 });
 

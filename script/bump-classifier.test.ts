@@ -9,6 +9,8 @@ import {
   boundedSubjects,
   classifierEnvironment,
   createClassifierSandbox,
+  OPENCODE_PREFLIGHT_TIMEOUT_MS,
+  OPENCODE_RUN_TIMEOUT_MS,
   removeClassifierSandbox,
   SUBJECT_LENGTH_LIMIT,
   SUBJECT_LIMIT,
@@ -191,6 +193,7 @@ describe('classifierEnvironment', () => {
         }).trim(),
       ).toBe(realpathSync(sandbox.root));
       expect(existsSync(join(sandbox.root, '.opencode/tools/ancestor-probe.ts'))).toBe(false);
+      expect(existsSync(join(sandbox.classifierConfig, 'tools/submit_verdict.ts'))).toBe(true);
     } finally {
       removeClassifierSandbox(sandbox);
       rmSync(parent, { force: true, recursive: true });
@@ -204,7 +207,7 @@ describe('classifierEnvironment', () => {
         GIT_CONFIG_NOSYSTEM: '1',
         HOME: `${sandbox.root}/home`,
         OPENCODE_API_KEY: 'provider-secret',
-        OPENCODE_CONFIG_DIR: `${sandbox.root}/.opencode`,
+        OPENCODE_CONFIG_DIR: `${sandbox.root}/config/opencode`,
         OPENCODE_DISABLE_AUTOUPDATE: 'true',
         OPENCODE_DISABLE_MODELS_FETCH: 'true',
         OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
@@ -216,6 +219,23 @@ describe('classifierEnvironment', () => {
         XDG_CONFIG_HOME: `${sandbox.root}/config`,
         XDG_DATA_HOME: `${sandbox.root}/data`,
       });
+    } finally {
+      removeClassifierSandbox(sandbox);
+    }
+  });
+
+  it('uses one isolated OpenCode config root and bounded OpenCode child timeouts', () => {
+    const sandbox = createClassifierSandbox();
+    try {
+      const env = classifierEnvironment(sandbox, 'provider-secret', '/runtime/bin');
+      expect(env.XDG_CONFIG_HOME).toBe(`${sandbox.root}/config`);
+      expect(env.OPENCODE_CONFIG_DIR).toBe(`${env.XDG_CONFIG_HOME}/opencode`);
+      expect(OPENCODE_PREFLIGHT_TIMEOUT_MS).toBe(90_000);
+      expect(OPENCODE_RUN_TIMEOUT_MS).toBe(300_000);
+      const classifier = readFileSync(new URL('./bump-classifier.ts', import.meta.url), 'utf8');
+      const bump = readFileSync(new URL('./bump.ts', import.meta.url), 'utf8');
+      expect(classifier).toContain('timeout: OPENCODE_PREFLIGHT_TIMEOUT_MS');
+      expect(bump).toContain('timeout: OPENCODE_RUN_TIMEOUT_MS');
     } finally {
       removeClassifierSandbox(sandbox);
     }

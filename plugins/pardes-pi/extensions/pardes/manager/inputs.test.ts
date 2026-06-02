@@ -70,6 +70,25 @@ describe('manager input schemas', () => {
     });
     expect(
       await Effect.runPromise(
+        decodePullRequestCreateInput({
+          agentId: 'agent-12345678',
+          baseBranch: 'release/v1.2_3',
+          body: 'Summary and validation.',
+          browserMode: 'background',
+          title: 'Publish schema substrate in background',
+          workstreamId: 'ws-12345678',
+        }),
+      ),
+    ).toEqual({
+      agentId: 'agent-12345678',
+      baseBranch: 'release/v1.2_3',
+      body: 'Summary and validation.',
+      browserMode: 'background',
+      title: 'Publish schema substrate in background',
+      workstreamId: 'ws-12345678',
+    });
+    expect(
+      await Effect.runPromise(
         decodeAgentSpawnInput({
           baselineBranch: 'release/v1.2_3',
           model: 'openai-codex/gpt-5.4',
@@ -334,7 +353,7 @@ describe('manager input schemas', () => {
     );
   });
 
-  test('rejects oversized bounded text, unsafe PR branches, and non-boolean browser handoff', async () => {
+  test('rejects oversized bounded text, unsafe PR branches, and invalid browser handoff', async () => {
     await expectRejected(
       decodeWorkstreamCreateInput({
         objective: 'Objective',
@@ -440,7 +459,30 @@ describe('manager input schemas', () => {
         agentId: 'agent-1',
         baseBranch: 'main',
         body: 'Summary.',
+        browserMode: 'sideways',
+        title: 'Publish',
+        workstreamId: 'ws-1',
+      }),
+      'pull_request_create',
+    );
+    await expectRejected(
+      decodePullRequestCreateInput({
+        agentId: 'agent-1',
+        baseBranch: 'main',
+        body: 'Summary.',
         openInBrowser: 'yes',
+        title: 'Publish',
+        workstreamId: 'ws-1',
+      }),
+      'pull_request_create',
+    );
+    await expectRejected(
+      decodePullRequestCreateInput({
+        agentId: 'agent-1',
+        baseBranch: 'main',
+        body: 'Summary.',
+        browserMode: 'background',
+        openInBrowser: true,
         title: 'Publish',
         workstreamId: 'ws-1',
       }),

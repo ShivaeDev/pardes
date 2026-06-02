@@ -5,12 +5,16 @@ import {
   discoverRepository,
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
+  unavailableWorktreeCommitProvenance,
+  type WorktreeCommitProvenance,
 } from '../git/index.ts';
 import {
+  type BrowserHandoffShape,
   type GitHubHostedMetadataShape,
   type GitHubIntegrationHealthShape,
   type GitHubPublicationShape,
   type GitHubWatcherShape,
+  makeBrowserHandoff,
   makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
   makeGitHubPublicationService,
@@ -194,6 +198,7 @@ export interface AgentSpawnInput {
 
 export interface AgentStatus {
   readonly agent: AgentRecord;
+  readonly gitProvenance?: WorktreeCommitProvenance;
   readonly runtime: WorkerRuntimeSnapshot | undefined;
 }
 
@@ -277,6 +282,7 @@ export interface AgentReloadResult {
 
 export interface ManagerControllerOptions {
   readonly worktrees?: ManagedWorktreeShape;
+  readonly browserHandoff?: BrowserHandoffShape;
   readonly github?: GitHubPublicationShape;
   readonly githubWatcher?: GitHubWatcherShape;
   readonly githubIntegrationHealth?: GitHubIntegrationHealthShape;
@@ -341,6 +347,7 @@ export class ManagerController {
   private active: ActiveManager | undefined;
   private latestContext: ExtensionContext | undefined;
   private readonly worktrees: ManagedWorktreeShape;
+  private readonly browserHandoff: BrowserHandoffShape;
   private readonly github: GitHubPublicationShape;
   private readonly githubHostedMetadata: GitHubHostedMetadataShape;
   private readonly githubWatcher: GitHubWatcherShape;
@@ -369,6 +376,7 @@ export class ManagerController {
     options: ManagerControllerOptions = {},
   ) {
     this.worktrees = options.worktrees ?? makeManagedWorktreeService();
+    this.browserHandoff = options.browserHandoff ?? makeBrowserHandoff();
     // One fresh controller owns one repository-pinned GitHub.com context. Ambient `gh`
     // credential switches cannot be proved here: callers must reload the manager first so a
     // fresh controller naturally drops this bounded hosted-metadata cache and debt ledger.
@@ -816,6 +824,7 @@ export class ManagerController {
     reviewGates: ReviewGateLifecycleCoordinatorShape,
   ) {
     return yield* makePullRequestPublicationCoordinator({
+      browserHandoff: this.browserHandoff,
       callbacks: {
         appendEventSafely: (event) => this.appendEventSafely(active.store, event),
         observePublishedTerminal: (event) =>
@@ -1770,6 +1779,7 @@ export class ManagerController {
     this: ManagerController,
     rawAgentId: string,
     ctx?: ExtensionContext,
+    includeGitProvenance = false,
   ) {
     const { agentId } = yield* decodeAgentIdInput({ agentId: rawAgentId });
     const state = yield* this.refresh(ctx);
@@ -1779,8 +1789,28 @@ export class ManagerController {
       .status(agentId)
       .pipe(Effect.catch(() => Effect.succeed(undefined)));
     if (runtime) this.liveRuntimes.set(agentId, runtime);
+    const inspectWithProvenance = this.worktrees.inspectWithProvenance;
+    const gitProvenance =
+      includeGitProvenance && agent.worktree && inspectWithProvenance
+        ? yield* inspectWithProvenance(
+            { agentId, managerId: state.managerId, repo: state.repo },
+            agent.worktree,
+          ).pipe(
+            Effect.map(
+              (inspection) =>
+                inspection.provenance ?? unavailableWorktreeCommitProvenance('inspection_failed'),
+            ),
+            Effect.catch(() =>
+              Effect.succeed(unavailableWorktreeCommitProvenance('inspection_failed')),
+            ),
+          )
+        : undefined;
     this.render(ctx);
-    return { agent, runtime } satisfies AgentStatus;
+    return {
+      agent,
+      ...(gitProvenance === undefined ? {} : { gitProvenance }),
+      runtime,
+    } satisfies AgentStatus;
   });
 
   private readonly sendAgentUnlocked = Effect.fnUntraced(function* (

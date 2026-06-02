@@ -1,9 +1,14 @@
-import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import {
+  copyLocalGitRepositoryFixture,
+  copyRemoteGitRepositoryFixture,
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  runGitFixture,
+} from '../test-support.ts';
 import { makeRemoteBaselineResolver, resolveRemoteBaseline } from './baselines.ts';
 import { GitCommandError } from './errors.ts';
 import { discoverRepository } from './repository.ts';
@@ -11,50 +16,37 @@ import type { RepoState } from './schemas.ts';
 import type { GitResult } from './transport.ts';
 
 const temporaryDirectories: string[] = [];
+let restoreGitProtocolEnvironment: (() => void) | undefined;
+
+beforeEach(() => {
+  // These tests intentionally use controlled local file remotes through production Git transport.
+  restoreGitProtocolEnvironment = normalizeControlledLocalRemoteProtocolEnvironment();
+});
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0))
     rmSync(directory, { force: true, recursive: true });
+  restoreGitProtocolEnvironment?.();
+  restoreGitProtocolEnvironment = undefined;
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-}
-
-function configureIdentity(repo: string): void {
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
+  return runGitFixture(cwd, ...args);
 }
 
 function localRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-baseline-local-'));
+  const { repo, root } = copyLocalGitRepositoryFixture('pardes-baseline-local-');
   temporaryDirectories.push(root);
-  const primary = join(root, 'project');
-  execFileSync('git', ['init', '-b', 'main', primary]);
-  configureIdentity(primary);
-  writeFileSync(join(primary, 'README.md'), 'fixture\n');
-  git(primary, 'add', 'README.md');
-  git(primary, 'commit', '-m', 'fixture');
-  return primary;
+  return repo;
 }
 
 function remoteRepository(defaultBranch = 'main') {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-baseline-remote-'));
-  temporaryDirectories.push(root);
-  const origin = join(root, 'origin.git');
-  const primary = join(root, 'project');
-  execFileSync('git', ['init', '--bare', '-b', defaultBranch, origin]);
-  execFileSync('git', ['init', '-b', defaultBranch, primary]);
-  configureIdentity(primary);
-  writeFileSync(join(primary, 'README.md'), 'fixture\n');
-  git(primary, 'add', 'README.md');
-  git(primary, 'commit', '-m', 'fixture');
-  git(primary, 'remote', 'add', 'origin', origin);
-  git(primary, 'push', '-u', 'origin', defaultBranch);
-  const publisher = join(root, 'publisher');
-  execFileSync('git', ['clone', origin, publisher]);
-  configureIdentity(publisher);
-  return { defaultBranch, origin, primary, publisher, root };
+  const { repo: primary, ...fixture } = copyRemoteGitRepositoryFixture(
+    'pardes-baseline-remote-',
+    defaultBranch,
+  );
+  temporaryDirectories.push(fixture.root);
+  return { ...fixture, defaultBranch, primary };
 }
 
 async function repoState(primary: string): Promise<RepoState> {
@@ -70,6 +62,26 @@ function advance(repo: string, name: string): string {
 }
 
 describe('remote baseline resolution', () => {
+  test('normalizes inherited protocol restrictions for controlled local remote fixtures', async () => {
+    process.env.GIT_ALLOW_PROTOCOL = 'https';
+    process.env.GIT_PROTOCOL_FROM_USER = '0';
+    const restorePoisonedEnvironment = normalizeControlledLocalRemoteProtocolEnvironment();
+    const fixture = remoteRepository();
+    const sha = git(fixture.primary, 'rev-parse', 'HEAD');
+
+    try {
+      expect(
+        await Effect.runPromise(resolveRemoteBaseline(await repoState(fixture.primary))),
+      ).toEqual({
+        branch: 'main',
+        remote: 'origin',
+        sha,
+      });
+    } finally {
+      restorePoisonedEnvironment();
+    }
+  });
+
   test("uses origin's configured non-main default branch and supports one validated explicit override", async () => {
     const fixture = remoteRepository('master');
     const repo = await repoState(fixture.primary);
@@ -123,7 +135,7 @@ describe('remote baseline resolution', () => {
     const emptyRoot = mkdtempSync(join(tmpdir(), 'pardes-baseline-empty-origin-'));
     temporaryDirectories.push(emptyRoot);
     const emptyOrigin = join(emptyRoot, 'origin.git');
-    execFileSync('git', ['init', '--bare', '-b', 'main', emptyOrigin]);
+    git(emptyRoot, 'init', '--bare', '-b', 'main', emptyOrigin);
     git(local, 'remote', 'add', 'origin', emptyOrigin);
     const missingDefault = await Effect.runPromise(
       resolveRemoteBaseline(await repoState(local)).pipe(Effect.flip),

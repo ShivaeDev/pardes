@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -15,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Deferred, Effect, Fiber } from 'effect';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
@@ -23,6 +22,7 @@ import {
   type WorktreeLease,
 } from '../git/index.ts';
 import {
+  type BrowserHandoffShape,
   GitHubCommandError,
   type GitHubPublicationShape,
   type GitHubWatcherCallbacks,
@@ -30,6 +30,7 @@ import {
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   makeGitHubPublicationService,
+  makeGitHubWatcherService,
   type PublishedPullRequest,
   type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
@@ -39,7 +40,12 @@ import {
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
 import { makeFileSystemStateStore, STORAGE_STATE_WRITE_MAX_BYTES } from '../storage/index.ts';
-import { requiredValue } from '../test-support.ts';
+import {
+  copyOriginGitRepositoryFixture,
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  requiredValue,
+  runGitFixture,
+} from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
@@ -53,7 +59,8 @@ import {
   type InboxHandoffStart,
   MANAGER_COMPACTION_SAFETY_EXPIRY_MS,
   type ManagerCompactionSafetyScheduler,
-  ManagerController,
+  type ManagerControllerOptions,
+  ManagerController as ProductionManagerController,
 } from './controller.ts';
 import { currentVerificationAttempt, type PullRequestObservation } from './domain.ts';
 import { AgentNotFoundError, formatPardesError } from './errors.ts';
@@ -62,6 +69,27 @@ import { ManagerInputValidationError } from './inputs.ts';
 
 const temporaryDirectories: string[] = [];
 const originalStateDir = process.env.PARDES_PI_STATE_DIR;
+const githubWatcherFixtures: GitHubWatcherShape[] = [];
+let restoreGitProtocolEnvironment: (() => void) | undefined;
+
+beforeEach(() => {
+  // Controller fixtures intentionally use copied local file origins through production Git transport.
+  restoreGitProtocolEnvironment = normalizeControlledLocalRemoteProtocolEnvironment();
+});
+
+class ManagerController extends ProductionManagerController {
+  constructor(pi: ExtensionAPI, options: ManagerControllerOptions = {}) {
+    const githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
+    githubWatcherFixtures.push(githubWatcher);
+    super(pi, { ...options, githubWatcher });
+  }
+}
+
+async function stopGithubWatcherFixtures(): Promise<void> {
+  for (const watcher of githubWatcherFixtures.splice(0).reverse())
+    await Effect.runPromise(watcher.stop());
+}
+
 type MutableWorktreeLease = { -readonly [Key in keyof WorktreeLease]: WorktreeLease[Key] };
 type MutablePersistedAgentPaths = {
   worktree: MutableWorktreeLease;
@@ -69,15 +97,21 @@ type MutablePersistedAgentPaths = {
   sessionFile: string;
 };
 
-afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0))
-    rmSync(directory, { force: true, recursive: true });
-  if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
-  else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+afterEach(async () => {
+  try {
+    await stopGithubWatcherFixtures();
+    for (const directory of temporaryDirectories.splice(0))
+      rmSync(directory, { force: true, recursive: true });
+    if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+    else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+  } finally {
+    restoreGitProtocolEnvironment?.();
+    restoreGitProtocolEnvironment = undefined;
+  }
 });
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  return runGitFixture(cwd, ...args);
 }
 
 function fixturePluginSource(): string {
@@ -100,19 +134,8 @@ function fixturePluginSource(): string {
 }
 
 function fixtureRepository(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pardes-manager-'));
+  const { repo, root } = copyOriginGitRepositoryFixture('pardes-manager-');
   temporaryDirectories.push(root);
-  const origin = join(root, 'origin.git');
-  const repo = join(root, 'project');
-  execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
-  execFileSync('git', ['init', '-b', 'main', repo]);
-  git(repo, 'config', 'user.email', 'pardes@example.test');
-  git(repo, 'config', 'user.name', 'Pardes Test');
-  writeFileSync(join(repo, 'README.md'), 'fixture\n');
-  git(repo, 'add', 'README.md');
-  git(repo, 'commit', '-m', 'fixture');
-  git(repo, 'remote', 'add', 'origin', origin);
-  git(repo, 'push', '-u', 'origin', 'main');
   return repo;
 }
 
@@ -400,7 +423,7 @@ function failingWorkers(onSpawn?: (input: WorkerSpawnInput) => void) {
   return { makeWorkers };
 }
 
-function manualGithubWatcher() {
+function manualGithubWatcher(onReconcile?: () => void) {
   let callbacks: GitHubWatcherCallbacks | undefined;
   let starts = 0;
   let stops = 0;
@@ -410,6 +433,7 @@ function manualGithubWatcher() {
     reconcile: () =>
       Effect.sync(() => {
         reconciliations += 1;
+        onReconcile?.();
       }),
     start: (nextCallbacks) =>
       Effect.sync(() => {
@@ -531,6 +555,20 @@ function manualGithubWatcher() {
   };
 }
 
+function recordingBrowserHandoff() {
+  const requests: Array<{ readonly requestedMode: string; readonly url: string }> = [];
+  const browserHandoff: BrowserHandoffShape = {
+    handoff: (url, requestedMode) =>
+      Effect.sync(() => {
+        requests.push({ requestedMode, url });
+        return requestedMode === 'none'
+          ? ({ requestedMode, status: 'not_requested' } as const)
+          : ({ openedMode: requestedMode, requestedMode, status: 'opened' } as const);
+      }),
+  };
+  return { browserHandoff, requests };
+}
+
 function observedPullRequest(
   overrides: Partial<PullRequestObservation> = {},
 ): PullRequestObservation {
@@ -574,7 +612,6 @@ function stubGithub(
           draft: true,
           headBranch: input.headBranch,
           number,
-          openedInBrowser: input.openInBrowser === true,
           status: 'open' as const,
           title: input.title,
           url: `https://github.test/acme/project/pull/${number}`,
@@ -936,6 +973,7 @@ describe('manager controller', () => {
     const restored = new ManagerController(fixture.pi);
     await Effect.runPromise(restored.restore(fixture.ctx));
     expect(restored.snapshot()?.workstreams[created.id]).toEqual(created);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
 
     await Effect.runPromise(controller.deactivate(fixture.ctx));
     expect(controller.isActive()).toBe(false);
@@ -5199,6 +5237,28 @@ describe('manager controller', () => {
     expect(deactivatedWatcher.stops()).toBe(1);
   });
 
+  test('test fixture cleanup stops every tracked watcher when restored controllers remain active', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const activatedWatcher = manualGithubWatcher();
+    const activated = new ManagerController(fixture.pi, {
+      githubWatcher: activatedWatcher.watcher,
+    });
+    await Effect.runPromise(activated.activate(fixture.ctx));
+    const restoredWatcher = manualGithubWatcher();
+    const restored = new ManagerController(fixture.pi, { githubWatcher: restoredWatcher.watcher });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(activatedWatcher.stops()).toBe(0);
+    expect(restoredWatcher.stops()).toBe(1);
+    await stopGithubWatcherFixtures();
+    expect(activatedWatcher.stops()).toBe(1);
+    expect(restoredWatcher.stops()).toBe(2);
+  });
+
   test('reconciles after publication and treats a deduplicated merged signal as observation only', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -7760,7 +7820,9 @@ describe('manager controller', () => {
     const fixture = harness(repo);
     const workers = stubWorkers();
     const github = stubGithub();
+    const browser = recordingBrowserHandoff();
     const controller = new ManagerController(fixture.pi, {
+      browserHandoff: browser.browserHandoff,
       github: github.github,
       makeWorkers: workers.makeWorkers,
     });
@@ -7793,6 +7855,7 @@ describe('manager controller', () => {
           agentId: agent.id,
           baseBranch: 'main',
           body: 'Summary and validation.',
+          browserMode: 'background',
           title: 'Publish the fixture',
           workstreamId: workstream.id,
         },
@@ -7821,6 +7884,14 @@ describe('manager controller', () => {
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
+    expect(published.browserHandoff).toEqual({
+      openedMode: 'background',
+      requestedMode: 'background',
+      status: 'opened',
+    });
+    expect(browser.requests).toEqual([
+      { requestedMode: 'background', url: 'https://github.test/acme/project/pull/42' },
+    ]);
     expect(published.pullRequest).toMatchObject({
       agentId: agent.id,
       baseBranch: 'main',
@@ -7864,6 +7935,108 @@ describe('manager controller', () => {
     expect(github.reservations).toHaveLength(1);
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('persists and settles a verified review gate before handing off its exact verified URL', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub({ status: 'closed' });
+    const redirectedUrl = 'https://attacker.test/acme/project/pull/42';
+    let controller: ManagerController;
+    const watcher = manualGithubWatcher(() => {
+      const statePath = join(activationStateDir(fixture.entries), 'state.json');
+      const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+        pullRequests: Record<string, { url: string }>;
+      };
+      requiredValue(persisted.pullRequests['pr-42']).url = redirectedUrl;
+      writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+      const snapshot = requiredValue(controller.snapshot());
+      (requiredValue(snapshot.pullRequests['pr-42']) as { url: string }).url = redirectedUrl;
+    });
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const browserHandoff: BrowserHandoffShape = {
+      handoff: (url, requestedMode) =>
+        Effect.gen(function* () {
+          expect(url).toBe('https://github.test/acme/project/pull/42');
+          expect(requestedMode).toBe('background');
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return {
+            attemptedMode: 'background' as const,
+            failure: { code: 'ENOENT' as const, kind: 'browser_open_failed' as const },
+            requestedMode: 'background' as const,
+            status: 'failed' as const,
+          };
+        }),
+    };
+    controller = new ManagerController(fixture.pi, {
+      browserHandoff,
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'post-persistence browser handoff',
+    );
+    writeFileSync(join(requiredValue(agent.worktree).path, 'handoff.txt'), 'handoff fixture\n');
+    git(requiredValue(agent.worktree).path, 'add', 'handoff.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'handoff fixture');
+
+    const publication = Effect.runFork(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Persist before browser handoff.',
+          browserMode: 'background',
+          title: 'Post-persistence browser handoff',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+
+    expect(controller.snapshot()?.pullRequests['pr-42']).toMatchObject({
+      agentId: agent.id,
+      id: 'pr-42',
+      number: 42,
+      status: 'closed',
+      url: redirectedUrl,
+      workstreamId: workstream.id,
+    });
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+    expect(controller.snapshot()?.inbox).toEqual([
+      expect.objectContaining({ pullRequestId: 'pr-42', type: 'closed_unmerged' }),
+    ]);
+    expect(watcher.associations()).toEqual([]);
+    expect(watcher.reconciliations()).toBe(1);
+    expect(
+      readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
+    ).toContain('pull_request_published');
+
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    const published = await Effect.runPromise(Fiber.join(publication));
+    expect(published).toMatchObject({
+      browserHandoff: {
+        attemptedMode: 'background',
+        failure: { code: 'ENOENT', kind: 'browser_open_failed' },
+        requestedMode: 'background',
+        status: 'failed',
+      },
+      openedInBrowser: false,
+      pullRequest: { id: 'pr-42', url: redirectedUrl },
+    });
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
   test('durably clears a collided remote candidate before reserving its readable fallback', async () => {

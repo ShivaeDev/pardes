@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Effect, Option, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
+import { runGitFixture } from '../test-support.ts';
 import { decodeGitHubJson } from './codecs.ts';
 import {
   GITHUB_COMMAND_MAX_BUFFER_BYTES,
@@ -58,6 +59,32 @@ describe('GitHub CLI transport', () => {
       expect(existsSync(marker)).toBe(true);
     } finally {
       rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  test('uses explicit cwd for Git subprocesses despite inherited repository redirection', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pardes-github-git-environment-'));
+    const first = join(root, 'first');
+    const second = join(root, 'second');
+    const previousGitDir = process.env.GIT_DIR;
+    try {
+      runGitFixture(root, 'init', '-b', 'main', first);
+      runGitFixture(root, 'init', '-b', 'main', second);
+      process.env.GIT_DIR = join(second, '.git');
+
+      expect(
+        await Effect.runPromise(
+          makeExecFileGitHubCommandRunner().run({
+            args: ['rev-parse', '--git-dir'],
+            command: 'git',
+            cwd: first,
+          }),
+        ),
+      ).toEqual({ stderr: '', stdout: '.git\n' });
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+      rmSync(root, { force: true, recursive: true });
     }
   });
 

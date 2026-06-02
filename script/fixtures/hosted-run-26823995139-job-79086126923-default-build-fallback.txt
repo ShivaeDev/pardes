@@ -1,0 +1,3 @@
+! agent "bump" is a subagent, not a primary agent. Falling back to default agent
+{"type":"tool_use","part":{"tool":"edit","state":{"status":"completed","input":{"filePath":"changelog/statusline.md","oldString":"old","newString":"new"}}}}
+{"type":"text","part":{"text":"Done. I bumped the plugin version and updated the changelog."}}

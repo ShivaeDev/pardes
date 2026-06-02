@@ -8,6 +8,8 @@ import {
   PULL_REQUEST_BODY_MAX_LENGTH,
   PULL_REQUEST_BRANCH_PATTERN,
   PULL_REQUEST_TITLE_MAX_LENGTH,
+  PullRequestBrowserModeSchema,
+  pullRequestBrowserOptionsAreCompatible,
   PullRequestBodySchema as SharedPullRequestBodySchema,
   PullRequestBranchSchema as SharedPullRequestBranchSchema,
   PullRequestTitleSchema as SharedPullRequestTitleSchema,
@@ -103,10 +105,15 @@ export const PullRequestCreateInputSchema = Schema.Struct({
   agentId: ManagerInputIdSchema,
   baseBranch: PullRequestBranchSchema,
   body: PullRequestBodySchema,
+  browserMode: Schema.optionalKey(PullRequestBrowserModeSchema),
   openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
   workstreamId: ManagerInputIdSchema,
-});
+}).check(
+  Schema.makeFilter(pullRequestBrowserOptionsAreCompatible, {
+    description: 'browserMode agrees with the compatibility openInBrowser alias when both are set',
+  }),
+);
 export type PullRequestCreateInput = typeof PullRequestCreateInputSchema.Type;
 
 export const AgentSpawnInputSchema = Schema.Struct({

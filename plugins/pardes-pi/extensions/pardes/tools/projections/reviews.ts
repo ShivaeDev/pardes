@@ -1,6 +1,11 @@
 import type { ManagerState, PullRequestRecord } from '../../manager/index.ts';
 import { pullRequestNeedsAttention } from '../../manager/index.ts';
-import { boundedRows, CONTROL_PLANE_MAX_ROWS, compactText, summaryAttentionToken } from './core.ts';
+import {
+  CONTROL_PLANE_MAX_ROWS,
+  structuralRows,
+  structuralValue,
+  summaryAttentionToken,
+} from './core.ts';
 
 export const COMPOSITION_MAX_CLUSTERS = 4;
 export const COMPOSITION_MAX_UNCERTAIN_GATES = 3;
@@ -33,32 +38,39 @@ export function reviewLines(state: ManagerState, filter: ReviewFilter, maxRows?:
     if (filter === 'attention') return pullRequestNeedsAttention(pullRequest);
     return pullRequest.status === 'open';
   });
-  const lines = [
-    `review gates: ${openCount} open · ${attentionCount} attention · ${pullRequests.length} total (${matching.length} ${filter})`,
-    ...(state.githubRateMetadataUnavailableAt === undefined
-      ? []
-      : [
-          'global GitHub warning [external-metadata]: rate metadata unavailable or invalid · watcher polling deferred',
-        ]),
-    ...matching.flatMap((pullRequest) => {
-      const label = pullRequest.number === undefined ? pullRequest.id : `#${pullRequest.number}`;
-      const draft = pullRequest.draft ? 'draft' : pullRequest.status;
-      const observation = pullRequest.observation;
-      const hints = observation
-        ? `ci:${observation.ci} · review:${observation.reviewDecision} · merge:${observation.mergeable}`
-        : 'observation:none';
-      const warnings = reviewWarningMetadata(pullRequest);
-      return [
-        `${label} [${draft}] ${pullRequest.workstreamId} · ${pullRequest.agentId} · ${hints}${warnings.length === 0 ? '' : ` · ⚠ ${warnings.join(',')}`}`,
-        ...(pullRequest.watcherFailure === undefined
+  return structuralRows(
+    {
+      authoredLines: [
+        `review gates: ${openCount} open · ${attentionCount} attention · ${pullRequests.length} total (${matching.length} ${filter})`,
+        ...(state.githubRateMetadataUnavailableAt === undefined
           ? []
           : [
-              `↳ ${label} watcher diagnosis [${pullRequest.watcherFailure.kind}]: ${pullRequest.watcherFailure.summary}`,
+              'global GitHub warning [external-metadata]: rate metadata unavailable or invalid · watcher polling deferred',
             ]),
-      ];
-    }),
-  ];
-  return boundedRows(lines, maxRows);
+      ],
+      itemLines: matching.map((pullRequest) => {
+        const label =
+          pullRequest.number === undefined
+            ? structuralValue(pullRequest.id)
+            : `#${pullRequest.number}`;
+        const draft = pullRequest.draft ? 'draft' : pullRequest.status;
+        const observation = pullRequest.observation;
+        const hints = observation
+          ? `ci:${observation.ci} · review:${observation.reviewDecision} · merge:${observation.mergeable}`
+          : 'observation:none';
+        const warnings = reviewWarningMetadata(pullRequest);
+        return [
+          `${label} [${draft}] ${structuralValue(pullRequest.workstreamId)} · ${structuralValue(pullRequest.agentId)} · ${hints}${warnings.length === 0 ? '' : ` · ⚠ ${warnings.join(',')}`}`,
+          ...(pullRequest.watcherFailure === undefined
+            ? []
+            : [
+                `↳ ${label} watcher diagnosis [${pullRequest.watcherFailure.kind}]: ${pullRequest.watcherFailure.summary}`,
+              ]),
+        ];
+      }),
+    },
+    maxRows,
+  );
 }
 
 type CompositionEvidence =
@@ -171,9 +183,7 @@ function compositionGateLabels(gates: ReadonlyArray<KnownCompositionEvidence>): 
 
 function compositionPathPreview(label: string, paths: ReadonlyArray<string>): string {
   if (paths.length === 0) return `${label}:none`;
-  const visible = paths
-    .slice(0, COMPOSITION_MAX_PATHS_PER_ROW)
-    .map((path) => compactText(path, 42));
+  const visible = paths.slice(0, COMPOSITION_MAX_PATHS_PER_ROW).map(structuralValue);
   return `${label}(${paths.length}):${visible.join(',')}${paths.length > visible.length ? `,…+${paths.length - visible.length}` : ''}`;
 }
 
@@ -202,23 +212,29 @@ export function compositionLines(state: ManagerState, maxRows?: number): string 
   const visibleClusters = clusters.slice(0, COMPOSITION_MAX_CLUSTERS);
   const omittedUncertain = uncertain.length - visibleUncertain.length;
   const omittedClusters = clusters.length - visibleClusters.length;
-  return boundedRows(
-    [
-      `composition plan: ${evidence.length} open gates · ${clusters.length} software-known clusters (${independentClusters} independent/${overlapClusters} overlap) · ${uncertain.length} uncertain`,
-      'merge-wave hint: user controls merges; pair independent clusters only; serialize overlaps; after each merge refresh/re-audit remainder; inspect uncertain gates first',
-      ...visibleUncertain.map(uncertainCompositionLine),
-      ...visibleClusters.map((cluster, index) =>
-        cluster.gates.length === 1
-          ? `cluster ${index + 1} [independent] ${compositionGateLabels(cluster.gates)} · wave:may pair · ${compositionPathPreview('paths', cluster.paths)}`
-          : `cluster ${index + 1} [overlap:${cluster.gates.length}] ${compositionGateLabels(cluster.gates)} · sequence:merge one then refresh/re-audit remainder · ${compositionPathPreview('paths', cluster.paths)}`,
-      ),
-      ...(omittedUncertain === 0 && omittedClusters === 0
-        ? []
-        : [
-            `… omitted by composition caps: ${omittedClusters} software-known clusters · ${omittedUncertain} uncertain gates`,
-          ]),
-      `bounds: first ${COMPOSITION_MAX_CLUSTERS} software-known clusters · first ${COMPOSITION_MAX_UNCERTAIN_GATES} uncertain gates · first ${COMPOSITION_MAX_GATES_PER_CLUSTER} gates/cluster · first ${COMPOSITION_MAX_PATHS_PER_ROW} paths/row`,
-    ],
+  return structuralRows(
+    {
+      authoredLines: [
+        `composition plan: ${evidence.length} open gates · ${clusters.length} software-known clusters (${independentClusters} independent/${overlapClusters} overlap) · ${uncertain.length} uncertain`,
+        'merge-wave hint: user controls merges; pair independent clusters only; serialize overlaps; after each merge refresh/re-audit remainder; inspect uncertain gates first',
+      ],
+      itemLines: [
+        ...visibleUncertain.map(uncertainCompositionLine),
+        ...visibleClusters.map((cluster, index) =>
+          cluster.gates.length === 1
+            ? `cluster ${index + 1} [independent] ${compositionGateLabels(cluster.gates)} · wave:may pair · ${compositionPathPreview('paths', cluster.paths)}`
+            : `cluster ${index + 1} [overlap:${cluster.gates.length}] ${compositionGateLabels(cluster.gates)} · sequence:merge one then refresh/re-audit remainder · ${compositionPathPreview('paths', cluster.paths)}`,
+        ),
+      ],
+      retrievalHintLines: [
+        ...(omittedUncertain === 0 && omittedClusters === 0
+          ? []
+          : [
+              `… omitted by composition caps: ${omittedClusters} software-known clusters · ${omittedUncertain} uncertain gates`,
+            ]),
+        `bounds: first ${COMPOSITION_MAX_CLUSTERS} software-known clusters · first ${COMPOSITION_MAX_UNCERTAIN_GATES} uncertain gates · first ${COMPOSITION_MAX_GATES_PER_CLUSTER} gates/cluster · first ${COMPOSITION_MAX_PATHS_PER_ROW} paths/row`,
+      ],
+    },
     maxRows ?? CONTROL_PLANE_MAX_ROWS,
   );
 }

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -8,7 +7,7 @@ import type { ExtensionAPI, Theme, ToolDefinition } from '@earendil-works/pi-cod
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../reporting/index.ts';
-import { requiredValue } from '../test-support.ts';
+import { requiredValue, runGitFixture } from '../test-support.ts';
 import pardesWorker, {
   boundedGitDiagnostic,
   boundedVerifierPathRows,
@@ -74,6 +73,47 @@ if (command === 'rev-parse') {
   );
   chmodSync(executable, 0o755);
   return `${bin}:${process.env.PATH ?? ''}`;
+}
+
+interface ChildProfileEnvironment {
+  readonly baseline: string | undefined;
+  readonly profile: string | undefined;
+  readonly reviewed: string | undefined;
+  readonly root: string | undefined;
+  readonly stateDir: string | undefined;
+}
+
+function childProfileEnvironment(): ChildProfileEnvironment {
+  return {
+    baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+    profile: process.env.PARDES_AGENT_PROFILE,
+    reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
+    root: process.env.PARDES_WORKTREE_ROOT,
+    stateDir: process.env.PARDES_PI_STATE_DIR,
+  };
+}
+
+function restoreChildProfileEnvironment(previous: ChildProfileEnvironment): void {
+  if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
+  else process.env.PARDES_WORKTREE_ROOT = previous.root;
+  if (previous.stateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+  else process.env.PARDES_PI_STATE_DIR = previous.stateDir;
+  if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
+  else process.env.PARDES_AGENT_PROFILE = previous.profile;
+  if (previous.baseline === undefined) delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+  else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
+  if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+  else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
+}
+
+function enterWorkerProfileEnvironment(worktree: string): () => void {
+  const previous = childProfileEnvironment();
+  process.env.PARDES_WORKTREE_ROOT = worktree;
+  process.env.PARDES_PI_STATE_DIR = join(worktree, 'pardes-state');
+  process.env.PARDES_AGENT_PROFILE = 'worker';
+  delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+  delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+  return () => restoreChildProfileEnvironment(previous);
 }
 
 afterEach(() => {
@@ -336,10 +376,9 @@ describe('verifier child profile', () => {
 
   test('executes fixed bounded captured-head evidence', async () => {
     const { worktree } = createFixture();
-    const git = (...args: string[]) =>
-      execFileSync('git', args, { cwd: worktree, encoding: 'utf8' }).trim();
+    const git = (...args: string[]) => runGitFixture(worktree, ...args);
     rmSync(join(worktree, 'escape'), { recursive: true });
-    execFileSync('git', ['init', '-b', 'main', worktree]);
+    git('init', '-b', 'main');
     git('config', 'user.email', 'pardes@example.test');
     git('config', 'user.name', 'Pardes Test');
     writeFileSync(join(worktree, 'README.md'), 'baseline\n');
@@ -352,10 +391,12 @@ describe('verifier child profile', () => {
     const reviewed = git('rev-parse', 'HEAD');
     const previous = {
       baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+      gitDir: process.env.GIT_DIR,
       profile: process.env.PARDES_AGENT_PROFILE,
       reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
       root: process.env.PARDES_WORKTREE_ROOT,
     };
+    process.env.GIT_DIR = join(worktree, 'missing.git');
     process.env.PARDES_WORKTREE_ROOT = worktree;
     process.env.PARDES_AGENT_PROFILE = 'verifier';
     process.env.PARDES_VERIFICATION_BASELINE_SHA = baseline;
@@ -386,6 +427,8 @@ describe('verifier child profile', () => {
         },
       });
     } finally {
+      if (previous.gitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previous.gitDir;
       if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
       else process.env.PARDES_WORKTREE_ROOT = previous.root;
       if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
@@ -401,18 +444,16 @@ describe('verifier child profile', () => {
 describe('worker child reporting tool rendering', () => {
   test('uses bounded self-shell call and result renderers with length-only previews', () => {
     const { worktree } = createFixture();
-    const previous = {
-      baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
-      profile: process.env.PARDES_AGENT_PROFILE,
-      reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
-      root: process.env.PARDES_WORKTREE_ROOT,
-      stateDir: process.env.PARDES_PI_STATE_DIR,
+    const previous = childProfileEnvironment();
+    const inheritedVerifier = {
+      baseline: 'a'.repeat(40),
+      profile: 'verifier',
+      reviewed: 'b'.repeat(40),
+      root: '/tmp/inherited-verifier-root',
+      stateDir: '/tmp/inherited-verifier-state',
     };
-    process.env.PARDES_WORKTREE_ROOT = worktree;
-    process.env.PARDES_PI_STATE_DIR = join(worktree, 'pardes-state');
-    process.env.PARDES_AGENT_PROFILE = 'worker';
-    delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
-    delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+    restoreChildProfileEnvironment(inheritedVerifier);
+    const restoreWorkerProfile = enterWorkerProfileEnvironment(worktree);
     try {
       const tools: ToolDefinition[] = [];
       pardesWorker({
@@ -497,16 +538,12 @@ describe('worker child reporting tool rendering', () => {
         ['result', 'first line', 'second line'],
       );
     } finally {
-      if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
-      else process.env.PARDES_WORKTREE_ROOT = previous.root;
-      if (previous.stateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
-      else process.env.PARDES_PI_STATE_DIR = previous.stateDir;
-      if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
-      else process.env.PARDES_AGENT_PROFILE = previous.profile;
-      if (previous.baseline === undefined) delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
-      else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
-      if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
-      else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
+      try {
+        restoreWorkerProfile();
+        expect(childProfileEnvironment()).toEqual(inheritedVerifier);
+      } finally {
+        restoreChildProfileEnvironment(previous);
+      }
     }
   });
 });

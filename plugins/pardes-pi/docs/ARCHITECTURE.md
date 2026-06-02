@@ -52,7 +52,8 @@ extensions/pardes/
 │   ├── attention-handoff.ts      # await_user_feedback registration
 │   ├── question.ts               # interactive decision question
 │   ├── registration.ts           # shared adapter helpers
-│   └── projections.ts            # bounded model-facing projections
+│   ├── projections.ts            # shared bounded-rendering core
+│   └── *-projections.ts          # capability-owned model-facing projections
 ├── github/                       # GitHub publication and watcher integration
 ├── git/                          # discovery, baselines, writing leases, detached review checkouts
 ├── reporting/                    # durable report semantics and bounded retrieval

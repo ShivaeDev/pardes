@@ -213,17 +213,38 @@ const UNSAFE_DIRECTIONAL_PATTERN = new RegExp(
   '[\\u0080-\\u009f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]',
   'g',
 );
+const SECRET_KEY =
+  '(?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)';
+const NON_AUTHORIZATION_SECRET_KEY =
+  '(?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)';
 const AUTHORIZATION_FIELD_PATTERN =
   /(^|[^a-zA-Z0-9_-])(["']?)(authorization)\2(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gim;
-const ESCAPED_SECRET_KEY_PATTERN =
-  /\\+["'](?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)/im;
-const MULTILINE_SECRET_VALUE_PATTERN =
-  /(^|[^a-zA-Z0-9_-])(["']?)(?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)\2\s*[:=]\s*(?:[|>][+-]?[ \t]*(?:\r?\n|$)|["']{3}|["'][^"'\r\n]*(?:\r?\n|$)|\r?\n)/im;
-const QUOTED_SECRET_ASSIGNMENT_PATTERN =
-  /(^|[^a-zA-Z0-9_-])(["']?)((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))\2(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gim;
-const AMBIGUOUS_UNQUOTED_SECRET_LINE_PATTERN =
-  /(^|[^a-zA-Z0-9_-])(["']?)((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))\2(\s*[:=]\s*)(?!["']|\[REDACTED\])[^\r\n]*/gim;
-const COMPACT_JWT_PATTERN = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*(?![A-Za-z0-9_-])/g;
+const ESCAPED_SECRET_KEY_PATTERN = new RegExp(`\\\\+["']${SECRET_KEY}\\\\+["']\\s*[:=]`, 'im');
+const SECRET_KEY_INTRODUCTION_PATTERN = new RegExp(
+  `(^|[^a-zA-Z0-9_-])(?:\\\\+["']|["'])?${SECRET_KEY}(?:\\\\+["']|["'])?\\s*[:=]`,
+  'im',
+);
+const MULTILINE_SECRET_VALUE_PATTERN = new RegExp(
+  `(^|[^a-zA-Z0-9_-])(["']?)${SECRET_KEY}\\2\\s*[:=]\\s*(?:[|>][+-]?[ \\t]*(?:\\r?\\n|$)|["']{3}|["'][^"'\\r\\n]*(?:\\r?\\n|$)|\\r?\\n)`,
+  'im',
+);
+const QUOTED_SECRET_ASSIGNMENT_PATTERN = new RegExp(
+  `(^|[^a-zA-Z0-9_-])(["']?)(${NON_AUTHORIZATION_SECRET_KEY})\\2(\\s*[:=]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*')`,
+  'gim',
+);
+const SECRET_QUOTED_VALUE_INTRODUCTION_PATTERN = new RegExp(
+  `(^|[^a-zA-Z0-9_-])(["']?)${SECRET_KEY}\\2\\s*[:=]\\s*["']`,
+  'im',
+);
+const AMBIGUOUS_UNQUOTED_SECRET_LINE_PATTERN = new RegExp(
+  `(^|[^a-zA-Z0-9_-])(["']?)(${NON_AUTHORIZATION_SECRET_KEY})\\2(\\s*[:=]\\s*)(?!["']|\\[REDACTED\\])[^\\r\\n]*`,
+  'gim',
+);
+const JSON_UNICODE_ESCAPE_PATTERN = /\\+u([0-9a-fA-F]{4})/g;
+const PEM_KEY_FRAGMENT_PATTERN =
+  /-----BEGIN [^-\r\n]*(?:PRIVATE|KEY)[^-\r\n]*-----[\s\S]*?(?:-----END [^-\r\n]+-----|$)/gi;
+const COMPACT_JWT_CANDIDATE_PATTERN =
+  /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{1,1024})\.([A-Za-z0-9_-]{1,16384})\.([A-Za-z0-9_-]{0,2048})(?![A-Za-z0-9_-])/g;
 const AMBIGUOUS_SECRET_EXCERPT_MARKER =
   '[REDACTED EXCERPT: ambiguous secret-bearing serialization]';
 const SAFE_DISCUSSION_AUTHOR_PATTERN = /^[a-zA-Z0-9-]+(?:\[bot\])?$/;
@@ -233,28 +254,67 @@ function escapedCodePoint(value: string): string {
   return codePoint === undefined ? '' : `\\u${codePoint.toString(16).padStart(4, '0')}`;
 }
 
+function canonicalizeJsonUnicodeEscapes(source: string): string {
+  return source.replace(JSON_UNICODE_ESCAPE_PATTERN, (_matched, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+}
+
+function isJoseHeaderSegment(segment: string): boolean {
+  try {
+    const source = Buffer.from(segment, 'base64url');
+    if (source.toString('base64url') !== segment) return false;
+    const decoded = JSON.parse(source.toString('utf8')) as unknown;
+    return (
+      decoded !== null &&
+      typeof decoded === 'object' &&
+      !Array.isArray(decoded) &&
+      'alg' in decoded &&
+      typeof decoded.alg === 'string' &&
+      decoded.alg.length > 0 &&
+      decoded.alg.length <= 100
+    );
+  } catch {
+    return false;
+  }
+}
+
+function redactCompactJwts(source: string): string {
+  return source.replace(COMPACT_JWT_CANDIDATE_PATTERN, (matched, prefix: string, header: string) =>
+    isJoseHeaderSegment(header) ? `${prefix}[REDACTED JWT]` : matched,
+  );
+}
+
 function redactHostedExcerpt(source: string): string {
-  const structural = source
+  const terminalSafe = source
     .replace(ANSI_ESCAPE_PATTERN, '')
-    .replace(TERMINAL_CONTROL_PATTERN, '')
+    .replace(TERMINAL_CONTROL_PATTERN, '');
+  const canonicalizedJsonEscapes = canonicalizeJsonUnicodeEscapes(terminalSafe);
+  const structural = terminalSafe
     .replace(UNSAFE_DIRECTIONAL_PATTERN, escapedCodePoint)
+    .replace(PEM_KEY_FRAGMENT_PATTERN, '[REDACTED PEM]')
     .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g, '[REDACTED PEM]');
   if (
     ESCAPED_SECRET_KEY_PATTERN.test(structural) ||
-    MULTILINE_SECRET_VALUE_PATTERN.test(structural)
+    MULTILINE_SECRET_VALUE_PATTERN.test(structural) ||
+    (canonicalizedJsonEscapes !== terminalSafe &&
+      SECRET_KEY_INTRODUCTION_PATTERN.test(canonicalizedJsonEscapes))
   )
     return AMBIGUOUS_SECRET_EXCERPT_MARKER;
-  return structural
+  const quotedRedacted = structural
     .replace(AUTHORIZATION_FIELD_PATTERN, '$1$2$3$2$4[REDACTED]')
-    .replace(QUOTED_SECRET_ASSIGNMENT_PATTERN, '$1$2$3$2$4[REDACTED]')
-    .replace(AMBIGUOUS_UNQUOTED_SECRET_LINE_PATTERN, '$1$2$3$2$4[REDACTED]')
-    .replace(
-      /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/g,
-      '[REDACTED TOKEN]',
-    )
-    .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED AWS KEY]')
-    .replace(COMPACT_JWT_PATTERN, '[REDACTED JWT]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+={0,2}/gi, 'Bearer [REDACTED]');
+    .replace(QUOTED_SECRET_ASSIGNMENT_PATTERN, '$1$2$3$2$4[REDACTED]');
+  if (SECRET_QUOTED_VALUE_INTRODUCTION_PATTERN.test(quotedRedacted))
+    return AMBIGUOUS_SECRET_EXCERPT_MARKER;
+  return redactCompactJwts(
+    quotedRedacted
+      .replace(AMBIGUOUS_UNQUOTED_SECRET_LINE_PATTERN, '$1$2$3$2$4[REDACTED]')
+      .replace(
+        /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/g,
+        '[REDACTED TOKEN]',
+      )
+      .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED AWS KEY]'),
+  ).replace(/\bBearer\s+[A-Za-z0-9._~+/-]+={0,2}/gi, 'Bearer [REDACTED]');
 }
 
 function excerpt(source: string, offset: number, limit: number) {

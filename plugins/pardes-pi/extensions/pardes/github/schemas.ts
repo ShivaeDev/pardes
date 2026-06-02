@@ -29,6 +29,39 @@ export const MAX_GITHUB_HOSTED_CHECKS = 50;
 export const GITHUB_DISCUSSION_BODY_MAX_LENGTH = 65_536;
 export const GITHUB_DISCUSSION_AUTHOR_MAX_LENGTH = 100;
 export const GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH = 160;
+export const PULL_REQUEST_BROWSER_MODES = ['none', 'background', 'foreground'] as const;
+
+export const PullRequestBrowserModeSchema = Schema.Literals(PULL_REQUEST_BROWSER_MODES);
+export type PullRequestBrowserMode = typeof PullRequestBrowserModeSchema.Type;
+
+export interface PullRequestBrowserOptions {
+  readonly browserMode?: PullRequestBrowserMode;
+  /** Compatibility alias retained for callers predating explicit modes. */
+  readonly openInBrowser?: boolean;
+}
+
+export function pullRequestBrowserOptionsAreCompatible(
+  options: PullRequestBrowserOptions,
+): boolean {
+  return (
+    options.browserMode === undefined ||
+    options.openInBrowser === undefined ||
+    options.browserMode === (options.openInBrowser ? 'foreground' : 'none')
+  );
+}
+
+export function resolvePullRequestBrowserMode(
+  options: PullRequestBrowserOptions,
+): PullRequestBrowserMode {
+  return options.browserMode ?? (options.openInBrowser ? 'foreground' : 'none');
+}
+
+const PullRequestBrowserOptionsAreCompatible = Schema.makeFilter(
+  pullRequestBrowserOptionsAreCompatible,
+  {
+    description: 'browserMode agrees with the compatibility openInBrowser alias when both are set',
+  },
+);
 
 export const GitHubDiscussionSurfaceSchema = Schema.Literals([
   'issue_comment',
@@ -221,6 +254,7 @@ export const HumanPublishedReviewBranchReservationSchema = Schema.Struct({
 export const PublishPullRequestInputSchema = Schema.Struct({
   baseBranch: PullRequestBranchSchema,
   body: PullRequestBodySchema,
+  browserMode: Schema.optionalKey(PullRequestBrowserModeSchema),
   cwd: NonEmptyStringSchema,
   headBranch: PersistedPublishedReviewBranchSchema,
   headSha: FullCommitShaSchema,
@@ -228,7 +262,7 @@ export const PublishPullRequestInputSchema = Schema.Struct({
   legacyExistingPullRequestNumber: Schema.optionalKey(PositiveIntegerSchema),
   openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
-});
+}).check(PullRequestBrowserOptionsAreCompatible);
 
 export const SyncExistingPullRequestInputSchema = Schema.Struct({
   cwd: NonEmptyStringSchema,

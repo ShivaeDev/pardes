@@ -35,6 +35,7 @@ import {
   type PublishPullRequestInput,
   type PullRequestDiscussionSnapshot,
   type ReservePublishedReviewBranchInput,
+  resolvePullRequestBrowserMode,
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
@@ -567,14 +568,20 @@ function stubGithub(
         const currentOverrides =
           typeof overrides === 'function' ? overrides(publications.length - 1) : overrides;
         const number = currentOverrides.number ?? 42;
+        const requestedMode = resolvePullRequestBrowserMode(input);
+        const browserHandoff =
+          requestedMode === 'none'
+            ? ({ requestedMode, status: 'not_requested' } as const)
+            : ({ openedMode: requestedMode, requestedMode, status: 'opened' } as const);
         return {
           action: 'created' as const,
           baseBranch: input.baseBranch,
           body: input.body,
+          browserHandoff,
           draft: true,
           headBranch: input.headBranch,
           number,
-          openedInBrowser: input.openInBrowser === true,
+          openedInBrowser: browserHandoff.status === 'opened',
           status: 'open' as const,
           title: input.title,
           url: `https://github.test/acme/project/pull/${number}`,
@@ -7687,6 +7694,7 @@ describe('manager controller', () => {
           agentId: agent.id,
           baseBranch: 'main',
           body: 'Summary and validation.',
+          browserMode: 'background',
           title: 'Publish the fixture',
           workstreamId: workstream.id,
         },
@@ -7705,6 +7713,7 @@ describe('manager controller', () => {
     expect(github.publications[0]).toEqual({
       baseBranch: 'main',
       body: 'Summary and validation.',
+      browserMode: 'background',
       cwd: requiredValue(agent.worktree).path,
       headBranch: publishedHeadBranch,
       headSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
@@ -7715,6 +7724,11 @@ describe('manager controller', () => {
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
+    expect(published.browserHandoff).toEqual({
+      openedMode: 'background',
+      requestedMode: 'background',
+      status: 'opened',
+    });
     expect(published.pullRequest).toMatchObject({
       agentId: agent.id,
       baseBranch: 'main',

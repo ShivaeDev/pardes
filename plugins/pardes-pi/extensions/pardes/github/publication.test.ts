@@ -6,7 +6,10 @@ import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
 import {
+  type BrowserOpenInvocation,
+  type BrowserOpenRunnerShape,
   GitHubCommandError,
+  makeBrowserHandoff,
   makeGitHubHostedMetadataAdapter,
   makeGitHubPublicationService,
 } from './index.ts';
@@ -63,6 +66,17 @@ const input = {
   headSha: 'a'.repeat(40),
   title: 'Publish the bounded slice',
 };
+
+function recordingBrowserRunner() {
+  const invocations: BrowserOpenInvocation[] = [];
+  const runner: BrowserOpenRunnerShape = {
+    run: (invocation) =>
+      Effect.sync(() => {
+        invocations.push(invocation);
+      }),
+  };
+  return { invocations, runner };
+}
 
 describe('GitHub publication boundary', () => {
   test('plans the logged-in GitHub actor readable branch without a visible ID by default', async () => {
@@ -436,22 +450,32 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(1);
   });
 
-  test('pushes exactly the audited SHA to the proved immutable remote target before creating a ready-for-review PR', async () => {
+  test('pushes exactly the audited SHA before creating a ready-for-review PR and background browser handoff', async () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
       result('https://github.com/acme/project/pull/42\n'),
       result(JSON.stringify(pullRequest())),
-      result(),
     ]);
-    const service = makeGitHubPublicationService({ runner: fixture.runner });
+    const browser = recordingBrowserRunner();
+    const service = makeGitHubPublicationService({
+      browserHandoff: makeBrowserHandoff({ platform: 'darwin', runner: browser.runner }),
+      runner: fixture.runner,
+    });
 
-    const published = await Effect.runPromise(service.publish({ ...input, openInBrowser: true }));
+    const published = await Effect.runPromise(
+      service.publish({ ...input, browserMode: 'background' }),
+    );
 
     expect(published).toEqual({
       action: 'created',
       baseBranch: input.baseBranch,
       body: input.body,
+      browserHandoff: {
+        openedMode: 'background',
+        requestedMode: 'background',
+        status: 'opened',
+      },
       draft: false,
       headBranch: input.headBranch,
       number: 42,
@@ -516,11 +540,45 @@ describe('GitHub publication boundary', () => {
       '--json',
       'number,url,state,isDraft,headRefName,headRefOid,baseRefName',
     ]);
-    expect(withoutBoundRepo(fixture.invocations.at(-1))).toEqual({
-      args: ['pr', 'view', '42', '--web'],
-      command: 'gh',
-      cwd: input.cwd,
+    expect(browser.invocations).toEqual([
+      { args: ['-g', 'https://github.com/acme/project/pull/42'], command: 'open' },
+    ]);
+    expect(fixture.invocations).toHaveLength(4);
+  });
+
+  test('keeps successful publication successful when browser handoff fails safely', async () => {
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result('https://github.com/acme/project/pull/42\n'),
+      result(JSON.stringify(pullRequest())),
+    ]);
+    const browserInvocations: BrowserOpenInvocation[] = [];
+    const browser: BrowserOpenRunnerShape = {
+      run: (invocation) => {
+        browserInvocations.push(invocation);
+        return Effect.fail({ code: 'ENOENT', kind: 'browser_open_failed' });
+      },
+    };
+    const service = makeGitHubPublicationService({
+      browserHandoff: makeBrowserHandoff({ platform: 'darwin', runner: browser }),
+      runner: fixture.runner,
     });
+
+    const published = await Effect.runPromise(service.publish({ ...input, openInBrowser: true }));
+
+    expect(published.action).toBe('created');
+    expect(published.openedInBrowser).toBe(false);
+    expect(published.browserHandoff).toEqual({
+      attemptedMode: 'foreground',
+      failure: { code: 'ENOENT', kind: 'browser_open_failed' },
+      requestedMode: 'foreground',
+      status: 'failed',
+    });
+    expect(browserInvocations).toEqual([
+      { args: ['https://github.com/acme/project/pull/42'], command: 'open' },
+    ]);
+    expect(fixture.invocations).toHaveLength(4);
   });
 
   test('retains completed CLI-only hosted spend conservatively without changing exact-SHA publication', async () => {
@@ -652,6 +710,7 @@ describe('GitHub publication boundary', () => {
     expect(published.draft).toBe(true);
     expect(published.title).toBe(input.title);
     expect(published.body).toBe(input.body);
+    expect(published.browserHandoff).toEqual({ requestedMode: 'none', status: 'not_requested' });
     expect(published.openedInBrowser).toBe(false);
     expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
       false,
@@ -857,7 +916,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(2);
   });
 
-  test('rejects unsafe branch, non-immutable SHA, and accidental local managed-head publication before invoking a child process', async () => {
+  test('rejects unsafe branch, SHA, browser handoff, and accidental local managed-head publication before invoking a child process', async () => {
     const fixture = scriptedRunner([]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
 
@@ -870,10 +929,16 @@ describe('GitHub publication boundary', () => {
     const localHeadFailure = await Effect.runPromise(
       service.publish({ ...input, headBranch: 'pardes/manager-1/agent-1' }).pipe(Effect.flip),
     );
+    const browserFailure = await Effect.runPromise(
+      service
+        .publish({ ...input, browserMode: 'background', openInBrowser: true })
+        .pipe(Effect.flip),
+    );
 
     expect(branchFailure._tag).toBe('GitHubPublicationInputError');
     expect(shaFailure._tag).toBe('GitHubPublicationInputError');
     expect(localHeadFailure._tag).toBe('GitHubPublicationInputError');
+    expect(browserFailure._tag).toBe('GitHubPublicationInputError');
     expect(fixture.invocations).toEqual([]);
 
     const unreserved = scriptedRunner([result()]);

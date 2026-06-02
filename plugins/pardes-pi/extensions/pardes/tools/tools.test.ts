@@ -2005,6 +2005,7 @@ describe('Pardes model-visible tools', () => {
       createPullRequest: () =>
         Effect.succeed({
           action: 'created' as const,
+          browserHandoff: { requestedMode: 'none' as const, status: 'not_requested' as const },
           openedInBrowser: false,
           pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
         }),
@@ -2013,7 +2014,7 @@ describe('Pardes model-visible tools', () => {
 
     const publish = requiredValue(tools.get('pull_request_create'));
     expect(publish.description).toBe(
-      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Rejects completed or otherwise non-active workstreams. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
     );
     expect(publish.promptSnippet).toBe(
       'Publish a committed Pardes worker branch as a pull-request review gate',
@@ -2031,7 +2032,17 @@ describe('Pardes model-visible tools', () => {
       'Reviewer-first pull-request body with concise Why / How / Decisions / Callouts content',
     );
     expect(publish.parameters.properties.baseBranch?.maxLength).toBe(255);
+    expect(publish.parameters.required).not.toContain('browserMode');
     expect(publish.parameters.required).not.toContain('openInBrowser');
+    expect(publish.parameters.properties.browserMode?.anyOf).toEqual([
+      { const: 'none', type: 'string' },
+      { const: 'background', type: 'string' },
+      { const: 'foreground', type: 'string' },
+    ]);
+    expect(publish.parameters.properties.browserMode?.description).toContain("Defaults to 'none'");
+    expect(publish.parameters.properties.openInBrowser?.description).toContain(
+      'Compatibility alias',
+    );
     expect([...tools.keys()].some((name) => name.includes('merge'))).toBe(false);
     const result = await publish.execute(
       'call-1',
@@ -2047,8 +2058,54 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(result.content[0]?.text).toBe(
-      'Created PR #42: https://github.test/acme/project/pull/42.',
+      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: none.',
     );
+  });
+
+  test('surfaces a safe non-fatal pull_request_create browser handoff failure', async () => {
+    const { pi, tools } = registry();
+    const manager = {
+      createPullRequest: () =>
+        Effect.succeed({
+          action: 'created' as const,
+          browserHandoff: {
+            attemptedMode: 'background' as const,
+            failure: { code: 'ENOENT' as const, kind: 'browser_open_failed' as const },
+            requestedMode: 'background' as const,
+            status: 'failed' as const,
+          },
+          openedInBrowser: false,
+          pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
+        }),
+    } as unknown as ManagerController;
+    registerPullRequestTools(pi, manager);
+
+    const result = await requiredValue(tools.get('pull_request_create')).execute(
+      'call-1',
+      {
+        agentId: 'agent-1',
+        baseBranch: 'main',
+        body: 'Summary.',
+        browserMode: 'background',
+        title: 'Review gate',
+        workstreamId: 'ws-1',
+      },
+      signal,
+      onUpdate,
+      ctx,
+    );
+
+    expect(result.content[0]?.text).toBe(
+      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: background failed safely.',
+    );
+    expect(result.details).toMatchObject({
+      browserHandoff: {
+        attemptedMode: 'background',
+        failure: { code: 'ENOENT', kind: 'browser_open_failed' },
+        requestedMode: 'background',
+        status: 'failed',
+      },
+    });
   });
 
   test('redacts failed pull_request_create body content from bounded tool output', async () => {

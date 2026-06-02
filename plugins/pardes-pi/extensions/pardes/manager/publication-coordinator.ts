@@ -10,6 +10,7 @@ import {
   type GitHubPublicationError,
   type GitHubPublicationShape,
   isManagedPublishedReviewBranch,
+  type PullRequestBrowserHandoff,
 } from '../github/index.ts';
 import type { StateStoreShape, StoreError } from '../storage/index.ts';
 import type { AgentRecord, ManagerEvent, ManagerState, PullRequestRecord } from './domain.ts';
@@ -41,6 +42,8 @@ const nowIso = Clock.currentTimeMillis.pipe(Effect.map((millis) => new Date(mill
 export interface PullRequestCreateResult {
   readonly pullRequest: PullRequestRecord;
   readonly action: 'created' | 'updated';
+  readonly browserHandoff: PullRequestBrowserHandoff;
+  /** Compatibility projection for callers predating explicit browser handoff outcomes. */
   readonly openedInBrowser: boolean;
 }
 
@@ -478,6 +481,7 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       headBranch,
       headSha: inspection.headSha,
       title: input.title,
+      ...(input.browserMode === undefined ? {} : { browserMode: input.browserMode }),
       ...(input.openInBrowser === undefined ? {} : { openInBrowser: input.openInBrowser }),
       ...(claimSha === undefined
         ? {}
@@ -610,6 +614,7 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     }
     return {
       action: publication.action,
+      browserHandoff: publication.browserHandoff,
       openedInBrowser: publication.openedInBrowser,
       pullRequest: persistedPullRequest,
     } satisfies PullRequestCreateResult;

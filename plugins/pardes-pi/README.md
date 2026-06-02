@@ -108,7 +108,11 @@ branch overrides only intentionally. Worker reports are stored under the owning
 manager's `reports/` directory; concise summaries wake the manager.
 
 `pull_request_create` publishes a clean committed worker state as a
-user-controlled review gate. Pardes never merges autonomously.
+user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`
+(the default), `'background'` (macOS `open -g`, with a portable ordinary-opener
+fallback elsewhere), or `'foreground'`. The legacy `openInBrowser` boolean
+remains a compatibility alias. Browser opener failure is non-fatal to successful
+publication. Pardes never merges autonomously.
 
 Structured state is written beneath `~/.pi/agent/pardes/`. Override that root
 for development or tests with `PARDES_PI_STATE_DIR`.

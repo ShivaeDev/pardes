@@ -59,13 +59,21 @@ For a completed worker slice:
 3. route findings to the retained writer and call
    `verification_refresh({ verificationId })` after fixes;
 4. call `pull_request_create({ workstreamId, agentId, ... })` with
-   `openInBrowser: true`; Pardes audits and publishes the exact commit;
+   `browserMode: 'background'`; Pardes audits and publishes the exact commit and
+   hands the URL to the browser without foregrounding it on macOS;
 5. keep the owner attached and idle for CI or review feedback;
 6. route concrete feedback to that owner with an explicit published-history
    constraint: make additive descendant commits only; do not amend, rebase, or
    rewrite published branch history because Pardes exact-SHA publication
    intentionally never force-pushes;
 7. leave merges under user control.
+
+Browser handoff is explicit: omit `browserMode` or use `'none'` for no opener,
+use `'background'` for macOS `open -g` with a portable ordinary-opener fallback
+elsewhere, and use `'foreground'` for the ordinary platform opener. The legacy
+`openInBrowser` boolean remains a compatibility alias (`true` means
+`'foreground'`; `false` means `'none'`). An opener failure is surfaced as a
+safe handoff outcome without turning successful publication into failure.
 
 If publication is rejected or a concrete review question remains, request one
 advisory verification. Do not reproduce publication checks with shell commands

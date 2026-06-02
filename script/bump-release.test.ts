@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   bumpVersion,
+  changedReleasePaths,
+  manifestTouches,
   manifestVersion,
   nextVersionIntroductionCommit,
   updateManifestVersion,
@@ -27,13 +29,17 @@ function git(root: string, args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 }
 
-function commitManifest(root: string, raw: string, message: string): string {
-  const manifest = join(root, 'plugins/example/.claude-plugin/plugin.json');
-  mkdirSync(dirname(manifest), { recursive: true });
-  writeFileSync(manifest, raw);
-  git(root, ['add', '--', 'plugins/example/.claude-plugin/plugin.json']);
+function commitFile(root: string, path: string, body: string, message: string): string {
+  const file = join(root, path);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, body);
+  git(root, ['add', '--', path]);
   git(root, ['commit', '--quiet', '-m', message]);
   return git(root, ['rev-parse', 'HEAD']);
+}
+
+function commitManifest(root: string, raw: string, message: string): string {
+  return commitFile(root, 'plugins/example/.claude-plugin/plugin.json', raw, message);
 }
 
 afterEach(() => {
@@ -85,9 +91,48 @@ describe('inline publication gate', () => {
     expect(script).toContain('delete env.GH_TOKEN;');
     expect(script).toContain('delete env.OPENCODE_API_KEY;');
     expect(script).toContain("execFileSync('bun', ['run', 'ready'], { env, stdio: 'inherit' });");
-    expect(script.indexOf('validateBumpCommit();')).toBeLessThan(script.indexOf("git(['push'"));
+    expect(script.indexOf('validateBumpCommit();')).toBeLessThan(
+      script.indexOf("gitPublish(['push'"),
+    );
+    expect(script).toContain('delete process.env.GH_TOKEN;');
+    expect(script).toContain("GIT_CONFIG_KEY_0: 'http.extraheader'");
+    expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('run: bun install --frozen-lockfile');
     expect(workflow).toContain('astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b');
+  });
+});
+
+describe('manifestTouches', () => {
+  it('reports version introductions and same-version touches for ownership checks', () => {
+    const root = fixture();
+    const base = commitManifest(root, '{"name":"example","version":"1.0.0"}\n', 'base');
+    const release = commitManifest(root, '{"name":"example","version":"1.0.1"}\n', 'release');
+    const metadata = commitManifest(
+      root,
+      '{"description":"manual metadata","name":"example","version":"1.0.1"}\n',
+      'metadata',
+    );
+
+    expect(
+      manifestTouches(root, base, 'HEAD', 'plugins/example/.claude-plugin/plugin.json'),
+    ).toEqual([
+      { from: '1.0.0', sha: release, to: '1.0.1' },
+      { from: '1.0.1', sha: metadata, to: '1.0.1' },
+    ]);
+  });
+});
+
+describe('changedReleasePaths', () => {
+  it('detects concurrent same-plugin advancement but ignores unrelated main advancement', () => {
+    const root = fixture();
+    const base = commitManifest(root, '{"name":"example","version":"1.0.0"}\n', 'base');
+    const samePlugin = commitFile(root, 'plugins/example/source-b.txt', 'source B\n', 'source B');
+    expect(changedReleasePaths(root, base, samePlugin, ['plugins/example'])).toEqual([
+      'plugins/example/source-b.txt',
+    ]);
+
+    const unrelated = commitFile(root, 'README.md', 'unrelated\n', 'unrelated');
+    expect(changedReleasePaths(root, samePlugin, unrelated, ['plugins/example'])).toEqual([]);
   });
 });
 

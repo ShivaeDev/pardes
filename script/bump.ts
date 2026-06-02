@@ -27,8 +27,12 @@
  *   Prose is never salvaged.
  * - Deterministic release writes are allowlisted, staged by exact path, checked
  *   by the same `bun run ready` gate as human PRs, and guarded by clean-worktree
- *   assertions before branch or tag publication. The inline gate is necessary:
- *   GITHUB_TOKEN-created bump PR events do not launch the normal lint workflow.
+ *   assertions before branch or tag publication. Classification aggregates to a
+ *   fetched main watermark; pre-merge advancement aborts, and post-merge parent/
+ *   tree verification refuses any raced same-plugin tag. The inline gate is
+ *   necessary: GITHUB_TOKEN-created bump PR events do not launch normal lint.
+ * - Checkout credentials are not persisted. GH_TOKEN is removed from this
+ *   process env and injected only into explicit remote Git/gh publication ops.
  * - Everything uses GITHUB_TOKEN (no bypass actor, no standing secret). The merge
  *   is SYNCHRONOUS, not auto-merge: a GITHUB_TOKEN merge doesn't re-trigger any
  *   workflow, so an async "tag on merge" step would never fire — we merge + tag
@@ -56,9 +60,11 @@ import {
   readSubmission,
   removeClassifierSandbox,
 } from './bump-classifier';
-import { loadPlugins, touchedPlugins } from './bump-core';
+import { existingManifestChanges, loadPlugins, touchedPlugins } from './bump-core';
 import {
   bumpVersion,
+  changedReleasePaths,
+  manifestTouches,
   manifestVersionAtRef,
   nextVersionIntroductionCommit,
   requireSemver,
@@ -72,6 +78,11 @@ const afterSha = process.env.AFTER_SHA ?? '';
 let beforeSha = process.env.BEFORE_SHA ?? '';
 const model = process.env.OPENCODE_MODEL ?? '';
 const opencodeApiKey = process.env.OPENCODE_API_KEY ?? '';
+const publicationToken = process.env.GH_TOKEN ?? '';
+const short = afterSha.slice(0, 12);
+const branch = `bump/${short}`;
+delete process.env.GH_TOKEN;
+delete process.env.GITHUB_TOKEN;
 
 if (!afterSha) die('AFTER_SHA missing');
 if (!model) die('OPENCODE_MODEL repo variable not set (provider/model)');
@@ -79,6 +90,7 @@ if (!/^(?:opencode|opencode-go)\/[^/\s]+$/.test(model)) {
   die('OPENCODE_MODEL must select an OpenCode or OpenCode Go model (opencode[-go]/model)');
 }
 if (!opencodeApiKey) die('OPENCODE_API_KEY secret not set');
+if (!publicationToken) die('GH_TOKEN publication token not set');
 
 // First push / new branch: no usable "before". Use afterSha's parent, or git's
 // empty-tree hash when afterSha is the root commit (so diffs treat all as new).
@@ -124,6 +136,40 @@ function run(
   const r = spawnSync(cmd, args, { encoding: 'utf8' });
   if (r.error) die(`could not launch ${cmd}: ${r.error.message}`);
   return { status: r.status, stderr: r.stderr ?? '', stdout: r.stdout ?? '' };
+}
+
+function publicationGitEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${publicationToken}`).toString('base64')}`,
+  };
+}
+
+function runPublishGit(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync('git', args, { encoding: 'utf8', env: publicationGitEnv() });
+  if (result.error) die(`could not launch git publication: ${result.error.message}`);
+  return { status: result.status, stderr: result.stderr ?? '', stdout: result.stdout ?? '' };
+}
+
+function gitPublish(args: string[]): string {
+  const result = runPublishGit(args);
+  if (result.status !== 0) {
+    return die(
+      `git publication ${args.slice(0, 3).join(' ')} failed: ${result.stderr.trim().split('\n')[0] || `exit ${result.status}`}`,
+    );
+  }
+  return result.stdout.trim();
+}
+
+function runGh(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync('gh', args, {
+    encoding: 'utf8',
+    env: { ...process.env, GH_TOKEN: publicationToken },
+  });
+  if (result.error) die(`could not launch gh: ${result.error.message}`);
+  return { status: result.status, stderr: result.stderr ?? '', stdout: result.stdout ?? '' };
 }
 
 function gitPaths(args: string[]): string[] {
@@ -187,16 +233,75 @@ function existedAt(sha: string, path: string): boolean {
   return run('git', ['cat-file', '-e', `${sha}:${path}`]).status === 0;
 }
 
-const changed = git(['diff', '--name-only', beforeSha, afterSha]).split('\n').filter(Boolean);
-if (changed.length === 0) {
-  console.log('no changed files; nothing to do');
-  process.exit(0);
+function fetchOriginMain(): string {
+  gitPublish(['fetch', 'origin', 'main']);
+  return git(['rev-parse', 'origin/main']);
 }
 
-const plugins = loadPlugins();
+const baseSha = fetchOriginMain();
+if (run('git', ['merge-base', '--is-ancestor', afterSha, baseSha]).status !== 0) {
+  die(`origin/main ${baseSha} no longer contains pushed commit ${afterSha}`);
+}
+git(['checkout', '--detach', baseSha]);
+assertCleanWorkingTree('working tree must stay clean while synchronizing to origin/main');
 
-// "Touched" = a changed file under the plugin's path that ISN'T the bot-owned
-// version manifest — so the bot's own bump never counts as a change to bump again.
+function assertBaseStable(label: string): void {
+  const latest = fetchOriginMain();
+  if (latest !== baseSha)
+    die(`${label}: origin/main advanced from ${baseSha} to ${latest}; retrying on a newer push`);
+}
+
+const sourceChanged = gitPaths(['diff', '--name-only', beforeSha, afterSha]);
+if (sourceChanged.length === 0) {
+  console.log('no source-push changed files; nothing to do');
+  process.exit(0);
+}
+const forbiddenManifestChanges = existingManifestChanges(sourceChanged, (path) =>
+  existedAt(beforeSha, path),
+);
+if (forbiddenManifestChanges.length) {
+  die(
+    `existing plugin manifests are workflow-owned; source push changed: ${forbiddenManifestChanges.join(', ')}`,
+  );
+}
+
+// Aggregate through the fetched stable main watermark. This includes same-plugin
+// pushes queued while the workflow was busy, so no source bytes can be silently
+// absorbed into an older classification. Version manifests remain workflow-owned
+// mechanical output and touchedPlugins excludes them.
+const changed = gitPaths(['diff', '--name-only', beforeSha, baseSha]);
+const plugins = loadPlugins();
+const knownManifestPaths = new Set(plugins.map((plugin) => plugin.manifestPath));
+const unknownExistingManifestChanges = existingManifestChanges(changed, (path) =>
+  existedAt(beforeSha, path),
+).filter((path) => !knownManifestPaths.has(path));
+if (unknownExistingManifestChanges.length) {
+  die(
+    `existing plugin manifests disappeared from the catalog: ${unknownExistingManifestChanges.join(', ')}`,
+  );
+}
+
+// Existing plugin manifests are owned exclusively by this workflow. Audit every
+// first-parent touch absorbed into the aggregate watermark: it must introduce a
+// new semver and already have its exact immutable tag, or be this event's own
+// merged bump awaiting tag recovery. Same-version/manual edits fail closed.
+for (const plugin of plugins) {
+  if (!existedAt(beforeSha, plugin.manifestPath)) continue;
+  for (const touch of manifestTouches('.', beforeSha, baseSha, plugin.manifestPath)) {
+    if (touch.from === touch.to) {
+      die(`existing plugin manifest touch did not bump ${plugin.name}: ${touch.sha}`);
+    }
+    const tag = `${plugin.name}--v${touch.to}`;
+    const remote = remoteTagTarget(tag);
+    if (remote) {
+      assertRemoteTagTarget(tag, remote, touch.sha);
+      continue;
+    }
+    if (mergedPrForBranch()?.mergeSha === touch.sha) continue;
+    die(`existing plugin manifest transition lacks workflow tag ${tag}: ${touch.sha}`);
+  }
+}
+
 const touched = touchedPlugins(plugins, changed);
 
 // A plugin whose manifest didn't exist before this push is a brand-new plugin:
@@ -308,15 +413,11 @@ function writeChangelog(name: string, version: string, c: Classification): void 
   }
 }
 
-// Fetch main up front so the bump loop can see whether a prior run already landed
-// a version for any plugin (re-entrancy on a "Re-run failed jobs").
-git(['fetch', 'origin', 'main']);
-
 // `released`: a bump for this plugin already exists on main (prior run) — only its
 // tag may still need to land. `bumped`: a fresh bump computed in this run that we
 // still need to commit/merge. The tag step covers both.
 const released: { name: string; sha: string; to: string }[] = [];
-const bumped: { name: string; from: string; to: string; kind: string }[] = [];
+const bumped: { name: string; from: string; path: string; to: string; kind: string }[] = [];
 const bumpPaths = new Set<string>();
 
 // Classify, version, and changelog every touched plugin independently. One
@@ -332,28 +433,63 @@ for (const p of toBump) {
     // Re-entrancy short-circuit: if main's manifest version already differs from
     // the working-tree base, a previous run of this workflow already bumped + merged
     // this plugin. Don't re-classify or re-commit — just make sure its tag exists.
-    const mainVersion = manifestVersionAtRef('.', 'origin/main', p.manifestPath);
-    if (mainVersion && mainVersion !== current) {
-      // Recover the earliest release version introduced after this run's source
-      // push, even if later releases or same-version manifest touches landed before
-      // a tag-only retry. Refuse malformed versions before constructing tag names.
-      requireSemver(mainVersion);
+    const pushedVersion = manifestVersionAtRef('.', afterSha, p.manifestPath);
+    if (!pushedVersion) throw new Error(`${p.manifestPath} missing at pushed commit ${afterSha}`);
+    const mainVersion = manifestVersionAtRef('.', baseSha, p.manifestPath);
+    if (mainVersion && mainVersion !== pushedVersion) {
+      // A differing version is tag-only recovery ONLY when the exact version tag
+      // already exists, or this event's own deterministic bump PR introduced it.
+      // A distinct queued source push must not be consumed by somebody else's
+      // untagged release introduction: classify it into a fresh release below.
       const landed = nextVersionIntroductionCommit(
         '.',
         afterSha,
-        'origin/main',
+        baseSha,
         p.manifestPath,
-        current,
+        pushedVersion,
       );
-      released.push({ name: p.name, sha: landed.sha, to: landed.version });
-      console.log(`${p.name}: ${landed.version} already landed — skipping bump, will verify tag`);
-      continue;
+      const tag = `${p.name}--v${landed.version}`;
+      const remote = remoteTagTarget(tag);
+      if (remote) {
+        assertRemoteTagTarget(tag, remote, landed.sha);
+        console.log(`${p.name}: ${tag} already covers this source push — skipping`);
+        continue;
+      }
+      const own = mergedPrForBranch();
+      if (own?.mergeSha === landed.sha) {
+        const headParent = commitParent(own.headSha);
+        const mergeParent = commitParent(own.mergeSha);
+        assertNoReleasePathAdvance(
+          headParent,
+          mergeParent,
+          [p.path, join('changelog', `${p.name}.md`)],
+          `${p.name}: refusing tag-only recovery after same-plugin main advancement`,
+        );
+        if (headParent !== mergeParent) validateDetachedIntegration(own.mergeSha);
+        released.push({ name: p.name, sha: landed.sha, to: landed.version });
+        console.log(`${p.name}: own ${landed.version} bump already landed — will verify tag`);
+        continue;
+      }
+      throw new Error(`${p.name}: prior untagged release does not safely cover this queued push`);
     }
 
-    const subjects = git(['log', `${beforeSha}..${afterSha}`, '--format=%s', '--', p.path])
+    const subjects = git([
+      'log',
+      `${beforeSha}..${baseSha}`,
+      '--format=%s',
+      '--',
+      p.path,
+      `:(exclude)${p.manifestPath}`,
+    ])
       .split('\n')
       .filter(Boolean);
-    let diff = git(['diff', `${beforeSha}..${afterSha}`, '--', p.path]);
+    let diff = git([
+      'diff',
+      `${beforeSha}..${baseSha}`,
+      '--',
+      p.path,
+      `:(exclude)${p.manifestPath}`,
+    ]);
     if (diff.length > DIFF_BUDGET) diff = `${diff.slice(0, DIFF_BUDGET)}\n…(diff truncated)`;
 
     const c = classify(p.name, current, subjects, diff);
@@ -367,7 +503,7 @@ for (const p of toBump) {
     writeChangelog(p.name, next, c);
     bumpPaths.add(vpath);
     bumpPaths.add(changelogPath);
-    bumped.push({ from: current, kind: c.bump, name: p.name, to: next });
+    bumped.push({ from: current, kind: c.bump, name: p.name, path: p.path, to: next });
     console.log(`✓ ${p.name}: ${current} → ${next} (${c.bump})`);
   } catch (e) {
     die(`Failed to classify/bump ${p.name}: ${e instanceof Error ? e.message : String(e)}`);
@@ -377,7 +513,10 @@ for (const p of toBump) {
 // Thin wrapper around gh with a clean one-line failure (mirrors git()).
 function gh(args: string[]): void {
   try {
-    execFileSync('gh', args, { stdio: 'inherit' });
+    execFileSync('gh', args, {
+      env: { ...process.env, GH_TOKEN: publicationToken },
+      stdio: 'inherit',
+    });
   } catch (e) {
     die(
       `gh ${args.slice(0, 2).join(' ')} failed: ${e instanceof Error ? e.message.split('\n')[0] : String(e)}`,
@@ -403,13 +542,12 @@ function validateBumpCommit(): void {
   }
 }
 
-const short = afterSha.slice(0, 12);
-const branch = `bump/${short}`;
-
 // If a prior run already merged every plugin's bump (re-run after a tag-only
 // failure), there's nothing to commit/merge — jump straight to the tag step.
+let validatedCandidateTree = '';
 if (bumped.length > 0) {
   assertAppliedPaths(bumpPaths);
+  assertBaseStable('before creating release commit');
 
   // Commit on a deterministic bump branch and open a PR (GITHUB_TOKEN identity).
   // The branch name is derived from afterSha, so a "Re-run failed jobs" recomputes
@@ -435,23 +573,32 @@ if (bumped.length > 0) {
   assertCleanWorkingTree('working tree must be clean before validating bump branch');
   validateBumpCommit();
   assertCleanWorkingTree('working tree must be clean before publishing bump branch');
+  assertBaseStable('before publishing bump branch');
+  validatedCandidateTree = git(['rev-parse', 'HEAD^{tree}']);
 
   // Create-or-update push: a re-run rebuilds the same branch but with a fresh
   // commit (commit date differs → SHA differs), so a plain push would be rejected
   // as non-fast-forward. Force-with-lease ONLY the bot-owned, disposable bump
   // branch (deleted on merge). This never touches a `*--v*` tag — those stay
   // create-only per the ruleset.
-  const branchOnRemote =
-    run('git', ['ls-remote', '--exit-code', 'origin', `refs/heads/${branch}`]).status === 0;
-  if (branchOnRemote) {
+  const remoteBranchSha = remoteRefTarget(`refs/heads/${branch}`);
+  if (remoteBranchSha) {
     console.log(`bump branch ${branch} already on remote — updating it`);
-    git(['push', '--force-with-lease', '-u', 'origin', branch]);
+    gitPublish([
+      'push',
+      `--force-with-lease=refs/heads/${branch}:${remoteBranchSha}`,
+      '-u',
+      'origin',
+      branch,
+    ]);
   } else {
-    git(['push', '-u', 'origin', branch]);
+    gitPublish(['push', '-u', 'origin', branch]);
   }
 
+  assertBaseStable('before opening bump PR');
+
   // Reuse an existing PR for this head if a prior run already opened one.
-  const existingPr = run('gh', [
+  const existingPr = runGh([
     'pr',
     'list',
     '--head',
@@ -482,7 +629,7 @@ if (bumped.length > 0) {
 // (only the branch-delete hiccuped), detect that and stop rather than retrying a
 // PR that's already gone.
 function bumpPrMerged(): boolean {
-  const r = run('gh', ['pr', 'view', branch, '--json', 'state', '--jq', '.state']);
+  const r = runGh(['pr', 'view', branch, '--json', 'state', '--jq', '.state']);
   return r.status === 0 && r.stdout.trim() === 'MERGED';
 }
 
@@ -490,7 +637,7 @@ function mergeBumpPr(): void {
   const args = ['pr', 'merge', branch, '--squash', '--delete-branch'];
   const maxAttempts = 6;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const r = run('gh', args);
+    const r = runGh(args);
     if (r.status === 0) {
       console.log('merged bump PR');
       return;
@@ -508,7 +655,10 @@ function mergeBumpPr(): void {
   }
 }
 
-if (bumped.length > 0) mergeBumpPr();
+if (bumped.length > 0) {
+  assertBaseStable('before merging bump PR');
+  mergeBumpPr();
+}
 
 // Resolve the EXACT commit a plugin's version landed on, so tags never get
 // mis-pointed by an unrelated merge that races onto main between our merge and
@@ -517,19 +667,94 @@ if (bumped.length > 0) mergeBumpPr();
 // plugins (prior run) were resolved above to the earliest first-parent commit
 // after afterSha that INTRODUCED a new version, not a later same-version touch or
 // newer release. Both are independent of whatever else `main` HEAD points at.
+type MergedPr = { headSha: string; mergeSha: string };
+
+function mergedPrForBranch(): MergedPr | null {
+  const result = runGh([
+    'pr',
+    'view',
+    branch,
+    '--json',
+    'state,mergeCommit,headRefOid',
+    '--jq',
+    '[.state, .mergeCommit.oid // "", .headRefOid] | @tsv',
+  ]);
+  if (result.status !== 0) return null;
+  const [state, mergeSha, headSha] = result.stdout.trim().split('\t');
+  if (state !== 'MERGED') return null;
+  if (!/^[0-9a-f]{40}$/.test(mergeSha) || !/^[0-9a-f]{40}$/.test(headSha)) {
+    die(`could not parse merged PR commits for ${branch}`);
+  }
+  gitPublish(['fetch', 'origin', mergeSha, headSha]);
+  return { headSha, mergeSha };
+}
+
+function commitParent(sha: string): string {
+  return git(['rev-parse', `${sha}^`]);
+}
+
+function assertNoReleasePathAdvance(
+  from: string,
+  to: string,
+  paths: string[],
+  label: string,
+): void {
+  const hits = changedReleasePaths('.', from, to, paths);
+  if (hits.length) die(`${label}: ${hits.join(', ')}`);
+}
+
 function mergeCommitForBranch(): string {
-  const r = run('gh', ['pr', 'view', branch, '--json', 'mergeCommit', '--jq', '.mergeCommit.oid']);
-  const oid = r.status === 0 ? r.stdout.trim() : '';
-  if (!oid) die(`could not resolve merge commit for ${branch} via gh pr view`);
-  git(['fetch', 'origin', oid]);
-  return oid;
+  const merged = mergedPrForBranch();
+  if (!merged) die(`could not resolve merged PR for ${branch} via gh pr view`);
+  return merged.mergeSha;
+}
+
+function validateDetachedIntegration(sha: string): void {
+  const restore = git(['rev-parse', 'HEAD']);
+  git(['checkout', '--detach', sha]);
+  assertCleanWorkingTree('working tree must be clean before validating exact integration');
+  validateBumpCommit();
+  assertCleanWorkingTree('working tree must be clean after validating exact integration');
+  git(['checkout', '--detach', restore]);
+  assertCleanWorkingTree('working tree must be clean after restoring validated integration');
+}
+
+function verifyFreshMerge(): string {
+  const sha = mergeCommitForBranch();
+  const parent = commitParent(sha);
+  const tree = git(['rev-parse', `${sha}^{tree}`]);
+  if (parent === baseSha) {
+    if (tree !== validatedCandidateTree) {
+      die(
+        `merged ${branch} tree ${tree} differs from validated candidate ${validatedCandidateTree}`,
+      );
+    }
+    return sha;
+  }
+
+  // A tiny main-advance race can still occur between the last remote check and
+  // GitHub's synchronous merge. Never tag if it touched any releasing plugin;
+  // unrelated advancement is acceptable only after gating the exact landed tree.
+  assertNoReleasePathAdvance(
+    baseSha,
+    parent,
+    bumped.flatMap((plugin) => [plugin.path, join('changelog', `${plugin.name}.md`)]),
+    `refusing to tag ${branch}; main advanced through release paths`,
+  );
+  validateDetachedIntegration(sha);
+  return sha;
+}
+
+function remoteRefTarget(ref: string): string | null {
+  const r = runPublishGit(['ls-remote', '--exit-code', 'origin', ref]);
+  if (r.status !== 0) return null;
+  const sha = r.stdout.trim().split(/\s+/)[0];
+  if (!/^[0-9a-f]{40}$/.test(sha)) die(`could not parse remote target for ${ref}`);
+  return sha;
 }
 
 function remoteTagTarget(tag: string): string | null {
-  const r = run('git', ['ls-remote', '--exit-code', 'origin', `refs/tags/${tag}`]);
-  if (r.status !== 0) return null;
-  const sha = r.stdout.trim().split(/\s+/)[0];
-  if (!/^[0-9a-f]{40}$/.test(sha)) die(`could not parse remote target for tag ${tag}`);
+  const sha = remoteRefTarget(`refs/tags/${tag}`);
   return sha;
 }
 
@@ -547,7 +772,7 @@ function pushTag(tag: string, sha: string): boolean {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Re-make the local tag each attempt (idempotent locally) before pushing.
     if (run('git', ['tag', '-f', tag, sha]).status !== 0) die(`could not create local tag ${tag}`);
-    const r = run('git', ['push', 'origin', `refs/tags/${tag}`]);
+    const r = runPublishGit(['push', 'origin', `refs/tags/${tag}`]);
     if (r.status === 0) return true;
     // A concurrent run may have created the same tag remotely in between — that's
     // a success only if its immutable target is the exact expected commit.
@@ -570,7 +795,7 @@ function pushTag(tag: string, sha: string): boolean {
 
 assertCleanWorkingTree('working tree must be clean before publishing version tags');
 
-const freshMergeSha = bumped.length > 0 ? mergeCommitForBranch() : '';
+const freshMergeSha = bumped.length > 0 ? verifyFreshMerge() : '';
 const tagTargets: { name: string; to: string; sha: string }[] = [
   ...bumped.map((b) => ({ name: b.name, sha: freshMergeSha, to: b.to })),
   ...released,

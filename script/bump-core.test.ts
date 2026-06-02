@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadPlugins, touchedPlugins } from './bump-core';
+import { existingManifestChanges, loadPlugins, touchedPlugins } from './bump-core';
 
 const roots: string[] = [];
 
@@ -83,6 +83,21 @@ describe('loadPlugins', () => {
     );
 
     expect(() => loadPlugins(root)).toThrow('duplicate plugin name claude-plugin');
+  });
+});
+
+describe('existingManifestChanges', () => {
+  it('rejects existing manifest edits while allowing a new plugin initial manifest', () => {
+    expect(
+      existingManifestChanges(
+        [
+          'plugins/existing/.claude-plugin/plugin.json',
+          'plugins/new/.codex-plugin/plugin.json',
+          'plugins/existing/skills/example/SKILL.md',
+        ],
+        (path) => path.includes('/existing/'),
+      ),
+    ).toEqual(['plugins/existing/.claude-plugin/plugin.json']);
   });
 });
 

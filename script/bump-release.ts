@@ -130,6 +130,50 @@ export function versionIntroductionCommit(
   throw new Error(`could not find the commit that introduced ${manifestPath} version ${version}`);
 }
 
+export function manifestTouches(
+  root: string,
+  fromRef: string,
+  toRef: string,
+  manifestPath: string,
+): { from: string; sha: string; to: string }[] {
+  const initial = manifestVersionAtRef(root, fromRef, manifestPath);
+  if (!initial) throw new Error(`${manifestPath} missing at ${fromRef}`);
+  const history = git(root, [
+    'log',
+    '--first-parent',
+    '--reverse',
+    '--format=%H',
+    `${fromRef}..${toRef}`,
+    '--',
+    manifestPath,
+  ]);
+  if (history.status !== 0)
+    throw new Error(`could not inspect ${manifestPath} history after ${fromRef}`);
+
+  const touches: { from: string; sha: string; to: string }[] = [];
+  let previous = initial;
+  for (const sha of history.stdout.split('\n').filter(Boolean)) {
+    const version = manifestVersionAtRef(root, sha, manifestPath);
+    if (!version) throw new Error(`${manifestPath} missing at ${sha}`);
+    touches.push({ from: previous, sha, to: version });
+    previous = version;
+  }
+  return touches;
+}
+
+export function changedReleasePaths(
+  root: string,
+  fromRef: string,
+  toRef: string,
+  releasePaths: string[],
+): string[] {
+  if (releasePaths.length === 0) return [];
+  const result = git(root, ['diff', '--name-only', fromRef, toRef, '--', ...releasePaths]);
+  if (result.status !== 0)
+    throw new Error(`could not inspect release-path changes from ${fromRef} to ${toRef}`);
+  return result.stdout.split('\n').filter(Boolean);
+}
+
 export function nextVersionIntroductionCommit(
   root: string,
   fromRef: string,

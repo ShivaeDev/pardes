@@ -5,10 +5,13 @@ name: version-bump
 #   never runs in an untrusted context, so there is no supply-chain surface to
 #   hijack (a fork PR can't trigger it; nothing untrusted runs with the token).
 # - Least-privilege permissions. Actions pinned to full commit SHAs.
+# - Checkout does NOT persist credentials. bump.ts removes GH_TOKEN from its own
+#   process env and injects it only into explicit remote Git/gh publication ops.
 # - The bump opens a PR with GITHUB_TOKEN, merges it SYNCHRONOUSLY in the same run,
-#   then tags the PR's EXACT merge commit — resolved from the PR, not main HEAD, so
-#   an unrelated merge racing onto main can't mis-point the tag (no bypass actor, no
-#   standing secret). A GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so
+#   then tags the PR's EXACT verified merge commit — resolved from the PR, not main
+#   HEAD. It aggregates classifier coverage to a fetched main watermark, rejects
+#   pre-merge advancement, and refuses a raced same-plugin integration tag (no
+#   bypass actor, no standing secret). A GITHUB_TOKEN merge-push doesn't re-trigger this workflow, so
 #   there is no recursion — and that same fact is why the tag must be created inline
 #   (an async "tag on merge" step would never fire). The run is re-entrant: a re-run
 #   detects an already-landed bump from main's manifest and only ensures the tag.
@@ -25,7 +28,8 @@ name: version-bump
 #   A resolved-policy preflight asserts fallback build has zero enabled tools and
 #   bump has only submit_verdict. The script also rejects fallback-agent warnings,
 #   prose salvage, unexpected tools, invalid/multiple submissions, and
-#   non-allowlisted release diffs before push.
+#   non-allowlisted release diffs before push. Existing plugin manifest versions
+#   are workflow-owned: a source push that edits one is rejected.
 # - GITHUB_TOKEN-created bump branch/PR events do NOT launch lint.yml. Before any
 #   bump branch push, bump.ts runs the same `bun run ready` deterministic gate
 #   inline with publication/provider credentials removed, then reasserts a clean
@@ -54,7 +58,8 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          fetch-depth: 0   # need history for the github.event.before..after diff
+          fetch-depth: 0   # need history for classifier aggregation + exact tag recovery
+          persist-credentials: false # bump.ts injects auth only into explicit remote publication operations
 
       - name: Read pinned tool versions
         id: tool-versions

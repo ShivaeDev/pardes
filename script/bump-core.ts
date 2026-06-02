@@ -97,6 +97,18 @@ export function loadPlugins(root = '.'): Plugin[] {
   return plugins;
 }
 
+export function existingManifestChanges(
+  changed: string[],
+  existedAt: (path: string) => boolean,
+): string[] {
+  return changed.filter(
+    (path) =>
+      (path.endsWith('/.claude-plugin/plugin.json') ||
+        path.endsWith('/.codex-plugin/plugin.json')) &&
+      existedAt(path),
+  );
+}
+
 export function touchedPlugins(plugins: Plugin[], changed: string[]): Plugin[] {
   return plugins.filter((plugin) =>
     changed.some((file) => file.startsWith(`${plugin.path}/`) && file !== plugin.manifestPath),

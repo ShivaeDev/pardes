@@ -4,6 +4,7 @@ import {
   currentVerificationAttempt,
   type ManagerEvent,
   type ManagerState,
+  VERIFICATION_STALE_REASON_MAX_CHARS,
   type VerificationAttempt,
   type VerificationRecord,
   type VerificationStaleReasonCode,
@@ -48,13 +49,26 @@ const VERIFICATION_STALE_REASON_LABELS: Readonly<Record<VerificationStaleReasonC
   source_unverifiable: 'source managed worktree state is no longer verifiable',
 };
 
+function terminalInertInline(text: string): string {
+  return Array.from(text, (character) => {
+    const code = character.charCodeAt(0);
+    return code <= 31 || (code >= 127 && code <= 159) ? ' ' : character;
+  })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function verificationStaleReason(
   code: VerificationStaleReasonCode,
   detail?: string,
 ): string {
-  const safeDetail = detail?.replace(/\s+/g, ' ').trim();
+  const safeDetail = detail === undefined ? undefined : terminalInertInline(detail);
   const label = `[${code}] ${VERIFICATION_STALE_REASON_LABELS[code]}`;
-  return safeDetail ? `${label} ${safeDetail}` : label;
+  if (!safeDetail) return label;
+  const complete = `${label} ${safeDetail}`;
+  if (complete.length <= VERIFICATION_STALE_REASON_MAX_CHARS) return complete;
+  return `${label} [detail omitted reason=verification_stale_detail_limit originalChars=${safeDetail.length} shownChars=0 omittedChars=${safeDetail.length}]`;
 }
 
 export type VerificationReviewLoopDisposition = 'unassociated' | 'open' | 'resolved_terminal';

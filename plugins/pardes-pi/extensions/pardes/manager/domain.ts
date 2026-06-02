@@ -132,6 +132,7 @@ export const VerificationStaleReasonCodeSchema = Schema.Literals([
   'provisioning_failed',
 ]);
 export type VerificationStaleReasonCode = typeof VerificationStaleReasonCodeSchema.Type;
+export const VERIFICATION_STALE_REASON_MAX_CHARS = 240;
 
 export const VerificationStatusSchema = Schema.Literals([
   'starting',
@@ -151,7 +152,9 @@ const VerificationCurrentAttemptFields = {
   reviewedHeadSha: FullCommitShaSchema,
   sourceBranchPointSha: FullCommitShaSchema,
   staleAt: Schema.optionalKey(NonEmptyString),
-  staleReason: Schema.optionalKey(NonEmptyString.check(Schema.isMaxLength(240))),
+  staleReason: Schema.optionalKey(
+    NonEmptyString.check(Schema.isMaxLength(VERIFICATION_STALE_REASON_MAX_CHARS)),
+  ),
   staleReasonCode: Schema.optionalKey(VerificationStaleReasonCodeSchema),
   status: VerificationStatusSchema,
 };

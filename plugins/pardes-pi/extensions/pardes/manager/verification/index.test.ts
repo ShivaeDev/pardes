@@ -20,10 +20,12 @@ import {
   initialManagerState,
   type ManagerState,
   VERIFICATION_ATTEMPT_HISTORY_MAX,
+  VERIFICATION_STALE_REASON_MAX_CHARS,
   type VerificationRecord,
 } from '../domain.ts';
 import { AgentNotFoundError } from '../errors.ts';
 import { makeVerificationLifecycleCoordinator } from './index.ts';
+import { verificationStaleReason } from './policy.ts';
 
 const temporaryDirectories: string[] = [];
 const timestamp = '2026-01-01T00:00:00.000Z';
@@ -382,6 +384,25 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
 }
 
 describe('advisory verification lifecycle', () => {
+  test('preserves complete safe stale details when bounded and replaces oversized detail without midpoint clipping', () => {
+    expect(verificationStaleReason('source_head_changed', 'from aaa to bbb')).toBe(
+      '[source_head_changed] source head changed from aaa to bbb',
+    );
+
+    const privatePrefix = 'token=private-stale-detail';
+    const oversized = verificationStaleReason(
+      'provisioning_failed',
+      `${privatePrefix}\u001b ${'x'.repeat(500)}`,
+    );
+    expect(oversized).toBe(
+      '[provisioning_failed] verifier provisioning failed [detail omitted reason=verification_stale_detail_limit originalChars=527 shownChars=0 omittedChars=527]',
+    );
+    expect(oversized.length).toBeLessThanOrEqual(VERIFICATION_STALE_REASON_MAX_CHARS);
+    expect(oversized).not.toContain(privatePrefix);
+    expect(oversized).not.toContain('\u001b');
+    expect(oversized).not.toContain('…');
+  });
+
   test('marks detached review-checkout mutations as stale advisory evidence on status', async () => {
     const fixture = await verificationFixture({ dirtyReviewCheckout: true });
     const verification = await Effect.runPromise(

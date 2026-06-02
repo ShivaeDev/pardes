@@ -13,7 +13,11 @@ import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
 import { runGitFixture } from '../test-support.ts';
-import { CHILD_RUNTIME_INPUTS, makePluginActivationSafety } from './activation-safety.ts';
+import {
+  CHILD_RUNTIME_INPUTS,
+  inspectPluginSource,
+  makePluginActivationSafety,
+} from './activation-safety.ts';
 
 const temporaryDirectories: string[] = [];
 
@@ -61,6 +65,23 @@ describe('loaded child-runtime activation safety', () => {
       'worker-runtime/child-profile.ts',
       'worker-runtime/child-tool-call-preview.ts',
     ]);
+  });
+
+  test('inspects its explicit plugin root despite inherited Git repository redirection', () => {
+    const pluginRoot = fixturePluginSource();
+    git(pluginRoot, 'init', '-b', 'main');
+    git(pluginRoot, 'config', 'user.email', 'pardes@example.test');
+    git(pluginRoot, 'config', 'user.name', 'Pardes Test');
+    git(pluginRoot, 'add', '.');
+    git(pluginRoot, 'commit', '-m', 'fixture');
+    const previousGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(pluginRoot, 'missing.git');
+    try {
+      expect(inspectPluginSource(pluginRoot)).toMatchObject({ sourceControl: 'clean' });
+    } finally {
+      if (previousGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previousGitDir;
+    }
   });
 
   test('materializes preserved-path allowlisted sources and keeps post-pull shared drift advisory while launching from the pinned snapshot', async () => {

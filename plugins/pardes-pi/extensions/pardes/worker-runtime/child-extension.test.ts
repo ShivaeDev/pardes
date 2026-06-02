@@ -251,10 +251,12 @@ describe('verifier child profile', () => {
     const reviewed = git('rev-parse', 'HEAD');
     const previous = {
       baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+      gitDir: process.env.GIT_DIR,
       profile: process.env.PARDES_AGENT_PROFILE,
       reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
       root: process.env.PARDES_WORKTREE_ROOT,
     };
+    process.env.GIT_DIR = join(worktree, 'missing.git');
     process.env.PARDES_WORKTREE_ROOT = worktree;
     process.env.PARDES_AGENT_PROFILE = 'verifier';
     process.env.PARDES_VERIFICATION_BASELINE_SHA = baseline;
@@ -280,6 +282,8 @@ describe('verifier child profile', () => {
         },
       });
     } finally {
+      if (previous.gitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = previous.gitDir;
       if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
       else process.env.PARDES_WORKTREE_ROOT = previous.root;
       if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;

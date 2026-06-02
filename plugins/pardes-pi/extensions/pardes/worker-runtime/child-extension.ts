@@ -23,6 +23,31 @@ const PATH_PARAMETERS: Readonly<Record<string, ReadonlyArray<string>>> = {
 };
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const VERIFIER_OUTPUT_MAX_CHARS = 12_000;
+const GIT_EXPLICIT_CWD_UNSAFE_ENVIRONMENT_VARIABLES = [
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_ATTR_SOURCE',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_DIR',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_GRAFT_FILE',
+  'GIT_IMPLICIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_NAMESPACE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_PREFIX',
+  'GIT_QUARANTINE_PATH',
+  'GIT_REPLACE_REF_BASE',
+  'GIT_SHALLOW_FILE',
+  'GIT_WORK_TREE',
+] as const;
+
+/** Keep the pinned child extension self-contained while mirroring the Git boundary policy. */
+function gitEnvironmentForExplicitCwd(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const name of GIT_EXPLICIT_CWD_UNSAFE_ENVIRONMENT_VARIABLES) delete environment[name];
+  return environment;
+}
 
 function nearestExistingAncestor(path: string): string {
   let candidate = path;
@@ -97,7 +122,12 @@ function git(root: string, args: ReadonlyArray<string>): Promise<string> {
     execFile(
       'git',
       [...args],
-      { cwd: root, encoding: 'utf8', maxBuffer: 1024 * 1024 },
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: gitEnvironmentForExplicitCwd(),
+        maxBuffer: 1024 * 1024,
+      },
       (error, stdout, stderr) => {
         if (error) {
           const reason = (String(stderr).replace(/\s+/g, ' ').trim() || error.message).slice(

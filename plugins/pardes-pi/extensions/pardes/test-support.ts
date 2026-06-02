@@ -3,6 +3,7 @@ import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach } from 'vitest';
+import { gitEnvironmentForExplicitCwd } from './git/index.ts';
 
 export const GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS = 64 * 1024;
 export const GIT_FIXTURE_TIMEOUT_MS = 30_000;
@@ -59,39 +60,25 @@ function formatGitFixtureCommand(cwd: string, args: ReadonlyArray<string>): stri
   return [`$ git ${args.map((arg) => JSON.stringify(arg)).join(' ')}`, `  cwd: ${cwd}`].join('\n');
 }
 
-const GIT_FIXTURE_UNSAFE_ENVIRONMENT_VARIABLES = [
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_ATTR_SOURCE',
-  'GIT_CEILING_DIRECTORIES',
-  'GIT_COMMON_DIR',
+const GIT_FIXTURE_ONLY_UNSAFE_ENVIRONMENT_VARIABLES = [
+  'GIT_ALLOW_PROTOCOL',
   'GIT_CONFIG',
   'GIT_CONFIG_COUNT',
   'GIT_CONFIG_PARAMETERS',
-  'GIT_DIR',
-  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
-  'GIT_GRAFT_FILE',
-  'GIT_IMPLICIT_WORK_TREE',
-  'GIT_INDEX_FILE',
   'GIT_INDEX_VERSION',
-  'GIT_NAMESPACE',
   'GIT_NO_REPLACE_OBJECTS',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_PREFIX',
-  'GIT_QUARANTINE_PATH',
-  'GIT_REPLACE_REF_BASE',
-  'GIT_SHALLOW_FILE',
-  'GIT_WORK_TREE',
+  'GIT_PROTOCOL_FROM_USER',
 ] as const;
 
 function gitFixtureEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...gitEnvironmentForExplicitCwd(),
     GIT_CONFIG_GLOBAL: devNull,
     GIT_CONFIG_SYSTEM: devNull,
     GIT_TEMPLATE_DIR: '',
     GIT_TERMINAL_PROMPT: '0',
   };
-  for (const name of GIT_FIXTURE_UNSAFE_ENVIRONMENT_VARIABLES) delete environment[name];
+  for (const name of GIT_FIXTURE_ONLY_UNSAFE_ENVIRONMENT_VARIABLES) delete environment[name];
   for (const name of Object.keys(environment)) {
     if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(name)) delete environment[name];
   }

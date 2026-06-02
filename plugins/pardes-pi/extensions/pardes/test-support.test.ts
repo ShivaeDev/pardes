@@ -111,6 +111,29 @@ describe('Git fixture test support', () => {
     }
   });
 
+  for (const [name, value] of [
+    ['GIT_ALLOW_PROTOCOL', 'https'],
+    ['GIT_PROTOCOL_FROM_USER', '0'],
+  ] as const) {
+    test(`ignores inherited ${name} for controlled local fixture remotes`, () => {
+      const root = mkdtempSync(join(tmpdir(), 'pardes-hostile-protocol-git-env-'));
+      const origin = join(root, 'origin.git');
+      const clone = join(root, 'clone');
+      const previous = process.env[name];
+      process.env[name] = value;
+      try {
+        runGitFixture(root, 'init', '--bare', '-b', 'main', origin);
+        runGitFixture(root, 'clone', origin, clone);
+
+        expect(existsSync(join(clone, '.git'))).toBe(true);
+      } finally {
+        if (previous === undefined) delete process.env[name];
+        else process.env[name] = previous;
+        rmSync(root, { force: true, recursive: true });
+      }
+    });
+  }
+
   test('times out stalled Git commands boundedly with actionable captured diagnostics', () => {
     const timeoutMs = 25;
     const failure = fixtureFailure(() =>

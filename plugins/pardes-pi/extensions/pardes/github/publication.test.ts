@@ -1,7 +1,7 @@
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
-import { makeGitHubPublicationService } from './index.ts';
+import { GitHubCommandError, makeGitHubPublicationService } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
 
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
@@ -394,13 +394,55 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
   });
 
-  test('rejects an existing review gate whose final remote head OID diverges after the audited push', async () => {
+  test('accepts an existing review gate only after its temporarily stale hosted head OID converges to the audited push', async () => {
+    const previousHeadSha = 'b'.repeat(40);
+    const fixture = scriptedRunner([
+      result(JSON.stringify(pullRequest({ headRefOid: previousHeadSha }))),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefOid: previousHeadSha }))),
+      result(JSON.stringify(pullRequest())),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const synced = await Effect.runPromise(
+      service.syncExisting({
+        cwd: input.cwd,
+        headBranch: input.headBranch,
+        headSha: input.headSha,
+        pullRequestNumber: 42,
+      }),
+    );
+
+    expect(synced).toEqual({ status: 'synced' });
+    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toEqual([
+      {
+        args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+        command: 'git',
+        cwd: input.cwd,
+      },
+    ]);
+    expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
+  });
+
+  test('fails closed after bounded hosted head OID convergence attempts when an existing review gate truly diverges', async () => {
+    const divergent = result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) })));
     const fixture = scriptedRunner([
       result(JSON.stringify(pullRequest())),
       result(),
-      result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) }))),
+      divergent,
+      divergent,
+      divergent,
     ]);
-    const service = makeGitHubPublicationService({ runner: fixture.runner });
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
 
     const failure = await Effect.runPromise(
       service
@@ -416,7 +458,115 @@ describe('GitHub publication boundary', () => {
     expect(failure._tag).toBe('GitHubResponseError');
     if (failure._tag !== 'GitHubResponseError') throw failure;
     expect(failure.operation).toBe('verify pushed pull request head');
+    expect(fixture.invocations).toHaveLength(5);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
+  });
+
+  test('does not retry a decoded pushed-head identity mismatch as temporary hosted metadata lag', async () => {
+    const fixture = scriptedRunner([
+      result(JSON.stringify(pullRequest())),
+      result(),
+      result(JSON.stringify(pullRequest({ number: 43 }))),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(
+      service
+        .syncExisting({
+          cwd: input.cwd,
+          headBranch: input.headBranch,
+          headSha: input.headSha,
+          pullRequestNumber: 42,
+        })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure._tag).toBe('GitHubResponseError');
     expect(fixture.invocations).toHaveLength(3);
+  });
+
+  test('rejects invalid pushed-head convergence overrides during service construction', () => {
+    for (const options of [
+      { pushedHeadVerificationDelayMillis: Number.POSITIVE_INFINITY },
+      { pushedHeadVerificationDelayMillis: -1 },
+      { pushedHeadVerificationDelayMillis: 251 },
+      { pushedHeadVerificationRetries: Number.POSITIVE_INFINITY },
+      { pushedHeadVerificationRetries: -1 },
+      { pushedHeadVerificationRetries: 1.5 },
+      { pushedHeadVerificationRetries: 5 },
+    ]) {
+      expect(() => makeGitHubPublicationService(options)).toThrow(RangeError);
+    }
+  });
+
+  test('does not retry malformed post-push metadata or repeat the exact push', async () => {
+    const fixture = scriptedRunner([result(JSON.stringify(pullRequest())), result(), result('{')]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(
+      service
+        .syncExisting({
+          cwd: input.cwd,
+          headBranch: input.headBranch,
+          headSha: input.headSha,
+          pullRequestNumber: 42,
+        })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    expect(fixture.invocations).toHaveLength(3);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+  });
+
+  test('does not retry a command failure after one hosted-OID lag observation or repeat the exact push', async () => {
+    const fixture = scriptedRunner([
+      result(JSON.stringify(pullRequest())),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) }))),
+    ]);
+    let invocationCount = 0;
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: {
+        run: (invocation) => {
+          invocationCount += 1;
+          return invocationCount === 4
+            ? Effect.fail(
+                new GitHubCommandError({
+                  ...invocation,
+                  cause: 'fixture hosted verification outage',
+                }),
+              )
+            : fixture.runner.run(invocation);
+        },
+      },
+    });
+
+    const failure = await Effect.runPromise(
+      service
+        .syncExisting({
+          cwd: input.cwd,
+          headBranch: input.headBranch,
+          headSha: input.headSha,
+          pullRequestNumber: 42,
+        })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure._tag).toBe('GitHubCommandError');
+    expect(invocationCount).toBe(4);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
   });
 
   test('keeps existing local-shaped published review branches syncable without allowing accidental new publication', async () => {

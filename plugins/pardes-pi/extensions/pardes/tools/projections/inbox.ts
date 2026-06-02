@@ -114,7 +114,7 @@ function inboxIndexOmissionLine(omittedCount: number): string {
   return `… +${omittedCount} more inbox index ${omittedCount === 1 ? 'row' : 'rows'} omitted; inspect a known eventId for detail`;
 }
 
-/** Keep authored judgment guidance intact; select and summarize bounded dynamic rows upstream. */
+/** Keep authored judgment guidance intact; maxRows targets total rows but never clips fixed guidance or omission metadata. */
 export function inboxLines(
   state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
   maxRows?: number,

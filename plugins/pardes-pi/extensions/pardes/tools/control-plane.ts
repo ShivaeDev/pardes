@@ -87,7 +87,7 @@ export function registerPardesStatusTool(pi: ExtensionAPI, manager: ManagerContr
         ),
         maxRows: Type.Optional(
           Type.Integer({
-            description: `Maximum returned rows, hard-capped at ${CONTROL_PLANE_MAX_ROWS}.`,
+            description: `Maximum returned rows for views other than inbox, hard-capped at ${CONTROL_PLANE_MAX_ROWS}. Inbox preserves its fixed authored orientation rows and omission metadata even when they exceed this target.`,
             maximum: CONTROL_PLANE_MAX_ROWS,
             minimum: 1,
           }),

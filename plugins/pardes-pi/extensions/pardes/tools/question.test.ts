@@ -2,7 +2,6 @@ import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-c
 import { type Component, KeybindingsManager, TUI_KEYBINDINGS } from '@earendil-works/pi-tui';
 import { describe, expect, test } from 'vitest';
 import {
-  QUESTION_CUSTOM_ANSWER_MAX_CHARS,
   QUESTION_CUSTOM_LABEL,
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
@@ -129,7 +128,7 @@ describe('question tool execution semantics', () => {
     });
   });
 
-  test('preserves trimmed custom-response and cancellation behavior', async () => {
+  test('preserves full custom responses and cancellation behavior', async () => {
     const custom = await questionTool().execute(
       'call-1',
       {
@@ -141,8 +140,8 @@ describe('question tool execution semantics', () => {
       interactiveContext(['\x1b[B', '\r'], '  use release/next  '),
     );
     expect(custom).toEqual({
-      content: [{ text: 'User answered: use release/next', type: 'text' }],
-      details: { answer: 'use release/next', custom: true },
+      content: [{ text: 'User answered:   use release/next  ', type: 'text' }],
+      details: { answer: '  use release/next  ', custom: true },
     });
 
     const cancelled = await questionTool().execute(
@@ -176,8 +175,8 @@ describe('question tool execution semantics', () => {
     });
   });
 
-  test('rejects an oversized custom response without returning a clipped answer', async () => {
-    const oversized = `safe-${'x'.repeat(QUESTION_CUSTOM_ANSWER_MAX_CHARS)}`;
+  test('returns a full oversized custom response without clipping or presentation sanitation', async () => {
+    const oversized = `  safe\u001b-${'x'.repeat(4_001)}  `;
     const result = await questionTool().execute(
       'call-1',
       {
@@ -190,16 +189,9 @@ describe('question tool execution semantics', () => {
     );
 
     expect(result).toEqual({
-      content: [
-        {
-          text: `User custom answer exceeded the ${QUESTION_CUSTOM_ANSWER_MAX_CHARS}-character bound. Ask the user to retry with a shorter answer.`,
-          type: 'text',
-        },
-      ],
-      details: { answer: null, custom: true, rejected: true },
+      content: [{ text: `User answered: ${oversized}`, type: 'text' }],
+      details: { answer: oversized, custom: true },
     });
-    expect(result.content[0]?.text).not.toContain(oversized.slice(0, 100));
-    expect(result.content[0]?.text).not.toContain('…');
   });
 
   test('falls back to Pi dialog methods when custom components are unavailable in RPC mode', async () => {

@@ -14,7 +14,6 @@ export const QUESTION_PROMPT_MAX_CHARS = 1_000;
 export const QUESTION_OPTION_LABEL_MAX_CHARS = 256;
 export const QUESTION_OPTION_DESCRIPTION_MAX_CHARS = 1_000;
 export const QUESTION_OPTIONS_MAX_ITEMS = 12;
-export const QUESTION_CUSTOM_ANSWER_MAX_CHARS = 4_000;
 
 const QUESTION_MAX_LINES = 3;
 const OPTION_LABEL_MAX_LINES = 2;
@@ -78,11 +77,6 @@ function sanitizeQuestionOption(option: QuestionDialogOption): QuestionDialogOpt
           description: boundedInertText(option.description, QUESTION_OPTION_DESCRIPTION_MAX_CHARS),
         }),
   };
-}
-
-export function sanitizeQuestionCustomAnswer(answer: string): string | undefined {
-  const sanitized = answer.replace(TERMINAL_CONTROL_CHARACTERS, ' ').trim();
-  return sanitized.length <= QUESTION_CUSTOM_ANSWER_MAX_CHARS ? sanitized : undefined;
 }
 
 function displayValue(option: QuestionDialogOption): string {

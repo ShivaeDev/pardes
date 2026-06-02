@@ -7,12 +7,10 @@ import {
   USER_JUDGMENT_INBOX_PATH,
 } from '../manager/index.ts';
 import {
-  QUESTION_CUSTOM_ANSWER_MAX_CHARS,
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
   QUESTION_OPTIONS_MAX_ITEMS,
   QUESTION_PROMPT_MAX_CHARS,
-  sanitizeQuestionCustomAnswer,
   sanitizeQuestionOptionLabel,
   selectPardesQuestionOption,
 } from '../presentation/index.ts';
@@ -48,14 +46,8 @@ export function registerQuestionTool(pi: ExtensionAPI): void {
       );
       if (!selection) return textResult('User cancelled the question.', { answer: null });
       if (selection.kind === 'custom') {
-        const answer = sanitizeQuestionCustomAnswer((await ctx.ui.input('Custom answer')) ?? '');
-        if (answer === undefined) {
-          return textResult(
-            `User custom answer exceeded the ${QUESTION_CUSTOM_ANSWER_MAX_CHARS}-character bound. Ask the user to retry with a shorter answer.`,
-            { answer: null, custom: true, rejected: true },
-          );
-        }
-        return answer
+        const answer = await ctx.ui.input('Custom answer');
+        return answer?.trim()
           ? textResult(`User answered: ${answer}`, { answer, custom: true })
           : textResult('User cancelled the question.', { answer: null });
       }

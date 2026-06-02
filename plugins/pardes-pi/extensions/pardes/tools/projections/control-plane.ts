@@ -7,7 +7,15 @@ import type {
 import { currentVerificationAttempt, pullRequestNeedsAttention } from '../../manager/index.ts';
 import type { WorkerRuntimeSnapshot, WorkerStatus } from '../../worker-runtime/index.ts';
 import { agentWarnings, effectiveAgentStatus } from './agents.ts';
-import { boundedRows, CONTROL_PLANE_MAX_ROWS, plural, summaryAttentionToken } from './core.ts';
+import {
+  boundedRows,
+  CONTROL_PLANE_MAX_ROWS,
+  completeOrOmittedText,
+  plural,
+  structuralRows,
+  structuralValue,
+  summaryAttentionToken,
+} from './core.ts';
 import { inboxDeliveryLine } from './inbox.ts';
 import { reviewWarningMetadata } from './reviews.ts';
 
@@ -25,7 +33,10 @@ export function workstreamLines(
   );
   const lines = [
     `workstreams: ${matching.length} ${filter === 'all' ? 'matching all statuses' : filter} · ${workstreams.length} total`,
-    ...matching.map((workstream) => `${workstream.id} [${workstream.status}] ${workstream.title}`),
+    ...matching.map(
+      (workstream) =>
+        `${structuralValue(workstream.id)} [${workstream.status}] ${completeOrOmittedText(workstream.title, 120)}`,
+    ),
   ];
   return boundedRows(lines, maxRows);
 }
@@ -145,26 +156,29 @@ export function summaryLines(
   const refinementPending = state.inbox.some((event) => event.presentationBlocked === true);
   const visibleAttentionRows = attentionRows.slice(0, SUMMARY_ATTENTION_MAX_ROWS);
   const omittedAttentionRows = attentionRows.slice(visibleAttentionRows.length);
-  return boundedRows(
-    [
-      `pardes ${state.managerId} · revision ${state.revision}`,
-      `workstreams: ${workstreamCount('active')} active · ${workstreamCount('planned')} planned · ${workstreamCount('complete')} complete · ${workstreamCount('cancelled')} cancelled`,
-      `workers: ${agentCount('running')} running · ${agentCount('idle')} idle · ${agentCount('starting')} starting · ${agentCount('crashed')} crashed · ${warnings} warnings`,
-      `review gates: ${openReviews} open · ${attention} attention · advisory verifications: ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'current').length} current · ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'stale').length} stale · inbox: ${state.inbox.length} pending`,
-      ...(state.inboxWake || state.inboxHandoff || refinementPending
-        ? [inboxDeliveryLine(state)]
-        : []),
-      ...activationSummaryWarning(activation),
-      ...(attentionRows.length === 0
-        ? []
-        : [
-            `attention index: ${plural(attentionRows.length, 'signal')} · first ${visibleAttentionRows.length} shown · drill down: ${summaryAttentionHint(attentionRows)}`,
-            ...visibleAttentionRows.map((row) => row.line),
-            ...(omittedAttentionRows.length === 0
-              ? []
-              : [summaryAttentionOmittedLine(omittedAttentionRows)]),
-          ]),
-    ],
+  return structuralRows(
+    {
+      authoredLines: [
+        `pardes ${structuralValue(state.managerId)} · revision ${state.revision}`,
+        `workstreams: ${workstreamCount('active')} active · ${workstreamCount('planned')} planned · ${workstreamCount('complete')} complete · ${workstreamCount('cancelled')} cancelled`,
+        `workers: ${agentCount('running')} running · ${agentCount('idle')} idle · ${agentCount('starting')} starting · ${agentCount('crashed')} crashed · ${warnings} warnings`,
+        `review gates: ${openReviews} open · ${attention} attention · advisory verifications: ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'current').length} current · ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'stale').length} stale · inbox: ${state.inbox.length} pending`,
+        ...(state.inboxWake || state.inboxHandoff || refinementPending
+          ? [inboxDeliveryLine(state)]
+          : []),
+        ...activationSummaryWarning(activation),
+        ...(attentionRows.length === 0
+          ? []
+          : [
+              `attention index: ${plural(attentionRows.length, 'signal')} · first ${visibleAttentionRows.length} shown · drill down: ${summaryAttentionHint(attentionRows)}`,
+            ]),
+      ],
+      itemLines: visibleAttentionRows.map((row) => row.line),
+      retrievalHintLines:
+        omittedAttentionRows.length === 0
+          ? []
+          : [summaryAttentionOmittedLine(omittedAttentionRows)],
+    },
     CONTROL_PLANE_MAX_ROWS,
   );
 }

@@ -5,6 +5,8 @@ import {
   discoverRepository,
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
+  unavailableWorktreeCommitProvenance,
+  type WorktreeCommitProvenance,
 } from '../git/index.ts';
 import {
   type GitHubHostedMetadataShape,
@@ -194,6 +196,7 @@ export interface AgentSpawnInput {
 
 export interface AgentStatus {
   readonly agent: AgentRecord;
+  readonly gitProvenance?: WorktreeCommitProvenance;
   readonly runtime: WorkerRuntimeSnapshot | undefined;
 }
 
@@ -1770,6 +1773,7 @@ export class ManagerController {
     this: ManagerController,
     rawAgentId: string,
     ctx?: ExtensionContext,
+    includeGitProvenance = false,
   ) {
     const { agentId } = yield* decodeAgentIdInput({ agentId: rawAgentId });
     const state = yield* this.refresh(ctx);
@@ -1779,8 +1783,28 @@ export class ManagerController {
       .status(agentId)
       .pipe(Effect.catch(() => Effect.succeed(undefined)));
     if (runtime) this.liveRuntimes.set(agentId, runtime);
+    const inspectWithProvenance = this.worktrees.inspectWithProvenance;
+    const gitProvenance =
+      includeGitProvenance && agent.worktree && inspectWithProvenance
+        ? yield* inspectWithProvenance(
+            { agentId, managerId: state.managerId, repo: state.repo },
+            agent.worktree,
+          ).pipe(
+            Effect.map(
+              (inspection) =>
+                inspection.provenance ?? unavailableWorktreeCommitProvenance('inspection_failed'),
+            ),
+            Effect.catch(() =>
+              Effect.succeed(unavailableWorktreeCommitProvenance('inspection_failed')),
+            ),
+          )
+        : undefined;
     this.render(ctx);
-    return { agent, runtime } satisfies AgentStatus;
+    return {
+      agent,
+      ...(gitProvenance === undefined ? {} : { gitProvenance }),
+      runtime,
+    } satisfies AgentStatus;
   });
 
   private readonly sendAgentUnlocked = Effect.fnUntraced(function* (

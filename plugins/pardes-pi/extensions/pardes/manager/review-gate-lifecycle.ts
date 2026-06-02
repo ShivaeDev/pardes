@@ -328,6 +328,11 @@ interface AutoStopAuditPersistence {
   readonly enqueued: boolean;
 }
 
+interface WatcherFailurePersistence {
+  readonly changed: boolean;
+  readonly enqueued: boolean;
+}
+
 interface TerminalObservationFollowUp {
   readonly sourceAgentId: string;
   readonly mergedWorkstreamId?: string;
@@ -812,7 +817,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       timestamp,
       pullRequestEventAssociation(known),
     );
-    const changed = yield* namespace.store.mutate((state) => {
+    const outcome = yield* namespace.store.mutate<WatcherFailurePersistence, never>((state) => {
       const pullRequest = state.pullRequests[event.pullRequestId];
       if (
         !pullRequest ||
@@ -821,28 +826,29 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         (pullRequest.watcherFailedAt !== undefined &&
           pullRequest.watcherFailure?.kind === diagnostic.kind)
       )
-        return Effect.succeed([false, state] as const);
+        return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
+      const enqueued = pullRequest.watcherFailedAt === undefined;
       return Effect.succeed([
-        true,
+        { changed: true, enqueued },
         {
           ...state,
-          inbox: [...state.inbox, attention],
+          inbox: enqueued ? [...state.inbox, attention] : state.inbox,
           pullRequests: {
             ...state.pullRequests,
             [pullRequest.id]: {
               ...pullRequest,
               updatedAt: timestamp,
-              watcherFailedAt: timestamp,
+              watcherFailedAt: pullRequest.watcherFailedAt ?? timestamp,
               watcherFailure: diagnostic,
             },
           },
         },
       ] as const);
     });
-    if (!changed) return;
-    yield* callbacks.appendEventSafely(attention);
+    if (!outcome.changed) return;
+    if (outcome.enqueued) yield* callbacks.appendEventSafely(attention);
     yield* callbacks.refresh();
-    yield* callbacks.releaseInboxWake();
+    if (outcome.enqueued) yield* callbacks.releaseInboxWake();
   });
 
   const handlePullRequestHeadDivergence = Effect.fnUntraced(function* (event: {

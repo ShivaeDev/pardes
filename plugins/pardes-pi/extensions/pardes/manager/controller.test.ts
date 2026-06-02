@@ -6203,10 +6203,16 @@ describe('manager controller', () => {
       watcher.observeLifecycle(pullRequestId, observedPullRequest({ ci: 'failing' })),
     );
     await Effect.runPromise(watcher.fail(pullRequestId, repo));
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
+      kind: 'authentication_likely',
+      summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+    });
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeDefined();
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
-      kind: 'command_failed',
-      summary: 'GitHub CLI command failed; check gh connectivity.',
+      kind: 'rate_limit_likely',
+      summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
     });
     expect(
       controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
@@ -6221,13 +6227,24 @@ describe('manager controller', () => {
     ).not.toContain('fixture outage');
     expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
     expect(fixture.messages).toHaveLength(1);
+    const eventLogBeforeClear = readFileSync(
+      join(activationStateDir(fixture.entries), 'events.jsonl'),
+      'utf8',
+    );
+    expect(eventLogBeforeClear.match(/"type":"watcher_failed"/g)).toHaveLength(1);
+    expect(eventLogBeforeClear).not.toContain('authentication_likely');
+    expect(eventLogBeforeClear).not.toContain('rate_limit_likely');
 
     await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest({ ci: 'failing' })));
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeUndefined();
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toBeUndefined();
     expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
 
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
+      kind: 'authentication_likely',
+      summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+    });
     expect(
       controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
     ).toHaveLength(2);

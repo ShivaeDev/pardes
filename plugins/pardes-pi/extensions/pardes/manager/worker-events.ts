@@ -1,7 +1,14 @@
 import type { WorktreeInspection } from '../git/index.ts';
 import type { AgentReportReference } from '../reporting/index.ts';
 import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
-import type { AgentGitAudit, AgentGitAuditTrigger, AgentRecord, ManagerEvent } from './domain.ts';
+import {
+  type AgentGitAudit,
+  type AgentGitAuditTrigger,
+  type AgentRecord,
+  currentVerificationTerminalReportStatus,
+  type ManagerEvent,
+  type VerificationRecord,
+} from './domain.ts';
 import { formatPardesError } from './errors.ts';
 
 const MODEL_FACING_EVENT_TEXT_LIMIT = 240;
@@ -31,6 +38,37 @@ export interface WorkerEventSummary {
   readonly summary: string;
   readonly actionable: boolean;
   readonly reportPreviewTruncated?: boolean;
+}
+
+export type VerifierIdleDisposition =
+  | 'report_complete'
+  | 'handoff_settling'
+  | 'stopped_or_crashed'
+  | 'attached_idle_without_terminal_report';
+
+/**
+ * Classify verifier settlement without a timer. Pi RPC emits finalized tool
+ * results before its final idle edge, and the supervisor preserves that FIFO
+ * order. The ephemeral marker still names the in-process handoff explicitly.
+ */
+export function verifierIdleDisposition(
+  event: WorkerSupervisorEvent,
+  agent: AgentRecord,
+  verification: VerificationRecord | undefined,
+  terminalReportHandoffSettling = false,
+): VerifierIdleDisposition | undefined {
+  if (agent.role !== 'verifier' || verification === undefined) return;
+  if (
+    agent.status === 'stopped' ||
+    agent.status === 'crashed' ||
+    event.type === 'unexpected_exit' ||
+    (event.type === 'status' && (event.status === 'stopped' || event.status === 'crashed'))
+  )
+    return 'stopped_or_crashed';
+  if (event.type !== 'status' || event.status !== 'idle') return;
+  if (terminalReportHandoffSettling) return 'handoff_settling';
+  if (currentVerificationTerminalReportStatus(verification) !== undefined) return 'report_complete';
+  return 'attached_idle_without_terminal_report';
 }
 
 function normalizeModelFacingText(text: string): string {
@@ -122,7 +160,10 @@ export function workerEventSummary(
   event: WorkerSupervisorEvent,
   reportPersistence?: ReportArtifactPersistence,
   audit?: HandoffAuditOutcome,
-  options?: { readonly suppressIdleWakeup?: boolean },
+  options?: {
+    readonly suppressIdleWakeup?: boolean;
+    readonly verifierIdleDisposition?: VerifierIdleDisposition;
+  },
 ): WorkerEventSummary | undefined {
   if (event.type === 'report') {
     const type =
@@ -166,7 +207,19 @@ export function workerEventSummary(
       type: 'agent_protocol_error',
     };
   if (event.type === 'status' && event.status === 'idle') {
-    if (options?.suppressIdleWakeup) return undefined;
+    if (
+      options?.suppressIdleWakeup ||
+      options?.verifierIdleDisposition === 'report_complete' ||
+      options?.verifierIdleDisposition === 'handoff_settling' ||
+      options?.verifierIdleDisposition === 'stopped_or_crashed'
+    )
+      return undefined;
+    if (options?.verifierIdleDisposition === 'attached_idle_without_terminal_report')
+      return {
+        actionable: true,
+        summary: `${event.agentId}: terminal report missing; follow up; do not poll. Retained advisory verifier remains attached idle.`,
+        type: 'verification_terminal_report_missing',
+      };
     return {
       actionable: true,
       summary: `${event.agentId} is idle and ready for follow-up.`,
@@ -202,5 +255,12 @@ export function isDuplicateWorkerAttention(
   const dedupePendingGitAuditFailure =
     event?.type === 'agent_git_audit_failed' &&
     hasPendingAgentAttention(inbox, { agentId: workerEvent.agentId, type: event.type });
-  return dedupePendingProgressReportFailure || dedupePendingGitAuditFailure;
+  const dedupePendingVerifierMissingReport =
+    event?.type === 'verification_terminal_report_missing' &&
+    hasPendingAgentAttention(inbox, { agentId: workerEvent.agentId, type: event.type });
+  return (
+    dedupePendingProgressReportFailure ||
+    dedupePendingGitAuditFailure ||
+    dedupePendingVerifierMissingReport
+  );
 }

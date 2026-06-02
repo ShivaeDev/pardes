@@ -7562,6 +7562,92 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.verifications[verification.id]?.attempts).toHaveLength(2);
   });
 
+  test('warns once when an attached verifier settles idle without a terminal report and lets a later blocked report own handoff attention', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const stateDir = activationStateDir(fixture.entries);
+    const { agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'missing advisory terminal report',
+    );
+    const verification = await Effect.runPromise(
+      controller.requestVerification({ sourceAgentId: agent.id }, fixture.ctx),
+    );
+    const verifierAgentId = verification.verifierAgentId;
+
+    for (let index = 0; index < 2; index++) {
+      await Effect.runPromise(
+        workers.emit({
+          agentId: verifierAgentId,
+          sessionFile: controller.snapshot()?.agents[verifierAgentId]?.sessionFile,
+          status: 'idle',
+          type: 'status',
+        }),
+      );
+    }
+
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'verification_terminal_report_missing',
+    ]);
+    expect(controller.snapshot()?.inbox[0]?.summary).toContain(
+      'terminal report missing; follow up; do not poll',
+    );
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('idle');
+    expect(
+      currentVerificationAttempt(
+        requiredValue(controller.snapshot()?.verifications[verification.id]),
+      ).status,
+    ).toBe('idle');
+    expect(workers.stops).toEqual([]);
+    expect(
+      managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
+    ).toHaveLength(1);
+    expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
+    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain('do not poll');
+
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'running', type: 'status' }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
+        details: 'Bounded retained advisory blocker.',
+        status: 'blocked',
+        summary: 'One advisory blocker remains.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'idle', type: 'status' }),
+    );
+
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual(['agent_report_blocked']);
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('idle');
+    expect(
+      currentVerificationAttempt(
+        requiredValue(controller.snapshot()?.verifications[verification.id]),
+      ),
+    ).toMatchObject({ latestReport: { status: 'blocked' }, status: 'blocked' });
+    expect(workers.stops).toEqual([]);
+    expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
+    expect(
+      managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
+    ).toHaveLength(1);
+    expect(
+      managerEvents(stateDir).filter(({ type }) => type === 'agent_report_blocked'),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('auto-retires an idle retained verifier after merged writer review while preserving durable history and scratch metadata', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -7684,10 +7770,34 @@ describe('manager controller', () => {
       watcher.observe(published.pullRequest.id, observedPullRequest({ status: 'closed' })),
     );
 
-    expect(workers.stops).toEqual([verifierAgentId]);
+    expect(workers.stops).toEqual([]);
     expect(controller.snapshot()?.pullRequests[published.pullRequest.id]?.status).toBe('closed');
-    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('stopped');
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('idle');
     expect(controller.snapshot()?.agents[agent.id]?.status).toBe('running');
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'verification_terminal_report_missing',
+      'closed_unmerged',
+    ]);
+    expect(existsSync(join(reviewCheckout.path, 'closed-scratch.txt'))).toBe(true);
+
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'running', type: 'status' }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
+        details: 'Closed-review verifier detail.',
+        status: 'completed',
+        summary: 'Closed-review advisory complete.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({ agentId: verifierAgentId, status: 'idle', type: 'status' }),
+    );
+
+    expect(workers.stops).toEqual([verifierAgentId]);
+    expect(controller.snapshot()?.agents[verifierAgentId]?.status).toBe('stopped');
     expect(
       currentVerificationAttempt(
         requiredValue(controller.snapshot()?.verifications[verification.id]),
@@ -7736,6 +7846,15 @@ describe('manager controller', () => {
     await Effect.runPromise(
       workers.emit({
         agentId: verifierAgentId,
+        details: 'Terminal-review verifier detail.',
+        status: 'completed',
+        summary: 'Terminal-review advisory complete.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
         sessionFile: controller.snapshot()?.agents[verifierAgentId]?.sessionFile,
         status: 'idle',
         type: 'status',
@@ -7778,6 +7897,15 @@ describe('manager controller', () => {
     await Effect.runPromise(
       workers.emit({
         agentId: verifierAgentId,
+        details: 'Compaction-settlement verifier detail.',
+        status: 'completed',
+        summary: 'Compaction-settlement advisory complete.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
         sessionFile: controller.snapshot()?.agents[verifierAgentId]?.sessionFile,
         status: 'idle',
         type: 'status',
@@ -7806,7 +7934,7 @@ describe('manager controller', () => {
       currentVerificationAttempt(
         requiredValue(controller.snapshot()?.verifications[verification.id]),
       ).status,
-    ).toBe('idle');
+    ).toBe('completed');
     expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
 
     const settled = { ...compacting, isCompacting: false };

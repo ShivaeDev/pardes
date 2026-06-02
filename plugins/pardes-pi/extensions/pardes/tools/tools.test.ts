@@ -2133,6 +2133,15 @@ describe('Pardes model-visible tools', () => {
         summary: 'Worker completed the focused slice.',
         type: 'agent_report_completed',
       },
+      'event-verifier-missing-report': {
+        agentId: 'verifier-1',
+        createdAt,
+        id: 'event-verifier-missing-report',
+        summary:
+          'verifier-1: terminal report missing; follow up; do not poll. Retained advisory verifier remains attached idle.',
+        type: 'verification_terminal_report_missing',
+        verificationId: 'verify-1',
+      },
       'event-verifier-question': {
         agentId: 'verifier-1',
         createdAt,
@@ -2249,6 +2258,24 @@ describe('Pardes model-visible tools', () => {
       reportId: 'report-verifier',
       sourceRole: 'verifier',
       trust: 'child_authored',
+      verificationId: 'verify-1',
+    });
+
+    const verifierMissingReport = await inboxGet.execute(
+      'call-verifier-missing-report',
+      { eventId: 'event-verifier-missing-report' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(verifierMissingReport.content[0]?.text).toContain(
+      '[Pardes-authored durable inbox summary]',
+    );
+    expect(verifierMissingReport.details).toMatchObject({
+      agentId: 'verifier-1',
+      eventId: 'event-verifier-missing-report',
+      trust: 'pardes',
+      type: 'verification_terminal_report_missing',
       verificationId: 'verify-1',
     });
 

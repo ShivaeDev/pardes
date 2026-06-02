@@ -13,6 +13,7 @@ import {
 import {
   type AgentRecord,
   currentVerificationAttempt,
+  currentVerificationTerminalReportStatus,
   type ManagerEvent,
   type ManagerState,
   VERIFICATION_ATTEMPT_HISTORY_MAX,
@@ -1044,7 +1045,12 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
     )
       return false;
     const verifierAgent = namespace.state.agents[verification.verifierAgentId];
-    if (!verifierAgent || verifierAgent.role !== 'verifier' || verifierAgent.status !== 'idle')
+    if (
+      !verifierAgent ||
+      verifierAgent.role !== 'verifier' ||
+      verifierAgent.status !== 'idle' ||
+      currentVerificationTerminalReportStatus(verification) === undefined
+    )
       return false;
     const stoppedResult = yield* workers.stopIfIdle(verifierAgent.id).pipe(Effect.exit);
     if (Exit.isFailure(stoppedResult)) {

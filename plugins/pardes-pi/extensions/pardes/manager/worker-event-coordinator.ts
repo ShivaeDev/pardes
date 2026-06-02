@@ -7,6 +7,7 @@ import type { AgentAttachmentLifecycleCoordinatorShape } from './agent-attachmen
 import {
   type AgentRecord,
   currentVerificationAttempt,
+  currentVerificationTerminalReportStatus,
   type ManagerEvent,
   type ManagerState,
 } from './domain.ts';
@@ -21,6 +22,7 @@ import {
   boundedFailureSummary,
   isDuplicateWorkerAttention,
   type ReportArtifactPersistence,
+  verifierIdleDisposition,
   workerEventSummary,
 } from './worker-events.ts';
 
@@ -224,7 +226,11 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       workerEvent.type === 'report' && workerEvent.status === 'completed'
         ? yield* attachments.auditHandoffBestEffort(persistedAgent, 'completion')
         : undefined;
-    if (workerEvent.type === 'report' && workerEvent.status === 'completed')
+    if (
+      workerEvent.type === 'report' &&
+      (workerEvent.status === 'completed' ||
+        (persistedAgent.role === 'verifier' && workerEvent.status === 'blocked'))
+    )
       suppressIdleWakeups.add(workerEvent.agentId);
     else if (workerEvent.type !== 'status' || workerEvent.status !== 'idle')
       suppressIdleWakeups.delete(workerEvent.agentId);
@@ -232,7 +238,16 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       workerEvent.type === 'status' &&
       workerEvent.status === 'idle' &&
       suppressIdleWakeups.delete(workerEvent.agentId);
-    const event = workerEventSummary(workerEvent, reportPersistence, audit, { suppressIdleWakeup });
+    const verifierIdle = verifierIdleDisposition(
+      workerEvent,
+      persistedAgent,
+      persistedVerification,
+      suppressIdleWakeup,
+    );
+    const event = workerEventSummary(workerEvent, reportPersistence, audit, {
+      suppressIdleWakeup,
+      ...(verifierIdle === undefined ? {} : { verifierIdleDisposition: verifierIdle }),
+    });
     const association: ManagerEventAssociation = {
       agentId: workerEvent.agentId,
       workstreamId: persistedAgent.workstreamId,
@@ -286,7 +301,9 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       );
       const verificationStatus =
         workerEvent.type === 'status'
-          ? workerEvent.status
+          ? workerEvent.status === 'idle'
+            ? (currentVerificationTerminalReportStatus(verification) ?? workerEvent.status)
+            : workerEvent.status
           : workerEvent.type === 'unexpected_exit'
             ? ('crashed' as const)
             : workerEvent.type === 'report' && workerEvent.status !== 'progress'

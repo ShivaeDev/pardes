@@ -435,6 +435,31 @@ describe('GitHub integration-health inspection', () => {
     });
   });
 
+  test('rejects a same-repository association whose URL path number disagrees with metadata', async () => {
+    const fixture = scriptedRunner([
+      result(
+        JSON.stringify({
+          data: {
+            rateLimit: RATE_LIMIT,
+            repository: { defaultBranchRef: null },
+          },
+        }),
+      ),
+    ]);
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association({ url: 'https://github.com/acme/project/pull/43' })],
+      }),
+    );
+
+    expect(fixture.invocations).toHaveLength(1);
+    expect(inspection.pullRequests[0]).toMatchObject({
+      hostedChecks: { availability: 'unavailable', issue: 'association_invalid' },
+      pullRequestHead: 'unavailable',
+    });
+  });
+
   test('reserves opt-in health GraphQL spend before launch so watcher admission sees in-flight debt', async () => {
     const entered = await Effect.runPromise(Deferred.make<void>());
     const runner: GitHubCommandRunnerShape = {

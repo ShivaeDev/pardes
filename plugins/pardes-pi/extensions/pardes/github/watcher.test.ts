@@ -8,6 +8,7 @@ import {
   GitHubWatcher,
   type GitHubWatcherCallbacks,
   type GitHubWatcherThrottleDiagnostic,
+  MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
   makeGitHubHostedMetadataAdapter,
   makeGitHubWatcherService as makeGitHubWatcherServiceProduction,
   type PullRequestObservation,
@@ -711,6 +712,38 @@ describe('GitHub watcher service', () => {
         },
       ]);
     }
+  });
+
+  test('defers before ready when 63 identities leave no slot for the mandatory CLI inspection', async () => {
+    const fixture = scriptedRunner([rateLimitFallbackResult()]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 1; index += 1) {
+      const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
+      await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
+    }
+    const service = makeGitHubWatcherServiceProduction({
+      hostedMetadata,
+      runner: fixture.runner,
+    });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.observations).toEqual([]);
+    expect(received.failures).toEqual([]);
+    expect(received.throttleDiagnostics).toEqual([
+      { status: 'proactive_throttle', tier: 'paused' },
+    ]);
+    expect(fixture.invocations).toEqual([
+      {
+        args: ['api', 'rate_limit', '--hostname', 'github.com'],
+        command: 'gh',
+        cwd: '/tmp/project',
+      },
+    ]);
+    expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
+      watcherPolling: { reason: 'proactive_throttle', status: 'deferred', tier: 'paused' },
+    });
   });
 
   test('rechecks the bounded budget between review gates and defers later gates after a low GraphQL observation', async () => {

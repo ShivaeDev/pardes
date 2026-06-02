@@ -1015,7 +1015,9 @@ export function makeGitHubHostedMetadataAdapter(
               { ...pruned, nextWatcherAdmissionAtMillis: untilMillis, watcherPolling },
             ] as const;
           }
-          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS) {
+          // A ready watcher cycle immediately needs both its discussion identity and the
+          // pre-discussion CLI inspection identity. Preserve capacity for that mandatory pair.
+          if (identityDebtCount(debt) >= MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 1) {
             const watcherPolling = proactiveWatcherThrottle(
               'paused',
               remaining,

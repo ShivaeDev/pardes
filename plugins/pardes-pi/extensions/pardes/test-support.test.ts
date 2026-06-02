@@ -14,6 +14,7 @@ import { describe, expect, test } from 'vitest';
 import {
   copyGitTemplate,
   GIT_FIXTURE_DIAGNOSTICS_MAX_CHARS,
+  normalizeControlledLocalRemoteProtocolEnvironment,
   readGitFixtureDiagnosticsForTest,
   runGitFixture,
   runGitFixtureWithOptions,
@@ -133,6 +134,28 @@ describe('Git fixture test support', () => {
       }
     });
   }
+
+  test('scopes controlled local-remote protocol normalization and restores inherited policy', () => {
+    const previous = {
+      allow: process.env.GIT_ALLOW_PROTOCOL,
+      fromUser: process.env.GIT_PROTOCOL_FROM_USER,
+    };
+    process.env.GIT_ALLOW_PROTOCOL = 'https';
+    process.env.GIT_PROTOCOL_FROM_USER = '0';
+    const restore = normalizeControlledLocalRemoteProtocolEnvironment();
+    try {
+      expect(process.env.GIT_ALLOW_PROTOCOL).toBeUndefined();
+      expect(process.env.GIT_PROTOCOL_FROM_USER).toBeUndefined();
+      restore();
+      expect(process.env.GIT_ALLOW_PROTOCOL).toBe('https');
+      expect(process.env.GIT_PROTOCOL_FROM_USER).toBe('0');
+    } finally {
+      if (previous.allow === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+      else process.env.GIT_ALLOW_PROTOCOL = previous.allow;
+      if (previous.fromUser === undefined) delete process.env.GIT_PROTOCOL_FROM_USER;
+      else process.env.GIT_PROTOCOL_FROM_USER = previous.fromUser;
+    }
+  });
 
   test('times out stalled Git commands boundedly with actionable captured diagnostics', () => {
     const timeoutMs = 25;

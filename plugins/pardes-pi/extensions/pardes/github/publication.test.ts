@@ -4,7 +4,10 @@ import { join } from 'node:path';
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
-import { runGitFixture } from '../test-support.ts';
+import {
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  runGitFixture,
+} from '../test-support.ts';
 import {
   GitHubCommandError,
   makeGitHubHostedMetadataAdapter,
@@ -290,6 +293,12 @@ describe('GitHub publication boundary', () => {
     const origin = join(root, 'origin.git');
     const project = join(root, 'project');
     const git = (...args: string[]) => runGitFixture(project, ...args);
+    const restoreInheritedGitProtocolEnvironment =
+      normalizeControlledLocalRemoteProtocolEnvironment();
+    process.env.GIT_ALLOW_PROTOCOL = 'https';
+    process.env.GIT_PROTOCOL_FROM_USER = '0';
+    const restorePoisonedGitProtocolEnvironment =
+      normalizeControlledLocalRemoteProtocolEnvironment();
     try {
       runGitFixture(root, 'init', '--bare', '-b', 'main', origin);
       runGitFixture(root, 'init', '-b', 'main', project);
@@ -330,6 +339,8 @@ describe('GitHub publication boundary', () => {
         'refs/heads/actor/pardes/readable-branch-ux',
       );
     } finally {
+      restorePoisonedGitProtocolEnvironment();
+      restoreInheritedGitProtocolEnvironment();
       rmSync(root, { force: true, recursive: true });
     }
   });

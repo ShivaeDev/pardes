@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Deferred, Effect, Fiber } from 'effect';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
@@ -39,7 +39,12 @@ import {
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
 import { makeFileSystemStateStore } from '../storage/index.ts';
-import { copyOriginGitRepositoryFixture, requiredValue, runGitFixture } from '../test-support.ts';
+import {
+  copyOriginGitRepositoryFixture,
+  normalizeControlledLocalRemoteProtocolEnvironment,
+  requiredValue,
+  runGitFixture,
+} from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
@@ -64,6 +69,12 @@ import { ManagerInputValidationError } from './inputs.ts';
 const temporaryDirectories: string[] = [];
 const originalStateDir = process.env.PARDES_PI_STATE_DIR;
 const githubWatcherFixtures: GitHubWatcherShape[] = [];
+let restoreGitProtocolEnvironment: (() => void) | undefined;
+
+beforeEach(() => {
+  // Controller fixtures intentionally use copied local file origins through production Git transport.
+  restoreGitProtocolEnvironment = normalizeControlledLocalRemoteProtocolEnvironment();
+});
 
 class ManagerController extends ProductionManagerController {
   constructor(pi: ExtensionAPI, options: ManagerControllerOptions = {}) {
@@ -86,11 +97,16 @@ type MutablePersistedAgentPaths = {
 };
 
 afterEach(async () => {
-  await stopGithubWatcherFixtures();
-  for (const directory of temporaryDirectories.splice(0))
-    rmSync(directory, { force: true, recursive: true });
-  if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
-  else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+  try {
+    await stopGithubWatcherFixtures();
+    for (const directory of temporaryDirectories.splice(0))
+      rmSync(directory, { force: true, recursive: true });
+    if (originalStateDir === undefined) delete process.env.PARDES_PI_STATE_DIR;
+    else process.env.PARDES_PI_STATE_DIR = originalStateDir;
+  } finally {
+    restoreGitProtocolEnvironment?.();
+    restoreGitProtocolEnvironment = undefined;
+  }
 });
 
 function git(cwd: string, ...args: string[]): string {

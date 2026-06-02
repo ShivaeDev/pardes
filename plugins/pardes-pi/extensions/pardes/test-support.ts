@@ -70,6 +70,21 @@ const GIT_FIXTURE_ONLY_UNSAFE_ENVIRONMENT_VARIABLES = [
   'GIT_PROTOCOL_FROM_USER',
 ] as const;
 
+export function normalizeControlledLocalRemoteProtocolEnvironment(): () => void {
+  const inherited = {
+    allow: process.env.GIT_ALLOW_PROTOCOL,
+    fromUser: process.env.GIT_PROTOCOL_FROM_USER,
+  };
+  delete process.env.GIT_ALLOW_PROTOCOL;
+  delete process.env.GIT_PROTOCOL_FROM_USER;
+  return () => {
+    if (inherited.allow === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = inherited.allow;
+    if (inherited.fromUser === undefined) delete process.env.GIT_PROTOCOL_FROM_USER;
+    else process.env.GIT_PROTOCOL_FROM_USER = inherited.fromUser;
+  };
+}
+
 function gitFixtureEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     ...gitEnvironmentForExplicitCwd(),

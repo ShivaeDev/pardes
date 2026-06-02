@@ -345,6 +345,16 @@ interface WatcherFailurePersistence {
   readonly enqueued: boolean;
 }
 
+export interface GitHubRateLimitSymptom {
+  readonly pullRequestId: string;
+  readonly expectedHeadSha?: string;
+}
+
+/** Optional manager-composition seam for rate-budget ownership landing on a separate branch. */
+export interface GitHubRateLimitSymptomOwnershipPort {
+  readonly consume: (symptom: GitHubRateLimitSymptom) => Effect.Effect<boolean, unknown>;
+}
+
 interface TerminalObservationFollowUp {
   readonly sourceAgentId: string;
   readonly mergedWorkstreamId?: string;
@@ -388,6 +398,7 @@ export interface ReviewGateLifecycleCoordinatorCallbacks {
   readonly retireResolvedVerificationsForSource: (
     sourceAgentId: string,
   ) => Effect.Effect<void, unknown>;
+  readonly githubRateLimitSymptomOwnership?: GitHubRateLimitSymptomOwnershipPort;
 }
 
 export interface ReviewGateLifecycleCoordinatorOptions {
@@ -821,8 +832,20 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       return;
     const diagnostic = classifyGitHubWatcherFailure(event.error);
     // Rate-budget software owns quiet throttling, recovery, and budget-health
-    // projection. A likely rate-limit symptom is not PR attention.
-    if (diagnostic.kind === 'rate_limit_likely') return;
+    // projection when its separately integrated controller-lifetime port confirms
+    // ownership. Until then fail safe with one bounded PR-attention fallback.
+    if (diagnostic.kind === 'rate_limit_likely' && callbacks.githubRateLimitSymptomOwnership) {
+      const ownership = yield* Effect.suspend(
+        () =>
+          callbacks.githubRateLimitSymptomOwnership?.consume({
+            pullRequestId: event.pullRequestId,
+            ...(event.expectedHeadSha === undefined
+              ? {}
+              : { expectedHeadSha: event.expectedHeadSha }),
+          }) ?? Effect.succeed(false),
+      ).pipe(Effect.exit);
+      if (Exit.isSuccess(ownership) && ownership.value) return;
+    }
     const timestamp = yield* nowIso;
     const attention = makeEvent(
       'watcher_failed',
@@ -839,8 +862,9 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       )
         return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
       const enqueued = !hasPendingWatcherFailureAttention(state.inbox, attention);
-      const changed = enqueued || pullRequest.watcherFailure?.kind !== diagnostic.kind;
-      if (!changed) return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
+      // Keep current diagnosis stable while its equivalent canonical warning is
+      // already pending. New diagnosis rows may update current/onset projection.
+      if (!enqueued) return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
       return Effect.succeed([
         { changed: true, enqueued },
         {

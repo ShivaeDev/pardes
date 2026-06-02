@@ -5,7 +5,7 @@ import {
   hasPullRequestWarningMetadata,
 } from './attention.ts';
 import type { AgentRecord, ManagerEvent, ManagerState } from './domain.ts';
-import { projectVerificationReviewLoopDisposition } from './verification.ts';
+import { projectVerificationReviewLoopDisposition } from './verification-policy.ts';
 
 export const IDLE_WORKER_DISPOSITION_PRECEDENCE = [
   'needs_attention',

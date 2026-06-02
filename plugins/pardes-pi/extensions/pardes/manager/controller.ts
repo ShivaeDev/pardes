@@ -119,9 +119,9 @@ import {
 } from './review-gate-lifecycle.ts';
 import {
   makeVerificationLifecycleCoordinator,
-  updateCurrentVerificationAttempt,
   type VerificationLifecycleCoordinatorShape,
 } from './verification.ts';
+import { updateCurrentVerificationAttempt } from './verification-policy.ts';
 import {
   makeWorkerSupervisorEventCoordinator,
   type WorkerSupervisorEventCoordinatorShape,

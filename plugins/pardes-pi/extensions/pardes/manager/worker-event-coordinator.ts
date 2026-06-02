@@ -15,7 +15,7 @@ import type { ReviewGateLifecycleCoordinatorShape } from './review-gate-lifecycl
 import {
   projectVerificationReviewLoopDisposition,
   updateCurrentVerificationAttempt,
-} from './verification.ts';
+} from './verification-policy.ts';
 import {
   applyHandoffAudit,
   boundedFailureSummary,

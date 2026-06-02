@@ -35,6 +35,16 @@ const PositiveIntegerSchema = Schema.Number.check(Schema.isInt(), Schema.isGreat
 const GitHubGraphQLResetAtSchema = Schema.String.check(
   Schema.isMaxLength(32),
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/),
+  Schema.makeFilter(
+    (resetAt) => {
+      const timestamp = Date.parse(resetAt);
+      return (
+        Number.isFinite(timestamp) &&
+        new Date(timestamp).toISOString() === resetAt.replace(/Z$/, '.000Z')
+      );
+    },
+    { description: 'a valid UTC reset timestamp' },
+  ),
 );
 const GitHubRestResetEpochSecondsSchema = NonNegativeIntegerSchema.check(
   Schema.isLessThanOrEqualTo(10_000_000_000),
@@ -45,13 +55,21 @@ export const GitHubGraphQLRateLimitSchema = Schema.Struct({
   limit: NonNegativeIntegerSchema,
   remaining: NonNegativeIntegerSchema,
   resetAt: GitHubGraphQLResetAtSchema,
-});
+}).check(
+  Schema.makeFilter(({ limit, remaining }) => remaining <= limit, {
+    description: 'remaining token budget no greater than its limit',
+  }),
+);
 export type GitHubGraphQLRateLimit = typeof GitHubGraphQLRateLimitSchema.Type;
 const GitHubRestRateLimitResourceSchema = Schema.Struct({
   limit: NonNegativeIntegerSchema,
   remaining: NonNegativeIntegerSchema,
   reset: GitHubRestResetEpochSecondsSchema,
-});
+}).check(
+  Schema.makeFilter(({ limit, remaining }) => remaining <= limit, {
+    description: 'remaining token budget no greater than its limit',
+  }),
+);
 /** Narrow fallback for paths whose selected JSON cannot carry GraphQL `rateLimit`. */
 export const GitHubRateLimitFallbackSchema = Schema.Struct({
   resources: Schema.Struct({

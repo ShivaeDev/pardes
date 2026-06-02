@@ -19,6 +19,7 @@ import type {
   GitHubResponseError,
   GitHubSyncInputError,
   GitHubWatcherInputError,
+  GitHubWatcherTimeoutError,
 } from '../github/index.ts';
 import type {
   ReportArtifactError,
@@ -153,6 +154,7 @@ export type PardesError =
   | GitHubPublicationInputError
   | GitHubSyncInputError
   | GitHubWatcherInputError
+  | GitHubWatcherTimeoutError
   | PullRequestPublicationValidationError
   | VerificationRequestRejectedError
   | VerificationNotFoundError
@@ -298,6 +300,9 @@ export function formatPardesError(error: unknown): string {
     }
     if (tagged._tag === 'GitHubWatcherInputError') {
       return 'Invalid persisted GitHub watcher association.';
+    }
+    if (tagged._tag === 'GitHubWatcherTimeoutError') {
+      return 'GitHub watcher command timed out.';
     }
     if (tagged._tag === 'InvalidWorktreeInputError' && 'field' in tagged && tagged.message) {
       return `Invalid ${String(tagged.field)}: ${tagged.message}`;

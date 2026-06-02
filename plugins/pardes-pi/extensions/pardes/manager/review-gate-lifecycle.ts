@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Cause, Clock, Context, Effect, Exit, Semaphore } from 'effect';
 import {
+  classifyGitHubWatcherFailure,
   derivePullRequestTransitions,
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
@@ -63,6 +64,18 @@ function makeEvent(
   association: ManagerEventAssociation = {},
 ): ManagerEvent {
   return { createdAt, id: randomUUID(), summary, type, ...association };
+}
+
+function hasPendingWatcherFailureAttention(
+  inbox: ReadonlyArray<ManagerEvent>,
+  attention: ManagerEvent,
+): boolean {
+  return inbox.some(
+    (event) =>
+      event.type === 'watcher_failed' &&
+      event.pullRequestId === attention.pullRequestId &&
+      event.summary === attention.summary,
+  );
 }
 
 function pullRequestObservationsEqual(
@@ -449,6 +462,21 @@ interface AutoStopAuditPersistence {
   readonly enqueued: boolean;
 }
 
+interface WatcherFailurePersistence {
+  readonly changed: boolean;
+  readonly enqueued: boolean;
+}
+
+export interface GitHubRateLimitSymptom {
+  readonly pullRequestId: string;
+  readonly expectedHeadSha?: string;
+}
+
+/** Optional manager-composition seam for rate-budget ownership landing on a separate branch. */
+export interface GitHubRateLimitSymptomOwnershipPort {
+  readonly consume: (symptom: GitHubRateLimitSymptom) => Effect.Effect<boolean, unknown>;
+}
+
 interface TerminalObservationFollowUp {
   readonly sourceAgentId: string;
   readonly mergedWorkstreamId?: string;
@@ -492,6 +520,7 @@ export interface ReviewGateLifecycleCoordinatorCallbacks {
   readonly retireResolvedVerificationsForSource: (
     sourceAgentId: string,
   ) => Effect.Effect<void, unknown>;
+  readonly githubRateLimitSymptomOwnership?: GitHubRateLimitSymptomOwnershipPort;
 }
 
 export interface ReviewGateLifecycleCoordinatorOptions {
@@ -803,7 +832,8 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       ) ||
       known.number !== nextObservation.number ||
       known.status !== nextObservation.status ||
-      ((complete || nextObservation.status !== 'open') && known.watcherFailedAt !== undefined) ||
+      ((complete || nextObservation.status !== 'open') &&
+        (known.watcherFailedAt !== undefined || known.watcherFailure !== undefined)) ||
       known.headDivergedAt !== undefined;
     if (!changed) {
       // A repeated terminal observation is also a bounded recovery edge. The
@@ -860,7 +890,11 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           nextDiscussionPaginationGaps,
         );
       const { headDivergedAt: _headDivergedAt, ...withoutHeadDivergence } = pullRequest;
-      const { watcherFailedAt: _watcherFailedAt, ...withoutWatcherFailure } = withoutHeadDivergence;
+      const {
+        watcherFailedAt: _watcherFailedAt,
+        watcherFailure: _watcherFailure,
+        ...withoutWatcherFailure
+      } = withoutHeadDivergence;
       const watcherCleared =
         complete || nextObservation.status !== 'open'
           ? withoutWatcherFailure
@@ -941,47 +975,73 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
   const handlePullRequestWatcherFailure = Effect.fnUntraced(function* (event: {
     readonly pullRequestId: string;
     readonly expectedHeadSha?: string;
+    readonly error: unknown;
   }) {
     const known = namespace.state.pullRequests[event.pullRequestId];
     if (
       !known ||
       !watcherEventMatchesAssociation(known, event.expectedHeadSha) ||
-      known.status !== 'open' ||
-      known.watcherFailedAt !== undefined
+      known.status !== 'open'
     )
       return;
+    const diagnostic = classifyGitHubWatcherFailure(event.error);
+    // Rate-budget software owns quiet throttling, recovery, and budget-health
+    // projection when its separately integrated controller-lifetime port confirms
+    // ownership. Until then fail safe with one bounded PR-attention fallback.
+    if (diagnostic.kind === 'rate_limit_likely' && callbacks.githubRateLimitSymptomOwnership) {
+      const ownership = yield* Effect.suspend(
+        () =>
+          callbacks.githubRateLimitSymptomOwnership?.consume({
+            pullRequestId: event.pullRequestId,
+            ...(event.expectedHeadSha === undefined
+              ? {}
+              : { expectedHeadSha: event.expectedHeadSha }),
+          }) ?? Effect.succeed(false),
+      ).pipe(Effect.exit);
+      if (Exit.isSuccess(ownership) && ownership.value) return;
+    }
     const timestamp = yield* nowIso;
     const attention = makeEvent(
       'watcher_failed',
-      `${pullRequestLabel(known)} watcher failed; inspect GitHub CLI connectivity and authentication.`,
+      `${pullRequestLabel(known)} watcher failed [${diagnostic.kind}]: ${diagnostic.summary} Raw CLI diagnostics omitted.`,
       timestamp,
       pullRequestEventAssociation(known),
     );
-    const changed = yield* namespace.store.mutate((state) => {
+    const outcome = yield* namespace.store.mutate<WatcherFailurePersistence, never>((state) => {
       const pullRequest = state.pullRequests[event.pullRequestId];
       if (
         !pullRequest ||
         !watcherEventMatchesAssociation(pullRequest, event.expectedHeadSha) ||
-        pullRequest.status !== 'open' ||
-        pullRequest.watcherFailedAt !== undefined
+        pullRequest.status !== 'open'
       )
-        return Effect.succeed([false, state] as const);
+        return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
+      const enqueued = !hasPendingWatcherFailureAttention(state.inbox, attention);
+      // Keep current diagnosis stable while its equivalent canonical warning is
+      // already pending. Returning the authoritative state object exactly also
+      // avoids a filesystem rewrite and durable revision bump. New diagnosis rows
+      // may update current/onset projection.
+      if (!enqueued) return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
       return Effect.succeed([
-        true,
+        { changed: true, enqueued },
         {
           ...state,
-          inbox: [...state.inbox, attention],
+          inbox: enqueued ? [...state.inbox, attention] : state.inbox,
           pullRequests: {
             ...state.pullRequests,
-            [pullRequest.id]: { ...pullRequest, updatedAt: timestamp, watcherFailedAt: timestamp },
+            [pullRequest.id]: {
+              ...pullRequest,
+              updatedAt: timestamp,
+              watcherFailedAt: pullRequest.watcherFailedAt ?? timestamp,
+              watcherFailure: diagnostic,
+            },
           },
         },
       ] as const);
     });
-    if (!changed) return;
-    yield* callbacks.appendEventSafely(attention);
+    if (!outcome.changed) return;
+    if (outcome.enqueued) yield* callbacks.appendEventSafely(attention);
     yield* callbacks.refresh();
-    yield* callbacks.releaseInboxWake();
+    if (outcome.enqueued) yield* callbacks.releaseInboxWake();
   });
 
   const handlePullRequestHeadDivergence = Effect.fnUntraced(function* (event: {

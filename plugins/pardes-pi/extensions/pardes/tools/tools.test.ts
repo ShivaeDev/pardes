@@ -645,6 +645,10 @@ describe('Pardes model-visible tools', () => {
           observedHeadSha: 'b'.repeat(40),
           pullRequestHead: 'current',
           sharedFailingWorkflowCount: 1,
+          watcherFailure: {
+            kind: 'authentication_likely',
+            summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+          },
         },
       ],
     };
@@ -676,6 +680,7 @@ describe('Pardes model-visible tools', () => {
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
         'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
+        '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
       ].join('\n'),
     );
@@ -1395,6 +1400,58 @@ describe('Pardes model-visible tools', () => {
     expect(reviews.content[0]?.text).toContain(
       '#42 [open] ws-active · agent-gap · ci:passing · review:approved · merge:mergeable · ⚠ discussion-gap:2(issue_comment,inline_review_comment)',
     );
+  });
+
+  test('keeps the current bounded watcher diagnosis visible in default and review status after inbox acknowledgement', async () => {
+    const base = managerState();
+    const active = workstream('ws-active', 'active');
+    const gate: PullRequestRecord = {
+      agentId: 'agent-watcher',
+      createdAt,
+      id: 'pr-watcher',
+      number: 42,
+      status: 'open',
+      updatedAt: createdAt,
+      url: 'https://github.test/acme/project/pull/42',
+      watcherFailedAt: createdAt,
+      watcherFailure: {
+        kind: 'authentication_likely',
+        summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+      },
+      workstreamId: active.id,
+    };
+    const manager = {
+      runtimeSnapshots: () => new Map(),
+      snapshot: () => ({
+        ...base,
+        inbox: [],
+        pullRequests: { [gate.id]: gate },
+        workstreams: { [active.id]: active },
+      }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerWorkstreamTools(pi, manager);
+    const status = requiredValue(tools.get('pardes_status'));
+
+    const summary = await status.execute('call-1', {}, signal, onUpdate, ctx);
+    const reviews = await status.execute(
+      'call-2',
+      { reviewFilter: 'attention', view: 'reviews' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+
+    expect(summary.content[0]?.text).toContain(
+      '! review #42 [open] · ws-active · agent-watcher · ⚠ watcher:authentication_likely',
+    );
+    expect(reviews.content[0]?.text).toContain(
+      '#42 [open] ws-active · agent-watcher · observation:none · ⚠ watcher:authentication_likely',
+    );
+    expect(reviews.content[0]?.text).toContain(
+      '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
+    );
+    expect(`${summary.content[0]?.text}\n${reviews.content[0]?.text}`).not.toContain('stderr');
   });
 
   test('exposes delivered, awaiting-user, and queued-suffix inbox handoff state compactly', async () => {
@@ -2197,6 +2254,14 @@ describe('Pardes model-visible tools', () => {
         type: 'agent_report_completed',
         verificationId: 'verify-1',
       },
+      'event-watcher': {
+        createdAt,
+        id: 'event-watcher',
+        pullRequestId: 'pr-42',
+        summary:
+          '#42 watcher failed [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
+        type: 'watcher_failed',
+      },
     };
     const manager = {
       getInboxEvent: ({ eventId }: { readonly eventId: string }) =>
@@ -2256,6 +2321,25 @@ describe('Pardes model-visible tools', () => {
       eventId: 'event-metadata',
       pullRequestId: 'pr-42',
       trust: 'external_metadata',
+    });
+
+    const watcher = await inboxGet.execute(
+      'call-watcher',
+      { eventId: 'event-watcher' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(watcher.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
+    expect(watcher.content[0]?.text).toContain(
+      'GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
+    );
+    expect(watcher.content[0]?.text).not.toContain('stderr');
+    expect(watcher.details).toMatchObject({
+      eventId: 'event-watcher',
+      pullRequestId: 'pr-42',
+      trust: 'external_metadata',
+      type: 'watcher_failed',
     });
 
     const merged = await inboxGet.execute(

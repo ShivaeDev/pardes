@@ -37,6 +37,8 @@ type ManagerEventAssociation = Pick<
   | 'pullRequestId'
   | 'verificationId'
   | 'reportId'
+  | 'reportPreviewChars'
+  | 'reportPreviewOmissionReason'
   | 'reportPreviewTruncated'
 >;
 
@@ -268,6 +270,12 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       ...(reportPersistence?.status === 'persisted'
         ? {
             reportId: reportPersistence.reportId,
+            ...(event?.reportPreviewChars === undefined
+              ? {}
+              : { reportPreviewChars: event.reportPreviewChars }),
+            ...(event?.reportPreviewOmissionReason === undefined
+              ? {}
+              : { reportPreviewOmissionReason: event.reportPreviewOmissionReason }),
             reportPreviewTruncated: event?.reportPreviewTruncated ?? false,
           }
         : {}),

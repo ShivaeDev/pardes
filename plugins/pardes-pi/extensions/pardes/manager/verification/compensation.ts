@@ -93,7 +93,7 @@ export function makeVerificationProvisioningCompensation(
         const agent = state.agents[current.verifierAgentId];
         const failed = {
           ...withVerificationStatus(
-            withStaleCurrentEvidence(current, reason, timestamp),
+            withStaleCurrentEvidence(current, 'provisioning_failed', timestamp, reason),
             'crashed',
             timestamp,
           ),

@@ -1,6 +1,11 @@
-import { Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
 import { CHILD_QUESTION_CONTEXT_MAX_CHARS, CHILD_QUESTION_MAX_CHARS } from '../child-profile.ts';
+import {
+  type WorkerProtocolDiagnostic,
+  workerCompactionFailure,
+  workerProtocolDiagnostic,
+} from '../diagnostics.ts';
 
 const MAX_PROTOCOL_ERROR_LENGTH = 240;
 
@@ -170,6 +175,18 @@ const WorkerSessionStatsSchema = Schema.Struct({
 export type WorkerRpcState = typeof WorkerRpcStateSchema.Type;
 export type WorkerAssistantMessage = typeof WorkerAssistantMessageSchema.Type;
 
+const decodeRawCompactionEndEvent = Schema.decodeUnknownOption(WorkerCompactionEndEventSchema);
+
+/** Reduce child-authored failure text immediately while preserving the lifecycle completion edge. */
+function decodeCompactionEndEvent(input: unknown) {
+  return Option.map(decodeRawCompactionEndEvent(input), ({ errorMessage, ...event }) => ({
+    ...event,
+    ...(errorMessage === undefined
+      ? {}
+      : { failure: workerCompactionFailure(errorMessage.length) }),
+  }));
+}
+
 /** Non-throwing wire codecs for the supervisor's tolerant event dispatcher. */
 export const WorkerRpcWire = {
   decodeAgentEndEvent: Schema.decodeUnknownOption(WorkerAgentEndEventSchema),
@@ -182,7 +199,7 @@ export const WorkerRpcWire = {
   decodeAssistantTextDeltaEvent: Schema.decodeUnknownOption(WorkerAssistantTextDeltaEventSchema),
   decodeAssistantTextEndEvent: Schema.decodeUnknownOption(WorkerAssistantTextEndEventSchema),
   decodeAssistantTextStartEvent: Schema.decodeUnknownOption(WorkerAssistantTextStartEventSchema),
-  decodeCompactionEndEvent: Schema.decodeUnknownOption(WorkerCompactionEndEventSchema),
+  decodeCompactionEndEvent,
   decodeCompactionStartEvent: Schema.decodeUnknownOption(WorkerCompactionStartEventSchema),
   decodeEnvelope: Schema.decodeUnknownOption(WorkerRpcEnvelopeSchema),
   decodeMessageEndEvent: Schema.decodeUnknownOption(WorkerMessageEndEventSchema),
@@ -200,6 +217,17 @@ export const WorkerRpcWire = {
   decodeToolExecutionStartEvent: Schema.decodeUnknownOption(WorkerToolExecutionStartEventSchema),
 } as const;
 
+/** Project one software-authored targeted-codec label without carrying rejected child payload text. */
+export function rpcPayloadDiagnostic(
+  message: string,
+  originalChars?: number,
+): WorkerProtocolDiagnostic {
+  return originalChars === undefined
+    ? workerProtocolDiagnostic('invalid_rpc_payload', message)
+    : workerProtocolDiagnostic('invalid_rpc_payload', message, originalChars);
+}
+
+/** Bound one legacy caller preview; production protocol diagnostics remain body-free. */
 export function boundedProtocolErrorMessage(message: string): string {
   return message.length <= MAX_PROTOCOL_ERROR_LENGTH
     ? message

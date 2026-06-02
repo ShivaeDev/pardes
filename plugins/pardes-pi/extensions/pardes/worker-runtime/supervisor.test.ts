@@ -41,6 +41,7 @@ function fakeRpcWorker(options: FakeRpcWorkerOptions = {}): FakeRpcWorker {
   writeFileSync(
     script,
     `
+import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const commandLog = ${JSON.stringify(commandLog)};
 const malformedResponseCommand = ${JSON.stringify(options.malformedResponseCommand)};
@@ -79,6 +80,17 @@ function report(summary = "fixture complete", details) {
 }
 function question() {
   send({ type: "tool_execution_end", toolName: "ask_manager", isError: false, result: { details: { pardesWorker: { type: "question", question: "Ship it?" } } } });
+}
+function lateInheritedStdout() {
+  const lateRecords = [
+    { type: "agent_start" },
+    { type: "queue_update", steering: ["late steering"], followUp: ["late follow-up"] },
+    { type: "tool_execution_end", toolName: "report_to_manager", isError: false, result: { details: { pardesWorker: { type: "report", status: "completed", summary: "late report" } } } },
+    { type: "tool_execution_end", toolName: "ask_manager", isError: false, result: { details: { pardesWorker: { type: "question", question: "late question" } } } },
+  ];
+  const payload = lateRecords.map((value) => JSON.stringify(value)).join("\\n") + "\\n";
+  spawn(process.execPath, ["-e", "setTimeout(() => process.stdout.write(" + JSON.stringify(payload) + "), 120); setTimeout(() => {}, 250);"], { stdio: ["ignore", "inherit", "ignore"] });
+  setTimeout(() => process.exit(18), 10);
 }
 function malformedTargetedEvents() {
   send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: 17 } });
@@ -178,6 +190,7 @@ function handle(command) {
     }
     respond(command);
     if (command.message === "crash") return setTimeout(() => process.exit(17), 10);
+    if (command.message === "late-inherited-stdout") return lateInheritedStdout();
     if (command.message === "start-only") return start();
     if (command.message === "duplicate-start") { start(); return start(); }
     if (command.message === "state-reconcile") {
@@ -203,8 +216,13 @@ function handle(command) {
     if (command.message === "failed-compaction") {
       start();
       startCompaction("overflow");
-      endCompaction("overflow", null, false, false, "quota exhausted");
+      endCompaction("overflow", null, false, false, "token=private-compaction-secret\\u001b");
       end();
+      return;
+    }
+    if (command.message === "oversized-failed-compaction") {
+      startCompaction("manual");
+      endCompaction("manual", null, true, false, "x".repeat(4097));
       return;
     }
     if (command.message === "compacting-only") {
@@ -531,9 +549,10 @@ describe('worker supervisor', () => {
 
     await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'malformed-targeted-events')));
     await eventually(() => events.filter((event) => event.type === 'protocol_error').length === 7);
-    const protocolErrors = events.flatMap((event) =>
-      event.type === 'protocol_error' ? [event.message] : [],
+    const protocolDiagnostics = events.flatMap((event) =>
+      event.type === 'protocol_error' && event.diagnostic ? [event.diagnostic] : [],
     );
+    const protocolErrors = protocolDiagnostics.map(({ message }) => message);
     expect(protocolErrors).toEqual([
       'Invalid text_delta RPC event',
       'Invalid tool_execution_start RPC event',
@@ -541,9 +560,26 @@ describe('worker supervisor', () => {
       'Invalid compaction_start RPC event',
       'Invalid report_to_manager Pardes payload',
       'Invalid ask_manager Pardes payload',
-      'Invalid response RPC message',
+      'RPC response could not be correlated or decoded; response content was discarded.',
     ]);
-    expect(protocolErrors.every((message) => message.length <= 240)).toBe(true);
+    expect(protocolDiagnostics.map(({ reason }) => reason)).toEqual([
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_response',
+    ]);
+    expect(
+      protocolDiagnostics.every(
+        (diagnostic) =>
+          diagnostic.countAccuracy === 'exact' &&
+          diagnostic.originalChars > 0 &&
+          diagnostic.omittedChars === diagnostic.originalChars &&
+          diagnostic.shownChars === 0,
+      ),
+    ).toBe(true);
     expect(events.some((event) => event.type === 'report' || event.type === 'question')).toBe(
       false,
     );
@@ -806,7 +842,12 @@ describe('worker supervisor', () => {
       expect.objectContaining({
         compaction: expect.objectContaining({
           aborted: false,
-          errorMessage: 'quota exhausted',
+          failure: {
+            omittedChars: 15,
+            originalChars: 15,
+            reason: 'child_compaction_error_message_omitted',
+            shownChars: 0,
+          },
           reason: 'overflow',
           succeeded: false,
         }),
@@ -817,7 +858,16 @@ describe('worker supervisor', () => {
       compactionReason: undefined,
       completedCompactionCount: 2,
       isCompacting: false,
-      lastCompaction: { errorMessage: 'quota exhausted', reason: 'overflow', succeeded: false },
+      lastCompaction: {
+        failure: {
+          omittedChars: 15,
+          originalChars: 15,
+          reason: 'child_compaction_error_message_omitted',
+          shownChars: 0,
+        },
+        reason: 'overflow',
+        succeeded: false,
+      },
     });
 
     await Effect.runPromise(supervisor.compact('agent-fixture'));
@@ -896,10 +946,74 @@ describe('worker supervisor', () => {
     });
     expect(await Effect.runPromise(supervisor.status('agent-fixture'))).toMatchObject({
       completedCompactionCount: 1,
-      lastCompaction: { errorMessage: 'quota exhausted', reason: 'overflow', succeeded: false },
+      lastCompaction: {
+        failure: {
+          omittedChars: 32,
+          originalChars: 32,
+          reason: 'child_compaction_error_message_omitted',
+          shownChars: 0,
+        },
+        reason: 'overflow',
+        succeeded: false,
+      },
       stats: { contextUsage: { contextWindow: 10000, percent: 50, tokens: 5000 } },
       status: 'idle',
     });
+    expect(
+      JSON.stringify(await Effect.runPromise(supervisor.status('agent-fixture'))),
+    ).not.toContain('private-compaction-secret');
+    await Effect.runPromise(supervisor.shutdown());
+  });
+
+  test('reduces oversized compaction failure text while completing and resetting lifecycle state', async () => {
+    const fixture = fakeRpcWorker();
+    const events: WorkerSupervisorEvent[] = [];
+    const supervisor = makeWorkerSupervisor({
+      args: () => [fixture.script],
+      command: process.execPath,
+      onEvent: (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      telemetryInterval: '1 hour',
+    });
+
+    await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'quiet')));
+    await Effect.runPromise(
+      supervisor.send('agent-fixture', 'oversized-failed-compaction', 'prompt'),
+    );
+    await eventually(async () => {
+      const runtime = await Effect.runPromise(supervisor.status('agent-fixture'));
+      return runtime.completedCompactionCount === 1 && runtime.isCompacting === false;
+    });
+
+    expect(await Effect.runPromise(supervisor.status('agent-fixture'))).toMatchObject({
+      compactionReason: undefined,
+      compactionStartedAt: undefined,
+      completedCompactionCount: 1,
+      isCompacting: false,
+      lastCompaction: {
+        aborted: true,
+        failure: {
+          omittedChars: 4_097,
+          originalChars: 4_097,
+          reason: 'child_compaction_error_message_omitted',
+          shownChars: 0,
+        },
+        reason: 'manual',
+      },
+    });
+    await eventually(() => events.some((event) => event.type === 'compaction_completed'));
+    expect(events.some((event) => event.type === 'protocol_error')).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        compaction: expect.objectContaining({
+          failure: expect.objectContaining({ originalChars: 4_097 }),
+          reason: 'manual',
+        }),
+        type: 'compaction_completed',
+      }),
+    );
     await Effect.runPromise(supervisor.shutdown());
   });
 
@@ -1322,6 +1436,43 @@ describe('worker supervisor', () => {
     );
     expect(reportIndex).toBeGreaterThanOrEqual(0);
     expect(idleIndex).toBeGreaterThan(reportIndex);
+  });
+
+  test('ignores inherited stdout RPC records after a direct child crash', async () => {
+    const fixture = fakeRpcWorker();
+    const events: WorkerSupervisorEvent[] = [];
+    const supervisor = makeWorkerSupervisor({
+      args: () => [fixture.script],
+      command: process.execPath,
+      onEvent: (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      telemetryInterval: '1 hour',
+    });
+    await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'quiet', 'agent-late-stdout')));
+    await Effect.runPromise(
+      supervisor.send('agent-late-stdout', 'late-inherited-stdout', 'prompt'),
+    );
+    await eventually(() => events.some((event) => event.type === 'unexpected_exit'));
+    const terminalIndex = events.findIndex((event) => event.type === 'unexpected_exit');
+
+    await sleep(350);
+    expect(await Effect.runPromise(supervisor.status('agent-late-stdout'))).toMatchObject({
+      followUpQueueCount: 0,
+      isStreaming: false,
+      pendingMessageCount: 0,
+      status: 'crashed',
+      steeringQueueCount: 0,
+    });
+    expect(
+      events
+        .slice(terminalIndex + 1)
+        .some((event) =>
+          ['protocol_error', 'question', 'report', 'status', 'telemetry'].includes(event.type),
+        ),
+    ).toBe(false);
+    await Effect.runPromise(supervisor.shutdown());
   });
 
   test('emits an unexpected exit event when a child crashes', async () => {

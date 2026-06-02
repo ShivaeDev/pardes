@@ -124,6 +124,7 @@ interface GitRowEvidence {
   readonly shown: number;
   readonly total: number;
   readonly truncated: boolean;
+  readonly omissionReason?: 'changed_path_preview_limit';
 }
 
 function gitRowCollector(maxChars: number): {
@@ -168,6 +169,7 @@ function gitRowCollector(maxChars: number): {
         shown,
         total,
         truncated: shown < total,
+        ...(shown < total ? { omissionReason: 'changed_path_preview_limit' as const } : {}),
       };
     },
   };
@@ -195,6 +197,7 @@ export function boundedGitDiagnostic(
   readonly shownChars: number;
   readonly source: 'error' | 'stderr';
   readonly truncated: boolean;
+  readonly omissionReason?: 'git_diagnostic_preview_limit';
 } {
   const safeStderr = inertGitDiagnostic(stderr);
   const source = safeStderr ? 'stderr' : 'error';
@@ -210,6 +213,9 @@ export function boundedGitDiagnostic(
     shownChars: preview.length,
     source,
     truncated: preview.length < safe.length,
+    ...(preview.length < safe.length
+      ? { omissionReason: 'git_diagnostic_preview_limit' as const }
+      : {}),
   };
 }
 
@@ -327,7 +333,9 @@ function registerVerifierTools(
           `changed path evidence: total=${bounded.total}; shown=${bounded.shown}; omitted=${bounded.omitted}`,
           'changed paths:',
           bounded.output || (bounded.total === 0 ? '(none)' : '(none shown within bound)'),
-          ...(bounded.truncated ? ['changed path evidence truncated: true'] : []),
+          ...(bounded.truncated
+            ? [`changed path evidence omission reason: ${bounded.omissionReason}`]
+            : []),
         ].join('\n'),
         {
           pardesVerifier: {
@@ -335,6 +343,9 @@ function registerVerifierTools(
               omitted: bounded.omitted,
               shown: bounded.shown,
               total: bounded.total,
+              ...(bounded.omissionReason === undefined
+                ? {}
+                : { omissionReason: bounded.omissionReason }),
             },
             checkoutClean: !dirty,
             checkoutHeadSha: headSha,

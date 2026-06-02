@@ -129,7 +129,7 @@ function runtime(agentId: string, status: WorkerRuntimeSnapshot['status']): Work
     startedAt: 1,
     stats: undefined,
     status,
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: agentId,
     thinkingLevel: 'high',
   };

@@ -12,7 +12,12 @@ import {
   ManagedPublishedReviewBranchSchema,
   PersistedPublishedReviewBranchSchema,
 } from '../github/index.ts';
-import { AgentReportReferenceSchema, ReportIdSchema } from '../reporting/index.ts';
+import {
+  AgentReportReferenceSchema,
+  REPORT_SUMMARY_PREVIEW_OMISSION_REASON,
+  ReportIdSchema,
+  ReportTextCountsSchema,
+} from '../reporting/index.ts';
 
 export type { RepoState, WorktreeLease } from '../git/index.ts';
 export { RepoStateSchema, WorktreeLeaseSchema } from '../git/index.ts';
@@ -118,6 +123,18 @@ export const VERIFICATION_ATTEMPT_HISTORY_MAX = 12;
 
 export const VerificationEvidenceStatusSchema = Schema.Literals(['current', 'stale']);
 export type VerificationEvidenceStatus = typeof VerificationEvidenceStatusSchema.Type;
+export const VerificationStaleReasonCodeSchema = Schema.Literals([
+  'source_unverifiable',
+  'source_head_changed',
+  'source_dirty',
+  'review_checkout_head_changed',
+  'review_checkout_unverifiable',
+  'review_checkout_dirty',
+  'refresh_superseded',
+  'provisioning_failed',
+]);
+export type VerificationStaleReasonCode = typeof VerificationStaleReasonCodeSchema.Type;
+export const VERIFICATION_STALE_REASON_MAX_CHARS = 240;
 
 export const VerificationStatusSchema = Schema.Literals([
   'starting',
@@ -137,7 +154,10 @@ const VerificationCurrentAttemptFields = {
   reviewedHeadSha: FullCommitShaSchema,
   sourceBranchPointSha: FullCommitShaSchema,
   staleAt: Schema.optionalKey(NonEmptyString),
-  staleReason: Schema.optionalKey(NonEmptyString.check(Schema.isMaxLength(240))),
+  staleReason: Schema.optionalKey(
+    NonEmptyString.check(Schema.isMaxLength(VERIFICATION_STALE_REASON_MAX_CHARS)),
+  ),
+  staleReasonCode: Schema.optionalKey(VerificationStaleReasonCodeSchema),
   status: VerificationStatusSchema,
 };
 
@@ -161,6 +181,9 @@ export type VerificationAttempt = typeof VerificationAttemptSchema.Type;
 
 const CanonicalVerificationRecordSchema = Schema.Struct({
   ...VerificationRecordIdentityFields,
+  archivedAttemptCount: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
   attempts: Schema.Array(VerificationAttemptSchema).check(
     Schema.isMinLength(1),
     Schema.isMaxLength(VERIFICATION_ATTEMPT_HISTORY_MAX),
@@ -291,12 +314,30 @@ export const ManagerEventSchema = Schema.Struct({
   presentationBlockedReason: Schema.optionalKey(NonEmptyString.check(Schema.isMaxLength(240))),
   pullRequestId: Schema.optionalKey(NonEmptyString),
   reportId: Schema.optionalKey(ReportIdSchema),
+  reportPreviewChars: Schema.optionalKey(ReportTextCountsSchema),
+  reportPreviewOmissionReason: Schema.optionalKey(
+    Schema.Literal(REPORT_SUMMARY_PREVIEW_OMISSION_REASON),
+  ),
   reportPreviewTruncated: Schema.optionalKey(Schema.Boolean),
   summary: NonEmptyString,
   type: NonEmptyString,
   verificationId: Schema.optionalKey(NonEmptyString),
   workstreamId: Schema.optionalKey(NonEmptyString),
-});
+}).check(
+  Schema.makeFilter((event) => {
+    const counts = event.reportPreviewChars;
+    if (!counts)
+      return event.reportPreviewOmissionReason === undefined
+        ? undefined
+        : 'reportPreviewOmissionReason requires reportPreviewChars';
+    const omitted = counts.omittedChars > 0;
+    if (event.reportPreviewTruncated !== undefined && event.reportPreviewTruncated !== omitted)
+      return 'reportPreviewTruncated must match reportPreviewChars.omittedChars';
+    return (event.reportPreviewOmissionReason !== undefined) === omitted
+      ? undefined
+      : 'reportPreviewOmissionReason presence must match reportPreviewChars.omittedChars';
+  }),
+);
 export type ManagerEvent = typeof ManagerEventSchema.Type;
 
 /** Durable cursor for the one compact Pi presentation released for an inbox batch. */

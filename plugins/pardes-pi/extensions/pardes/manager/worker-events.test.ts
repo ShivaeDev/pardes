@@ -148,27 +148,42 @@ describe('manager event schema compatibility', () => {
     expect(Schema.decodeUnknownSync(ManagerEventSchema)(historical)).toEqual(historical);
     expect(Schema.decodeUnknownSync(ManagerEventSchema)(associated)).toEqual(associated);
   });
+
+  test('rejects incoherent restored report-preview omission metadata', () => {
+    const incoherent = {
+      createdAt,
+      id: 'event-incoherent',
+      reportId: 'report-123',
+      reportPreviewChars: { omittedChars: 0, originalChars: 1, shownChars: 999 },
+      reportPreviewOmissionReason: 'report_summary_preview_limit',
+      reportPreviewTruncated: false,
+      summary: 'Impossible counts.',
+      type: 'agent_report_completed',
+    };
+
+    expect(() => Schema.decodeUnknownSync(ManagerEventSchema)(incoherent)).toThrow();
+  });
 });
 
 describe('manager event text policy', () => {
-  test('normalizes whitespace and applies the 240-character model-facing ellipsis bound', () => {
-    const cases = [
-      { expected: 'hello world', input: '  hello\n\tworld  ' },
-      { expected: 'x'.repeat(240), input: 'x'.repeat(240) },
-      { expected: `${'x'.repeat(239)}…`, input: 'x'.repeat(241) },
-    ];
-
-    for (const { input, expected } of cases) expect(truncateModelFacingText(input)).toBe(expected);
+  test('normalizes whitespace and accounts for omissions inside the 240-character model-facing bound', () => {
+    expect(truncateModelFacingText('  hello\n\tworld  ')).toBe('hello world');
+    expect(truncateModelFacingText('x'.repeat(240))).toBe('x'.repeat(240));
+    const omitted = truncateModelFacingText('x'.repeat(241));
+    expect(omitted).toHaveLength(240);
+    expect(omitted).toContain(
+      '[omitted reason=manager_event_text_limit originalChars=241 shownChars=149 omittedChars=92]',
+    );
   });
 
-  test('normalizes joined parts and applies the 900-character event-summary ellipsis bound', () => {
-    const cases = [
-      { expected: 'hello world', parts: ['  hello', '', '\n world  '] },
-      { expected: 'x'.repeat(900), parts: ['x'.repeat(900)] },
-      { expected: `${'x'.repeat(899)}…`, parts: ['x'.repeat(901)] },
-    ];
-
-    for (const { parts, expected } of cases) expect(boundedEventSummary(parts)).toBe(expected);
+  test('normalizes joined parts and accounts for omissions inside the 900-character summary bound', () => {
+    expect(boundedEventSummary(['  hello', '', '\n world  '])).toBe('hello world');
+    expect(boundedEventSummary(['x'.repeat(900)])).toBe('x'.repeat(900));
+    const omitted = boundedEventSummary(['x'.repeat(901)]);
+    expect(omitted).toHaveLength(900);
+    expect(omitted).toContain(
+      '[omitted reason=manager_event_summary_limit originalChars=901 shownChars=806 omittedChars=95]',
+    );
   });
 
   test('formats, normalizes, and bounds failure summaries', () => {
@@ -176,7 +191,7 @@ describe('manager event text policy', () => {
 
     expect(summary.startsWith('inspection failed ')).toBe(true);
     expect(summary).toHaveLength(240);
-    expect(summary.endsWith('…')).toBe(true);
+    expect(summary).toContain('[omitted reason=manager_event_text_limit');
     expect(summary).not.toContain('\n');
   });
 });
@@ -205,7 +220,7 @@ describe('manager handoff-audit policy', () => {
     });
     if (failed.status !== 'failed') throw new Error('Expected a failed handoff audit fixture.');
     expect(failed.gitAudit.failureSummary).toHaveLength(240);
-    expect(failed.gitAudit.failureSummary.endsWith('…')).toBe(true);
+    expect(failed.gitAudit.failureSummary).toContain('[omitted reason=manager_event_text_limit');
   });
 
   test('applies fresh success paths and clears stale paths after failure', () => {
@@ -307,7 +322,7 @@ describe('verifier idle classification policy', () => {
           agentId: 'agent-one',
           exitCode: 1,
           signal: null,
-          stderr: 'fixture failure',
+          stderr: { omittedChars: 0, originalChars: 15, shownChars: 15, tail: 'fixture failure' },
           type: 'unexpected_exit',
         },
         expected: 'stopped_or_crashed',
@@ -375,6 +390,7 @@ describe('worker-event summary policy', () => {
         },
         expected: {
           actionable: false,
+          reportPreviewChars: { omittedChars: 0, originalChars: 17, shownChars: 17 },
           reportPreviewTruncated: false,
           summary: 'agent-one: Routine progress.',
           type: 'agent_report_progress',
@@ -386,6 +402,7 @@ describe('worker-event summary policy', () => {
         event: { agentId: 'agent-one', status: 'completed', summary: 'Done.', type: 'report' },
         expected: {
           actionable: true,
+          reportPreviewChars: { omittedChars: 0, originalChars: 5, shownChars: 5 },
           reportPreviewTruncated: false,
           summary: 'agent-one: Done. Git audit: 2 changed paths. Worktree is dirty.',
           type: 'agent_report_completed',
@@ -419,7 +436,7 @@ describe('worker-event summary policy', () => {
           agentId: 'agent-one',
           exitCode: 1,
           signal: null,
-          stderr: 'fixture failure',
+          stderr: { omittedChars: 0, originalChars: 15, shownChars: 15, tail: 'fixture failure' },
           type: 'unexpected_exit',
         },
         expected: {
@@ -432,7 +449,8 @@ describe('worker-event summary policy', () => {
         event: { agentId: 'agent-one', message: ' invalid\njson ', type: 'protocol_error' },
         expected: {
           actionable: true,
-          details: ' invalid\njson ',
+          details:
+            '[legacy_adapter_text_omitted] Legacy protocol-error adapter text was omitted. chars(original=14, shown=0, omitted=14).',
           summary: 'agent-one emitted invalid RPC JSON; inspect the durable inbox diagnostic.',
           type: 'agent_protocol_error',
         },
@@ -483,11 +501,62 @@ describe('worker-event summary policy', () => {
     );
 
     expect(projected).toMatchObject({
+      reportPreviewChars: { omittedChars: 1, originalChars: 241, shownChars: 240 },
+      reportPreviewOmissionReason: 'report_summary_preview_limit',
       reportPreviewTruncated: true,
       type: 'agent_report_completed',
     });
     expect(projected?.summary).not.toContain('report-one');
-    expect(projected?.summary.endsWith('…')).toBe(true);
+    expect(projected?.summary).toContain(
+      '[omitted reason=report_summary_preview_limit originalChars=241 shownChars=240 omittedChars=1; durable report available via associated reportId and paginated report_get]',
+    );
+  });
+
+  test('replaces legacy protocol-error adapter text with fixed count-only diagnostics', () => {
+    const projected = workerEventSummary({
+      agentId: 'agent-one',
+      message: 'token=private-protocol-secret',
+      type: 'protocol_error',
+    });
+
+    expect(projected?.details).toContain('[legacy_adapter_text_omitted]');
+    expect(projected?.details).toContain('chars(original=29, shown=0, omitted=29)');
+    expect(projected?.details).not.toContain('private-protocol-secret');
+    expect(projected?.details).not.toContain('token=');
+    expect(projected?.summary).toBe(
+      'agent-one emitted invalid RPC JSON; inspect the durable inbox diagnostic.',
+    );
+  });
+
+  test('canonicalizes forged typed protocol diagnostics before durable manager summaries', () => {
+    for (const diagnostic of [
+      {
+        countAccuracy: 'exact',
+        message: 'token=private-forged-protocol-message',
+        omittedChars: 31,
+        originalChars: 31,
+        reason: 'invalid_json',
+        shownChars: 0,
+      },
+      {
+        countAccuracy: 'exact',
+        message: 'token=private-forged-protocol-message',
+        omittedChars: 31,
+        originalChars: 31,
+        reason: 'token=private-forged-protocol-reason',
+        shownChars: 0,
+      },
+    ]) {
+      const projected = workerEventSummary({
+        agentId: 'agent-one',
+        diagnostic,
+        type: 'protocol_error',
+      } as unknown as WorkerSupervisorEvent);
+
+      expect(projected?.details).not.toContain('private-forged');
+      expect(projected?.details).not.toContain('token=');
+      expect(projected?.details).toContain('chars(original=31, shown=0, omitted=31)');
+    }
   });
 
   test('keeps accepted worst-case child question fields lossless beneath the durable inbox cap', () => {

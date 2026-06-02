@@ -21,6 +21,7 @@ import {
   registerManagerCompactionStrategy,
   renderManagerCompactionFallbackDiagnostic,
   reportManagerCompactionFallback,
+  sanitizeManagerCompactionDiagnostic,
   stripManagerCompactionArtifacts,
   stripPardesCompactionProjection,
   stripPiFileOperationSuffix,
@@ -92,7 +93,7 @@ function runtime(agentId: string, status: WorkerStatus): WorkerRuntimeSnapshot {
     startedAt: 1,
     stats: undefined,
     status,
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: `Runtime task ${agentId}`,
     thinkingLevel: 'high',
   };
@@ -584,10 +585,11 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain('[Pardes manager compaction fallback]');
     expect(diagnostics[0]).toContain('stage: summarize');
-    expect(diagnostics[0]).toContain('selectedModel: fixture-provider/selected-manager-model');
     expect(diagnostics[0]).toContain('Pi built-in default compaction remains owner');
-    expect(diagnostics[0]).toContain('Authorization=[redacted]');
-    expect(diagnostics[0]).toContain('api_key=[redacted]');
+    expect(diagnostics[0]).toContain('[custom_override_cause_omitted]');
+    expect(diagnostics[0]).toContain('shown=0');
+    expect(diagnostics[0]).not.toContain('Authorization');
+    expect(diagnostics[0]).not.toContain('api_key');
     expect(diagnostics[0]).not.toContain('private-token-');
     expect(diagnostics[0]).not.toContain(`sk-${'x'.repeat(100)}`);
     expect(diagnostics[0].length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
@@ -623,7 +625,8 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(builtInCalls).toBe(1);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain('stage: register_strategy');
-    expect(diagnostics[0]).toContain('token=[redacted]');
+    expect(diagnostics[0]).toContain('[custom_override_cause_omitted]');
+    expect(diagnostics[0]).not.toContain('token=');
     expect(diagnostics[0]).not.toContain('private-registration-token');
   });
 
@@ -757,6 +760,123 @@ describe('Pardes coordinating-manager compaction', () => {
     }
   });
 
+  test('makes fallback cause diagnostics terminal-inert before rendering or operator delivery', () => {
+    const diagnostic = renderManagerCompactionFallbackDiagnostic(
+      'summarize',
+      new Error('\u001b]0;private-title\u0007 token=private-control-token'),
+    );
+    const delivered: string[] = [];
+    const ctx = context({
+      ui: { notify: (message: string) => delivered.push(message) } as never,
+    });
+
+    reportManagerCompactionFallback(ctx, `${diagnostic}\u001b\u0007`, (message) =>
+      delivered.push(message),
+    );
+
+    expect(diagnostic).not.toContain('\u001b');
+    expect(diagnostic).not.toContain('\u0007');
+    expect(diagnostic).not.toContain('token=');
+    expect(diagnostic).not.toContain('private-control-token');
+    expect(delivered).toHaveLength(2);
+    expect(
+      delivered.every((message) => !message.includes('\u001b') && !message.includes('\u0007')),
+    ).toBe(true);
+  });
+
+  test('omits arbitrary fallback cause bodies including common secret-key and quoted-value forms', () => {
+    for (const cause of [
+      'access_token=private-token-value',
+      'OPENAI_API_KEY=private-openai-value',
+      'clientSecret=private-client-value',
+      'token = "private token with spaces"',
+      'PRIVATE_UNLABELLED_CAUSE_BODY',
+    ]) {
+      const diagnostic = renderManagerCompactionFallbackDiagnostic('summarize', new Error(cause));
+
+      expect(diagnostic).toContain('[custom_override_cause_omitted]');
+      expect(diagnostic).toContain(
+        `chars(original=${cause.length}, shown=0, omitted=${cause.length})`,
+      );
+      expect(diagnostic).not.toContain(cause);
+      expect(diagnostic).not.toContain('private');
+      expect(diagnostic.length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
+    }
+  });
+
+  test('keeps direct fallback helper delivery body-free and preserves only authored LF structure', () => {
+    const delivered: string[] = [];
+    const ctx = context({ ui: { notify: (message: string) => delivered.push(message) } as never });
+
+    reportManagerCompactionFallback(
+      ctx,
+      'access_token=private-direct-helper\rOVERWRITE\tTAIL\nnext',
+      (message) => delivered.push(message),
+    );
+
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0]).toBe(delivered[1]);
+    expect(delivered[0]).toContain('stage: unknown\naction:');
+    expect(delivered[0]).not.toContain('\r');
+    expect(delivered[0]).not.toContain('\t');
+    expect(delivered[0]).not.toContain('access_token');
+    expect(delivered[0]).not.toContain('private-direct-helper');
+    expect(delivered[0]).not.toContain('OVERWRITE');
+    expect(delivered[0]).not.toContain('TAIL');
+    expect(delivered[0]).not.toContain('next');
+  });
+
+  test('keeps direct diagnostic sanitization body-free for token variants and forged stages', () => {
+    for (const cause of [
+      'access_token=private-utility',
+      'OPENAI_API_KEY="private quoted utility"',
+      'PRIVATE_UNLABELLED_UTILITY_MARKER',
+    ]) {
+      const sanitized = sanitizeManagerCompactionDiagnostic(cause);
+      expect(sanitized).toContain('[custom_override_cause_omitted]');
+      expect(sanitized).toContain(
+        `chars(original=${cause.length}, shown=0, omitted=${cause.length})`,
+      );
+      expect(sanitized).not.toContain(cause);
+      expect(sanitized).not.toContain('private');
+    }
+
+    expect(
+      renderManagerCompactionFallbackDiagnostic(
+        'token=private-forged-stage' as ManagerCompactionFallbackStage,
+        'token=private-forged-cause',
+      ),
+    ).toContain('stage: unknown');
+  });
+
+  test('does not coerce arbitrary fallback causes or accessor-backed error messages', () => {
+    let accessorReads = 0;
+    let objectCoercions = 0;
+    const coercible = {
+      toString: () => {
+        objectCoercions += 1;
+        return 'token=private-coerced-object';
+      },
+    };
+    const accessorError = new Error('initial safe message');
+    Object.defineProperty(accessorError, 'message', {
+      configurable: true,
+      get: () => {
+        accessorReads += 1;
+        return 'token=private-accessor-message';
+      },
+    });
+
+    for (const cause of [coercible, accessorError]) {
+      const diagnostic = renderManagerCompactionFallbackDiagnostic('summarize', cause);
+      expect(diagnostic).toContain('chars(original=unknown, shown=0, omitted=unknown)');
+      expect(diagnostic).not.toContain('private');
+      expect(diagnostic).not.toContain('token=');
+    }
+    expect(objectCoercions).toBe(0);
+    expect(accessorReads).toBe(0);
+  });
+
   test('keeps fallback safe when the UI diagnostic surface itself throws', () => {
     const logs: string[] = [];
     const diagnostic = renderManagerCompactionFallbackDiagnostic(
@@ -774,8 +894,10 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(() =>
       reportManagerCompactionFallback(ctx, diagnostic, (message) => logs.push(message)),
     ).not.toThrow();
-    expect(logs).toEqual([diagnostic]);
-    expect(diagnostic).toContain('token=[redacted]');
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('stage: unknown');
+    expect(diagnostic).toContain('[custom_override_cause_omitted]');
+    expect(diagnostic).not.toContain('token=');
     expect(diagnostic).not.toContain('private-ui-token');
   });
 });

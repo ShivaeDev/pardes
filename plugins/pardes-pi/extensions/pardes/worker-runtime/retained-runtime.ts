@@ -1,6 +1,11 @@
 import { Semaphore } from 'effect';
 import { createWorkerActivityState, type WorkerActivityState } from './activity.ts';
 import type { ChildLaunchProfile } from './child-profile.ts';
+import type {
+  WorkerCompactionFailure,
+  WorkerProtocolDiagnostic,
+  WorkerStderrTail,
+} from './diagnostics.ts';
 import type { WorkerRpcState } from './rpc/codecs.ts';
 import type { WorkerRpcSession } from './rpc/session.ts';
 
@@ -22,7 +27,7 @@ export interface WorkerCompactionCompletion {
   readonly aborted: boolean;
   readonly willRetry: boolean;
   readonly tokensBefore?: number;
-  readonly errorMessage?: string;
+  readonly failure?: WorkerCompactionFailure;
   readonly completedAt: number;
 }
 
@@ -64,7 +69,7 @@ export interface WorkerRuntimeSnapshot {
   readonly status: WorkerStatus;
   readonly pid: number | undefined;
   readonly sessionFile: string | undefined;
-  readonly stderr: string;
+  readonly stderr: WorkerStderrTail;
   readonly startedAt: number;
   readonly task: string;
   readonly model: string;
@@ -131,11 +136,19 @@ export type WorkerSupervisorEvent =
       readonly agentId: string;
       readonly exitCode: number | null;
       readonly signal: NodeJS.Signals | null;
-      readonly stderr: string;
+      readonly stderr: WorkerStderrTail;
     })
   | (WorkerSupervisorEventOwnership & {
       readonly type: 'protocol_error';
       readonly agentId: string;
+      readonly diagnostic: WorkerProtocolDiagnostic;
+      readonly message?: never;
+    })
+  /** Transitional adapter compatibility; production sessions emit the counted diagnostic variant. */
+  | (WorkerSupervisorEventOwnership & {
+      readonly type: 'protocol_error';
+      readonly agentId: string;
+      readonly diagnostic?: never;
       readonly message: string;
     });
 

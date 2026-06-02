@@ -38,6 +38,7 @@ import { makeFileSystemStateStore, type StateStoreShape } from '../storage/index
 import {
   type GuardedWorkerSupervisorShape,
   makeWorkerSupervisor,
+  renderWorkerCompactionFailure,
   type WorkerRuntimeSnapshot,
   type WorkerSendBehavior,
   type WorkerSendResult,
@@ -141,11 +142,7 @@ import {
   makeWorkerSupervisorEventCoordinator,
   type WorkerSupervisorEventCoordinatorShape,
 } from './worker-event-coordinator.ts';
-import {
-  boundedEventSummary,
-  boundedFailureSummary,
-  truncateModelFacingText,
-} from './worker-events.ts';
+import { boundedEventSummary, boundedFailureSummary } from './worker-events.ts';
 
 const SESSION_ENTRY_TYPE = 'pardes-manager';
 
@@ -209,7 +206,8 @@ export interface AgentStatus {
   readonly runtime: WorkerRuntimeSnapshot | undefined;
 }
 
-export interface AgentSendResult extends AgentStatus {
+export interface AgentSendResult {
+  readonly agentId: string;
   readonly delivery: WorkerSendResult;
 }
 
@@ -1918,8 +1916,8 @@ export class ManagerController {
         timestamp,
       ),
     );
-    const status = yield* this.agentStatus(agentId, ctx);
-    return { ...status, delivery } satisfies AgentSendResult;
+    yield* this.agentStatus(agentId, ctx);
+    return { agentId, delivery } satisfies AgentSendResult;
   });
 
   readonly sendAgent = (
@@ -1991,8 +1989,11 @@ export class ManagerController {
       field: excerpt.field,
       hasMore: excerpt.hasMore,
       offset: excerpt.offset,
+      omittedChars: excerpt.omittedChars,
+      originalChars: excerpt.originalChars,
       reportId: excerpt.reportId,
       returnedChars: excerpt.returnedChars,
+      shownChars: excerpt.shownChars,
       sourceAgentId: excerpt.agentId,
       sourceRole: source.role,
       status: excerpt.status,
@@ -2063,9 +2064,9 @@ export class ManagerController {
       ...(completion === undefined
         ? {}
         : { aborted: completion.aborted, willRetry: completion.willRetry }),
-      ...(completion?.errorMessage === undefined
+      ...(completion?.failure === undefined
         ? {}
-        : { failureSummary: truncateModelFacingText(completion.errorMessage) }),
+        : { failureSummary: renderWorkerCompactionFailure(completion.failure) }),
     };
     const compactedAt = yield* nowIso;
     yield* this.appendEventSafely(

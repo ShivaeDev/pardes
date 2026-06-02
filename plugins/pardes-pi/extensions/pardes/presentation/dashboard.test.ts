@@ -64,7 +64,7 @@ function runtimeFixture(overrides: Partial<WorkerRuntimeSnapshot> = {}): WorkerR
       totalMessages: 8,
     },
     status: 'running',
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: 'Inspect the RPC supervisor and report structural improvements.',
     thinkingLevel: 'high',
     ...overrides,

@@ -141,7 +141,7 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
           : ` (${result.value.delivery.requestedBehavior}-routed)`;
       return textResult(
         `Sent ${result.value.delivery.deliveredAs} message${routing} to ${params.agentId}.`,
-        result.value,
+        { agentId: params.agentId, delivery: result.value.delivery },
       );
     },
     label: 'Send Agent Message',

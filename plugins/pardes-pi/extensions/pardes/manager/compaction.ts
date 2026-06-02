@@ -1,3 +1,4 @@
+import { isNativeError } from 'node:util/types';
 import {
   type CompactionResult,
   compact as compactPiConversation,
@@ -6,6 +7,7 @@ import {
   type SessionBeforeCompactEvent,
 } from '@earendil-works/pi-coding-agent';
 import type { GitHubDiscussionSurface } from '../github/index.ts';
+import type { ReportTextCounts } from '../reporting/index.ts';
 import type { WorkerRuntimeSnapshot } from '../worker-runtime/index.ts';
 import { effectiveAgentStatus, hasAgentWarning, pullRequestNeedsAttention } from './attention.ts';
 import type { ManagerState, PullRequestRecord, WorkstreamStatus } from './domain.ts';
@@ -67,6 +69,8 @@ export interface ManagerCompactionWorkerProjection {
     readonly reportId: string;
     readonly status: string;
     readonly summaryTruncated: boolean;
+    readonly summaryChars?: ReportTextCounts;
+    readonly summaryOmissionReason?: 'report_summary_preview_limit';
   };
 }
 
@@ -160,9 +164,7 @@ export interface ManagerCompactionRegistrationOptions {
 
 function boundInline(text: string, maxChars: number): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length <= maxChars
-    ? normalized
-    : `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+  return omissionAwareDiagnosticText(normalized, maxChars, 'projection_field_limit');
 }
 
 function compareText(left: string, right: string): number {
@@ -250,6 +252,12 @@ function projectWorker(
             reportId: boundInline(latestResult.reportId, MAX_ID_CHARS),
             status: latestResult.status,
             summaryTruncated: latestResult.summaryTruncated,
+            ...(latestResult.summaryChars === undefined
+              ? {}
+              : { summaryChars: latestResult.summaryChars }),
+            ...(latestResult.summaryOmissionReason === undefined
+              ? {}
+              : { summaryOmissionReason: latestResult.summaryOmissionReason }),
           },
         }),
   };
@@ -424,79 +432,127 @@ export function appendManagerCompactionProjection(
   return `${stripManagerCompactionArtifacts(summary).trimEnd()}\n\n${PROJECTION_OPEN}\n${serialized}\n${PROJECTION_CLOSE}`;
 }
 
-function safeString(value: unknown): string {
-  try {
-    return String(value);
-  } catch {
-    return '<unrenderable diagnostic>';
+function terminalInertManagerCompactionText(value: string): string {
+  return Array.from(value, (character) => {
+    const code = character.charCodeAt(0);
+    return (code <= 31 && code !== 10) || (code >= 127 && code <= 159) ? ' ' : character;
+  }).join('');
+}
+
+function omissionAwareDiagnosticText(
+  text: string,
+  maxChars: number,
+  reason: 'diagnostic_field_limit' | 'projection_field_limit',
+): string {
+  if (text.length <= maxChars) return text;
+  let shownChars = Math.max(0, maxChars - 120);
+  let suffix = '';
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    suffix = ` [omitted reason=${reason} originalChars=${text.length} shownChars=${shownChars} omittedChars=${text.length - shownChars}]`;
+    shownChars = Math.max(0, maxChars - suffix.length);
+  }
+  suffix = ` [omitted reason=${reason} originalChars=${text.length} shownChars=${shownChars} omittedChars=${text.length - shownChars}]`;
+  return `${text.slice(0, shownChars)}${suffix}`;
+}
+
+function safeManagerCompactionCauseText(cause: unknown): string | undefined {
+  if (typeof cause === 'string') return cause;
+  if (!isNativeError(cause)) return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(cause, 'message');
+  return descriptor && 'value' in descriptor && typeof descriptor.value === 'string'
+    ? descriptor.value
+    : undefined;
+}
+
+function causeOmissionMetadata(cause: unknown): string {
+  const text = safeManagerCompactionCauseText(cause);
+  return text === undefined
+    ? 'chars(original=unknown, shown=0, omitted=unknown)'
+    : `chars(original=${text.length}, shown=0, omitted=${text.length})`;
+}
+
+/** Bound one body-free utility value; arbitrary caller text is never delivered. */
+export function sanitizeManagerCompactionDiagnostic(
+  value: unknown,
+  maxChars = MANAGER_COMPACTION_FALLBACK_REASON_MAX_CHARS,
+): string {
+  return omissionAwareDiagnosticText(
+    `[custom_override_cause_omitted] Arbitrary custom manager-compaction failure text omitted. ${causeOmissionMetadata(value)}`,
+    maxChars,
+    'diagnostic_field_limit',
+  );
+}
+
+function canonicalManagerCompactionFallbackStage(stage: unknown): string {
+  switch (stage) {
+    case 'register_strategy':
+    case 'resolve_model':
+    case 'resolve_auth':
+    case 'prepare_summary':
+    case 'summarize':
+    case 'validate_summary':
+    case 'project_state':
+    case 'render_projection':
+    case 'cancelled':
+      return stage;
+    default:
+      return 'unknown';
   }
 }
 
-/** Keep fallback output useful while redacting common credential-bearing forms. */
-export function sanitizeManagerCompactionDiagnostic(value: unknown): string {
-  return boundInline(safeString(value), MANAGER_COMPACTION_FALLBACK_REASON_MAX_CHARS)
-    .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, '$1 [redacted]')
-    .replace(
-      /\b(api[-_ ]?key|authorization|cookie|password|secret|token)\s*[:=]\s*[^\s,;]+/gi,
-      '$1=[redacted]',
-    )
-    .replace(/\b(sk|gh[opusr])[-_][a-zA-Z0-9_-]{8,}\b/g, '$1-[redacted]')
-    .replace(/(https?:\/\/)[^\s/@]+@/gi, '$1[redacted]@');
-}
-
-function modelDiagnosticLabel(model: ManagerModel | undefined): string {
-  if (!model) return 'none';
-  try {
-    return `${sanitizeManagerCompactionDiagnostic(model.provider)}/${sanitizeManagerCompactionDiagnostic(model.id)}`;
-  } catch {
-    return '<unrenderable selected model>';
-  }
-}
-
-function causeDiagnosticText(cause: unknown): string {
-  try {
-    return cause instanceof Error
-      ? `${sanitizeManagerCompactionDiagnostic(cause.name)}: ${sanitizeManagerCompactionDiagnostic(cause.message)}`
-      : sanitizeManagerCompactionDiagnostic(cause);
-  } catch {
-    return '<unrenderable diagnostic>';
-  }
-}
-
-/** Render one bounded, credential-redacted operator diagnostic for safe Pi fallback. */
+/** Render one bounded body-free operator diagnostic for safe Pi fallback. */
 export function renderManagerCompactionFallbackDiagnostic(
   stage: ManagerCompactionFallbackStage,
   cause: unknown,
-  model?: ManagerModel,
+  _model?: ManagerModel,
 ): string {
   const diagnostic = [
     '[Pardes manager compaction fallback]',
-    `stage: ${stage}`,
-    `selectedModel: ${modelDiagnosticLabel(model)}`,
+    `stage: ${canonicalManagerCompactionFallbackStage(stage)}`,
     'action: declining custom manager override; Pi built-in default compaction remains owner',
-    `reason: ${causeDiagnosticText(cause)}`,
+    `reason: ${sanitizeManagerCompactionDiagnostic(cause)}`,
   ].join('\n');
-  return diagnostic.length <= MANAGER_COMPACTION_FALLBACK_MAX_CHARS
-    ? diagnostic
-    : `${diagnostic.slice(0, MANAGER_COMPACTION_FALLBACK_MAX_CHARS - 1)}…`;
+  if (diagnostic.length <= MANAGER_COMPACTION_FALLBACK_MAX_CHARS) return diagnostic;
+  return [
+    '[Pardes manager compaction fallback]',
+    `stage: ${canonicalManagerCompactionFallbackStage(stage)}`,
+    'action: declining custom manager override; Pi built-in default compaction remains owner',
+    'reason: [custom_override_cause_omitted] Arbitrary custom manager-compaction failure text omitted. chars(original=unknown, shown=0, omitted=unknown)',
+  ].join('\n');
 }
 
-/** UI notification plus stderr logging; neither surface may prevent safe fallback. */
-export function reportManagerCompactionFallback(
+function deliverManagerCompactionFallback(
   ctx: ExtensionContext,
   diagnostic: string,
-  log: (message: string) => void = (message) => console.error(message),
+  log: (message: string) => void,
 ): void {
+  const inertDiagnostic = terminalInertManagerCompactionText(diagnostic);
   try {
-    ctx.ui.notify(diagnostic, 'warning');
+    ctx.ui.notify(inertDiagnostic, 'warning');
   } catch {
     // stderr remains a useful operator surface when a presentation adapter fails.
   }
   try {
-    log(diagnostic);
+    log(inertDiagnostic);
   } catch {
     // Diagnostics are best-effort; declining the override is the safety property.
   }
+}
+
+/** UI notification plus stderr logging; arbitrary caller text remains body-free. */
+export function reportManagerCompactionFallback(
+  ctx: ExtensionContext,
+  diagnostic: unknown,
+  log: (message: string) => void = (message) => console.error(message),
+): void {
+  deliverManagerCompactionFallback(
+    ctx,
+    renderManagerCompactionFallbackDiagnostic(
+      'unknown' as ManagerCompactionFallbackStage,
+      diagnostic,
+    ),
+    log,
+  );
 }
 
 function reportFallback(
@@ -507,13 +563,13 @@ function reportFallback(
 ): void {
   const diagnostic = renderManagerCompactionFallbackDiagnostic(stage, cause, model);
   if (!input.reportFallback) {
-    reportManagerCompactionFallback(input.ctx, diagnostic);
+    deliverManagerCompactionFallback(input.ctx, diagnostic, (message) => console.error(message));
     return;
   }
   try {
     input.reportFallback(diagnostic);
   } catch {
-    reportManagerCompactionFallback(input.ctx, diagnostic);
+    deliverManagerCompactionFallback(input.ctx, diagnostic, (message) => console.error(message));
   }
 }
 

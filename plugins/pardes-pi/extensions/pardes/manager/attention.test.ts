@@ -38,7 +38,7 @@ function runtime(status: WorkerRuntimeSnapshot['status']): WorkerRuntimeSnapshot
     startedAt: 1,
     stats: undefined,
     status,
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: 'Exercise pure attention predicates.',
     thinkingLevel: 'high',
   };

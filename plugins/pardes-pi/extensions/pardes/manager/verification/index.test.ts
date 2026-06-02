@@ -19,10 +19,13 @@ import {
   currentVerificationAttempt,
   initialManagerState,
   type ManagerState,
+  VERIFICATION_ATTEMPT_HISTORY_MAX,
+  VERIFICATION_STALE_REASON_MAX_CHARS,
   type VerificationRecord,
 } from '../domain.ts';
 import { AgentNotFoundError } from '../errors.ts';
 import { makeVerificationLifecycleCoordinator } from './index.ts';
+import { verificationStaleReason } from './policy.ts';
 
 const temporaryDirectories: string[] = [];
 const timestamp = '2026-01-01T00:00:00.000Z';
@@ -49,6 +52,7 @@ interface VerificationFixtureOptions {
   readonly failSpawnAt?: number;
   readonly failRefresh?: boolean;
   readonly failReviewCreate?: boolean;
+  readonly failReviewInspect?: boolean;
   readonly failReviewProvisionAfterAllocation?: boolean;
   readonly failDiscard?: boolean;
   readonly createDelay?: Duration.Input;
@@ -185,11 +189,19 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
     inspect: (_owner, lease) =>
       Effect.succeed({ changedPaths: [], dirty: false, headSha: sourceHeadSha, path: lease.path }),
     inspectDetachedReviewCheckout: (_owner, lease) =>
-      Effect.succeed({
-        dirty: options.dirtyReviewCheckout === true,
-        headSha: lease.reviewedHeadSha,
-        path: lease.path,
-      }),
+      options.failReviewInspect
+        ? Effect.fail(
+            new WorktreeError({
+              cause: 'fixture failure',
+              operation: 'fixture checkout inspect',
+              path: lease.path,
+            }),
+          )
+        : Effect.succeed({
+            dirty: options.dirtyReviewCheckout === true,
+            headSha: lease.reviewedHeadSha,
+            path: lease.path,
+          }),
     prepareDetachedReviewCheckout: (input) =>
       Effect.succeed(reviewLease(input.verificationId, input.reviewedHeadSha)),
     provisionDetachedReviewCheckout: (_owner, lease) =>
@@ -269,7 +281,7 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
           startedAt: Date.now(),
           stats: undefined,
           status: 'running',
-          stderr: '',
+          stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
           task: input.task,
           thinkingLevel: input.thinkingLevel,
           ...(input.lifecycleGeneration === undefined
@@ -372,6 +384,25 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
 }
 
 describe('advisory verification lifecycle', () => {
+  test('preserves complete safe stale details when bounded and replaces oversized detail without midpoint clipping', () => {
+    expect(verificationStaleReason('source_head_changed', 'from aaa to bbb')).toBe(
+      '[source_head_changed] source head changed from aaa to bbb',
+    );
+
+    const privatePrefix = 'token=private-stale-detail';
+    const oversized = verificationStaleReason(
+      'provisioning_failed',
+      `${privatePrefix}\u001b ${'x'.repeat(500)}`,
+    );
+    expect(oversized).toBe(
+      '[provisioning_failed] verifier provisioning failed [detail omitted reason=verification_stale_detail_limit originalChars=527 shownChars=0 omittedChars=527]',
+    );
+    expect(oversized.length).toBeLessThanOrEqual(VERIFICATION_STALE_REASON_MAX_CHARS);
+    expect(oversized).not.toContain(privatePrefix);
+    expect(oversized).not.toContain('\u001b');
+    expect(oversized).not.toContain('…');
+  });
+
   test('marks detached review-checkout mutations as stale advisory evidence on status', async () => {
     const fixture = await verificationFixture({ dirtyReviewCheckout: true });
     const verification = await Effect.runPromise(
@@ -382,7 +413,8 @@ describe('advisory verification lifecycle', () => {
 
     expect(currentVerificationAttempt(stale)).toMatchObject({
       evidenceStatus: 'stale',
-      staleReason: 'detached review checkout became dirty after the reviewed head was captured',
+      staleReason: '[review_checkout_dirty] detached review checkout became dirty',
+      staleReasonCode: 'review_checkout_dirty',
     });
     expect(fixture.namespace.state.inbox).toEqual([
       expect.objectContaining({
@@ -390,6 +422,22 @@ describe('advisory verification lifecycle', () => {
         verificationId: verification.id,
       }),
     ]);
+  });
+
+  test('marks unavailable detached review checkout with a truthful unverifiable stale code', async () => {
+    const fixture = await verificationFixture({ failReviewInspect: true });
+    const verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+
+    const stale = await Effect.runPromise(fixture.coordinator.status(verification.id));
+
+    expect(currentVerificationAttempt(stale)).toMatchObject({
+      evidenceStatus: 'stale',
+      staleReason:
+        '[review_checkout_unverifiable] detached review checkout is unavailable or unverifiable',
+      staleReasonCode: 'review_checkout_unverifiable',
+    });
   });
 
   test('briefs initial and retained refresh attempts with one comprehensive advisory reporting protocol', async () => {
@@ -725,6 +773,24 @@ describe('advisory verification lifecycle', () => {
       ).toMatchObject({ evidenceStatus: 'stale', status: 'crashed' });
       expect(existsSync(fixture.sourcePath)).toBe(true);
     }
+  });
+
+  test('counts archived attempts when retained verifier lineage reaches its durable cap', async () => {
+    const fixture = await verificationFixture();
+    let verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+
+    for (let index = 0; index < VERIFICATION_ATTEMPT_HISTORY_MAX + 1; index += 1) {
+      fixture.setVerifierIdle(verification);
+      verification = await Effect.runPromise(fixture.coordinator.refresh(verification.id));
+    }
+
+    expect(currentVerificationAttempt(verification).attempt).toBe(
+      VERIFICATION_ATTEMPT_HISTORY_MAX + 2,
+    );
+    expect(verification.attempts).toHaveLength(VERIFICATION_ATTEMPT_HISTORY_MAX);
+    expect(verification.archivedAttemptCount).toBe(2);
   });
 
   test('serializes concurrent requests and refreshes through one manager-scoped verifier permit', async () => {

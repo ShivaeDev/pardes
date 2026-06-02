@@ -1,7 +1,8 @@
-import { Effect } from 'effect';
+import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
   type AgentReport,
+  AgentReportReferenceSchema,
   makeReporting,
   REPORT_DETAILS_MAX_CHARS,
   REPORT_EXCERPT_MAX_CHARS,
@@ -56,10 +57,40 @@ describe('durable reporting use case', () => {
       createdAt,
       reportId: persisted.reportId,
       status: 'completed',
+      summaryChars: { omittedChars: 404, originalChars: 644, shownChars: 240 },
+      summaryOmissionReason: 'report_summary_preview_limit',
       summaryTruncated: true,
     });
     expect(persisted.reference).not.toHaveProperty('summaryPreview');
     expect(reports.get(persisted.reportId)?.details).toBe(details);
+  });
+
+  test('rejects incoherent restored durable-pointer omission metadata', () => {
+    for (const metadata of [
+      {
+        summaryChars: { omittedChars: 0, originalChars: 1, shownChars: 999 },
+        summaryOmissionReason: 'report_summary_preview_limit',
+        summaryTruncated: false,
+      },
+      {
+        summaryChars: { omittedChars: 0, originalChars: 1, shownChars: 1 },
+        summaryOmissionReason: 'report_summary_preview_limit',
+        summaryTruncated: false,
+      },
+      {
+        summaryChars: { omittedChars: 1, originalChars: 2, shownChars: 1 },
+        summaryTruncated: false,
+      },
+    ]) {
+      expect(() =>
+        Schema.decodeUnknownSync(AgentReportReferenceSchema)({
+          createdAt,
+          reportId: 'report-incoherent',
+          status: 'completed',
+          ...metadata,
+        }),
+      ).toThrow();
+    }
   });
 
   test('keeps one consolidated verifier body lossless while manager retrieval remains explicitly excerpt-bounded', async () => {
@@ -153,8 +184,11 @@ describe('durable reporting use case', () => {
       field: 'details',
       hasMore: true,
       offset: 5,
+      omittedChars: 14,
+      originalChars: 22,
       reportId: persisted.reportId,
       returnedChars: 8,
+      shownChars: 8,
       status: 'completed',
       totalChars: 22,
     });
@@ -168,8 +202,11 @@ describe('durable reporting use case', () => {
       field: 'details',
       hasMore: true,
       offset: 5,
+      omittedChars: 14,
+      originalChars: 22,
       reportId: persisted.reportId,
       returnedChars: 8,
+      shownChars: 8,
       status: 'completed',
       totalChars: 22,
     });
@@ -240,7 +277,7 @@ describe('durable reporting use case', () => {
       `source reportId: ${persisted.reportId} · sourceAgent: verifier-one · sourceRole: verifier · status: completed`,
     );
     expect(text).toContain(
-      'excerpt field: details · offset: 0 · returnedChars: 12 · totalChars: 45 · truncated: true',
+      'excerpt field: details · offset: 0 · originalChars: 45 · shownChars: 12 · omittedChars: 33 · hasMoreAfterExcerpt: true',
     );
     expect(text).toContain(
       'continuation: ask the manager for another bounded excerpt with field details and offset 12; children cannot retrieve durable reports directly',

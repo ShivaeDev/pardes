@@ -44,7 +44,7 @@ export function verificationStatusLines(
   return structuralRows(
     {
       authoredLines: [
-        `${structuralValue(verification.id)} [${attempt.status}] advisory attempt:${attempt.attempt} · retained lineage:${verification.attempts.length} · evidence:${attempt.evidenceStatus}`,
+        `${structuralValue(verification.id)} [${attempt.status}] advisory attempt:${attempt.attempt} · retained lineage:${verification.attempts.length} · archived attempts omitted:${verification.archivedAttemptCount ?? 0} · evidence:${attempt.evidenceStatus}`,
         `source:${structuralValue(verification.sourceAgentId)} · verifier:${structuralValue(verification.verifierAgentId)} · workstream:${structuralValue(verification.workstreamId)}`,
         ...(state ? [verificationReviewLoopLine(state, verification)] : []),
         `reviewed immutable head:${structuralValue(attempt.reviewedHeadSha)} · baseline:${structuralValue(attempt.sourceBranchPointSha)}`,

@@ -41,6 +41,8 @@ export {
   managedWorktreeLayer,
   validateDetachedReviewCheckoutLease,
   validateManagedWorktreeLease,
+  type WorktreeCommitProvenance,
   type WorktreeInspection,
+  type WorktreeLatestCommitDelta,
   type WorktreeServiceError,
 } from './worktrees.ts';

@@ -15,7 +15,7 @@ import {
   runtimeAgentStatus,
   stopAuditWarning,
 } from './projections/agents.ts';
-import { CONTROL_PLANE_MAX_LINE_LENGTH, compactText } from './projections/core.ts';
+import { completeOrOmittedText } from './projections/core.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerController): void {
@@ -99,9 +99,9 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
     description:
       'Inspect one Pardes worker through a bounded projection. Defaults to a concise summary; use audit or runtime only when needed. Retrieve durable report details separately with report_get.',
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const result = await runTool(manager.agentStatus(params.agentId, ctx));
-      if (!result.ok) return textResult(`Error: ${result.error}`);
       const mode = params.mode ?? 'summary';
+      const result = await runTool(manager.agentStatus(params.agentId, ctx, mode === 'audit'));
+      if (!result.ok) return textResult(`Error: ${result.error}`);
       if (mode === 'audit') return textResult(auditAgentStatus(result.value));
       if (mode === 'runtime') return textResult(runtimeAgentStatus(result.value));
       return textResult(conciseAgentStatus(result.value));
@@ -185,13 +185,10 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
       if (!result.ok) return textResult(`Error: ${result.error}`);
       const compacted = result.value;
       const outcome = compacted.failureSummary
-        ? ` Bounded child outcome: ${compacted.failureSummary}`
+        ? ` Bounded child outcome: ${completeOrOmittedText(compacted.failureSummary, 96)}`
         : '';
       return textResult(
-        compactText(
-          `Requested manual compaction for ${compacted.agentId} (${compacted.status}).${outcome}`,
-          CONTROL_PLANE_MAX_LINE_LENGTH,
-        ),
+        `Requested manual compaction for ${compacted.agentId} (${compacted.status}).${outcome}`,
         compacted,
       );
     },
@@ -209,10 +206,7 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
       const result = await runTool(manager.reloadAgent(params.agentId, ctx));
       return result.ok
         ? textResult(
-            compactText(
-              `Refreshed child extension for ${result.value.agentId} (${result.value.status}); retained conversation and managed worktree preserved; sent no prompt.`,
-              CONTROL_PLANE_MAX_LINE_LENGTH,
-            ),
+            `Refreshed child extension for ${result.value.agentId} (${result.value.status}); retained conversation and managed worktree preserved; sent no prompt.`,
             result.value,
           )
         : textResult(`Error: ${result.error}`);

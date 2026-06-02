@@ -83,13 +83,13 @@ describe('managed worktree service', () => {
     expect(git(primary, 'status', '--porcelain', '--untracked-files=all')).toBe('');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
-    ).toEqual({ changedPaths: [], dirty: false, headSha: branchPointSha, path: lease.path });
+    ).toMatchObject({ changedPaths: [], dirty: false, headSha: branchPointSha, path: lease.path });
 
     const changed = join(lease.path, 'worker.txt');
     writeFileSync(changed, 'dirty\n');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
-    ).toEqual({
+    ).toMatchObject({
       changedPaths: ['worker.txt'],
       dirty: true,
       headSha: branchPointSha,
@@ -106,7 +106,7 @@ describe('managed worktree service', () => {
     const committedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-1'), lease)),
-    ).toEqual({
+    ).toMatchObject({
       changedPaths: ['worker.txt'],
       dirty: false,
       headSha: committedHeadSha,
@@ -222,7 +222,7 @@ describe('managed worktree service', () => {
     const firstInspection = await Effect.runPromise(
       service.inspect(owner(repo, 'manager-1', 'agent-snapshot'), lease),
     );
-    expect(firstInspection).toEqual({
+    expect(firstInspection).toMatchObject({
       changedPaths: ['first.txt'],
       dirty: false,
       headSha: git(lease.path, 'rev-parse', 'HEAD'),
@@ -239,6 +239,54 @@ describe('managed worktree service', () => {
     expect(secondInspection.headSha).not.toBe(firstInspection.headSha);
     expect(firstInspection.changedPaths).toEqual(['first.txt']);
     expect(secondInspection.changedPaths).toEqual(['first.txt', 'second.txt']);
+  });
+
+  test('distinguishes worker-authored delta from additive main integration merges', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-provenance', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'worker.txt'), 'worker authored\n');
+    git(lease.path, 'add', 'worker.txt');
+    git(lease.path, 'commit', '-m', 'worker-authored fixture');
+    const workerAuthoredSha = git(lease.path, 'rev-parse', 'HEAD');
+
+    writeFileSync(join(primary, 'main.txt'), 'additive main change\n');
+    git(primary, 'add', 'main.txt');
+    git(primary, 'commit', '-m', 'main integration fixture');
+    git(lease.path, 'merge', '--no-edit', 'main');
+    const integratedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
+    const inspectWithProvenance = service.inspectWithProvenance;
+    if (!inspectWithProvenance) throw new Error('Expected opt-in Git provenance inspection');
+    const inspection = await Effect.runPromise(
+      inspectWithProvenance(owner(repo, 'manager-1', 'agent-provenance'), lease),
+    );
+
+    expect(workerAuthoredSha).not.toBe(integratedHeadSha);
+    expect(inspection).toMatchObject({
+      changedPaths: ['main.txt', 'worker.txt'],
+      dirty: false,
+      headSha: integratedHeadSha,
+      provenance: {
+        branchPointSha,
+        dirtyPaths: [],
+        headSha: integratedHeadSha,
+        integrationCommitCount: 1,
+        integrationPaths: ['main.txt'],
+        latestDelta: {
+          changedPaths: ['main.txt'],
+          commitSha: integratedHeadSha,
+          kind: 'integration',
+        },
+        totalBranchCommitCount: 2,
+        totalBranchDeltaPaths: ['main.txt', 'worker.txt'],
+        workerAuthoredCommitCount: 1,
+        workerAuthoredPaths: ['worker.txt'],
+      },
+    });
   });
 
   test('creates a fresh manager-namespaced detached review checkout pinned to an immutable worker head', async () => {
@@ -460,14 +508,14 @@ describe('managed worktree service', () => {
     writeFileSync(join(lease.path, 'added.txt'), 'added\n');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-audit'), lease)),
-    ).toEqual({ changedPaths, dirty: true, headSha: branchPointSha, path: lease.path });
+    ).toMatchObject({ changedPaths, dirty: true, headSha: branchPointSha, path: lease.path });
 
     git(lease.path, 'add', '-A');
     git(lease.path, 'commit', '-m', 'audit changes');
     const auditedHeadSha = git(lease.path, 'rev-parse', 'HEAD');
     expect(
       await Effect.runPromise(service.inspect(owner(repo, 'manager-1', 'agent-audit'), lease)),
-    ).toEqual({ changedPaths, dirty: false, headSha: auditedHeadSha, path: lease.path });
+    ).toMatchObject({ changedPaths, dirty: false, headSha: auditedHeadSha, path: lease.path });
   });
 
   test('rejects dot path segments before mutating managed worktrees', async () => {

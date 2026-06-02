@@ -43,11 +43,32 @@ export interface DetachedReviewCheckoutInspection {
   readonly dirty: boolean;
 }
 
+export interface WorktreeLatestCommitDelta {
+  readonly changedPaths: ReadonlyArray<string>;
+  readonly commitSha: string;
+  readonly kind: 'worker_authored' | 'integration';
+}
+
+/** Commit provenance stays separate from the total branch delta used by safety audits. */
+export interface WorktreeCommitProvenance {
+  readonly branchPointSha: string;
+  readonly dirtyPaths: ReadonlyArray<string>;
+  readonly headSha: string;
+  readonly integrationCommitCount: number;
+  readonly integrationPaths: ReadonlyArray<string>;
+  readonly latestDelta?: WorktreeLatestCommitDelta;
+  readonly totalBranchCommitCount: number;
+  readonly totalBranchDeltaPaths: ReadonlyArray<string>;
+  readonly workerAuthoredCommitCount: number;
+  readonly workerAuthoredPaths: ReadonlyArray<string>;
+}
+
 export interface WorktreeInspection {
   readonly path: string;
   readonly headSha: string;
   readonly dirty: boolean;
   readonly changedPaths: ReadonlyArray<string>;
+  readonly provenance?: WorktreeCommitProvenance;
 }
 
 export type ManagedWorktreeCleanupState = 'present_clean' | 'present_dirty' | 'already_missing';
@@ -104,6 +125,11 @@ export interface ManagedWorktreeShape {
     lease: DetachedReviewCheckoutLease,
   ) => Effect.Effect<DetachedReviewCheckoutInspection, WorktreeServiceError>;
   readonly inspect: (
+    owner: ManagedLeaseOwner,
+    lease: WorktreeLease,
+  ) => Effect.Effect<WorktreeInspection, WorktreeServiceError>;
+  /** Opt-in richer commit provenance for human/model audit drill-downs, never routine lifecycle checks. */
+  readonly inspectWithProvenance?: (
     owner: ManagedLeaseOwner,
     lease: WorktreeLease,
   ) => Effect.Effect<WorktreeInspection, WorktreeServiceError>;
@@ -511,6 +537,23 @@ function parseCommittedChangedPaths(output: string): ReadonlyArray<string> {
   return [...paths].sort();
 }
 
+interface FirstParentCommit {
+  readonly commitSha: string;
+  readonly integration: boolean;
+}
+
+function parseFirstParentCommits(output: string): ReadonlyArray<FirstParentCommit> {
+  return output
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const [commitSha, ...parents] = line.trim().split(/\s+/);
+      if (!commitSha) throw new Error('Git returned an invalid first-parent commit row');
+      return { commitSha, integration: parents.length > 1 };
+    });
+}
+
 export function makeManagedWorktreeService(
   options: WorktreeServiceOptions = {},
 ): ManagedWorktreeShape {
@@ -520,6 +563,7 @@ export function makeManagedWorktreeService(
   const inspectPresent = Effect.fnUntraced(function* (
     owner: ManagedLeaseOwner,
     lease: WorktreeLease,
+    includeProvenance = false,
   ) {
     yield* validateManagedWorktreeLease(owner, lease);
     const headSha = (yield* git(lease.path, [
@@ -534,19 +578,92 @@ export function makeManagedWorktreeService(
       '--untracked-files=all',
     ]);
     const dirtyPaths = parsePorcelainChangedPaths(status.stdout);
-    const committed = yield* git(lease.path, [
-      'diff',
-      '--name-status',
-      '-z',
-      `${lease.branchPointSha}...${headSha}`,
-    ]);
-    const changedPaths = [
-      ...new Set([...dirtyPaths, ...parseCommittedChangedPaths(committed.stdout)]),
-    ].sort();
-    return { changedPaths, dirty: dirtyPaths.length > 0, headSha, path: lease.path };
+    const range = `${lease.branchPointSha}..${headSha}`;
+    const committed = yield* git(lease.path, ['diff', '--name-status', '-z', range]);
+    const totalBranchDeltaPaths = parseCommittedChangedPaths(committed.stdout);
+    const changedPaths = [...new Set([...dirtyPaths, ...totalBranchDeltaPaths])].sort();
+    const baseInspection = {
+      changedPaths,
+      dirty: dirtyPaths.length > 0,
+      headSha,
+      path: lease.path,
+    };
+    if (!includeProvenance) return baseInspection;
+    const firstParentCommits = parseFirstParentCommits(
+      (yield* git(lease.path, ['rev-list', '--first-parent', '--parents', range])).stdout,
+    );
+    const totalBranchCommitCount = firstParentCommits.length;
+    const integrationCommitCount = firstParentCommits.filter(
+      ({ integration }) => integration,
+    ).length;
+    const authoredPaths =
+      integrationCommitCount === 0
+        ? totalBranchDeltaPaths
+        : parseCommittedChangedPaths(
+            (yield* git(lease.path, [
+              'log',
+              '--first-parent',
+              '--no-merges',
+              '--format=',
+              '--name-status',
+              '-z',
+              range,
+            ])).stdout,
+          );
+    const integrationPaths =
+      integrationCommitCount === 0
+        ? []
+        : parseCommittedChangedPaths(
+            (yield* git(lease.path, [
+              'log',
+              '--first-parent',
+              '--merges',
+              '--diff-merges=first-parent',
+              '--format=',
+              '--name-status',
+              '-z',
+              range,
+            ])).stdout,
+          );
+    const latestCommit = firstParentCommits[0];
+    const latestDelta = latestCommit
+      ? {
+          changedPaths: parseCommittedChangedPaths(
+            (yield* git(lease.path, [
+              'diff',
+              '--name-status',
+              '-z',
+              `${latestCommit.commitSha}^1`,
+              latestCommit.commitSha,
+            ])).stdout,
+          ),
+          commitSha: latestCommit.commitSha,
+          kind: latestCommit.integration ? ('integration' as const) : ('worker_authored' as const),
+        }
+      : undefined;
+    return {
+      ...baseInspection,
+      provenance: {
+        branchPointSha: lease.branchPointSha,
+        dirtyPaths,
+        headSha,
+        integrationCommitCount,
+        integrationPaths,
+        ...(latestDelta === undefined ? {} : { latestDelta }),
+        totalBranchCommitCount,
+        totalBranchDeltaPaths,
+        workerAuthoredCommitCount: totalBranchCommitCount - integrationCommitCount,
+        workerAuthoredPaths: authoredPaths,
+      },
+    };
   });
 
-  const inspect: ManagedWorktreeShape['inspect'] = inspectPresent;
+  const inspect: ManagedWorktreeShape['inspect'] = (owner, lease) =>
+    inspectPresent(owner, lease, false);
+  const inspectWithProvenance: NonNullable<ManagedWorktreeShape['inspectWithProvenance']> = (
+    owner,
+    lease,
+  ) => inspectPresent(owner, lease, true);
 
   const inspectBranch = Effect.fnUntraced(function* (
     owner: ManagedLeaseOwner,
@@ -942,6 +1059,7 @@ export function makeManagedWorktreeService(
     inspect,
     inspectDetachedReviewCheckout,
     inspectForCleanup,
+    inspectWithProvenance,
     prepareDetachedReviewCheckout,
     provisionDetachedReviewCheckout,
     refreshDetachedReviewCheckout,

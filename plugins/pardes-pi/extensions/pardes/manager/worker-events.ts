@@ -6,6 +6,7 @@ import {
   type AgentGitAuditTrigger,
   type AgentRecord,
   currentVerificationTerminalReportStatus,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerEvent,
   type VerificationRecord,
 } from './domain.ts';
@@ -97,6 +98,13 @@ export function boundedFailureSummary(error: unknown): string {
   return truncateModelFacingText(formatPardesError(error));
 }
 
+/** Preserve accepted prose exactly; replace rejected bulk input with one structural diagnostic. */
+export function acceptedDurableEventDetails(details: string, source: string): string {
+  return details.length <= MANAGER_EVENT_DETAILS_MAX_CHARS
+    ? details
+    : `${source} rejected before durable persistence: ${details.length} chars exceeds the ${MANAGER_EVENT_DETAILS_MAX_CHARS}-char inbox detail cap.`;
+}
+
 export function boundedEventSummary(parts: ReadonlyArray<string>): string {
   const summary = normalizeModelFacingText(parts.filter(Boolean).join(' '));
   return summary.length <= BOUNDED_EVENT_SUMMARY_LIMIT
@@ -122,7 +130,10 @@ export function failedHandoffAudit(
   error: unknown,
 ): HandoffAuditOutcome {
   return {
-    failureDetails: formatPardesError(error),
+    failureDetails: acceptedDurableEventDetails(
+      formatPardesError(error),
+      'managed-worktree Git audit diagnostic',
+    ),
     gitAudit: {
       checkedAt,
       failureSummary: boundedFailureSummary(error),
@@ -180,19 +191,22 @@ export function workerEventSummary(
         : reportPersistence?.status === 'failed'
           ? 'agent_report_persist_failed'
           : `agent_report_${event.status}`;
-    const details = [
-      ...(reportPersistence?.status === 'failed'
-        ? [
-            `report summary(JSON string): ${JSON.stringify(event.summary)}`,
-            `report artifact persistence diagnostic(JSON string): ${JSON.stringify(reportPersistence.failureDetails ?? reportPersistence.failureSummary)}`,
-          ]
-        : []),
-      ...(audit?.status === 'failed'
-        ? [
-            `managed-worktree Git audit diagnostic(JSON string): ${JSON.stringify(audit.failureDetails)}`,
-          ]
-        : []),
-    ].join('\n');
+    const details = acceptedDurableEventDetails(
+      [
+        ...(reportPersistence?.status === 'failed'
+          ? [
+              `report summary(JSON string): ${JSON.stringify(event.summary)}`,
+              `report artifact persistence diagnostic(JSON string): ${JSON.stringify(reportPersistence.failureDetails ?? reportPersistence.failureSummary)}`,
+            ]
+          : []),
+        ...(audit?.status === 'failed'
+          ? [
+              `managed-worktree Git audit diagnostic(JSON string): ${JSON.stringify(audit.failureDetails)}`,
+            ]
+          : []),
+      ].join('\n'),
+      'worker report diagnostic',
+    );
     return {
       actionable:
         event.status !== 'progress' ||
@@ -213,10 +227,13 @@ export function workerEventSummary(
   if (event.type === 'question')
     return {
       actionable: true,
-      details: JSON.stringify({
-        question: event.question,
-        ...(event.context === undefined ? {} : { context: event.context }),
-      }),
+      details: acceptedDurableEventDetails(
+        JSON.stringify({
+          question: event.question,
+          ...(event.context === undefined ? {} : { context: event.context }),
+        }),
+        'child question detail',
+      ),
       summary: `${event.agentId} asks a blocking question; inspect the durable inbox detail.`,
       type: 'agent_question',
     };
@@ -229,7 +246,7 @@ export function workerEventSummary(
   if (event.type === 'protocol_error')
     return {
       actionable: true,
-      details: event.message,
+      details: acceptedDurableEventDetails(event.message, 'child RPC protocol diagnostic'),
       summary: `${event.agentId} emitted invalid RPC JSON; inspect the durable inbox diagnostic.`,
       type: 'agent_protocol_error',
     };
@@ -278,7 +295,10 @@ export function hasPendingCanonicalAttention(
       event.verificationId === candidate.verificationId &&
       event.workstreamId === candidate.workstreamId &&
       event.summary === candidate.summary &&
-      event.details === candidate.details,
+      (event.details === candidate.details ||
+        (candidate.type === 'pull_request_auto_sync_attention' &&
+          ((event.details === undefined && candidate.details === candidate.summary) ||
+            (candidate.details === undefined && event.details === event.summary)))),
   );
 }
 

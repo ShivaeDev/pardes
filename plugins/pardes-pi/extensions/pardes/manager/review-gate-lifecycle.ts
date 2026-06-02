@@ -28,6 +28,7 @@ import {
   pullRequestLabel,
 } from './publication-coordinator.ts';
 import {
+  acceptedDurableEventDetails,
   applyHandoffAudit,
   boundedEventSummary,
   boundedFailureSummary,
@@ -657,7 +658,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           timestamp,
           pullRequestEventAssociation(pullRequest),
         ),
-        details: formatPardesError(failure),
+        details: acceptedDurableEventDetails(
+          formatPardesError(failure),
+          'idle-worker auto-stop diagnostic',
+        ),
       });
       return {
         compact: 'idle-owner:preserved(stop)',

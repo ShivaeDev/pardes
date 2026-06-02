@@ -1,5 +1,6 @@
 import { Schema } from 'effect';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
+import { CHILD_QUESTION_CONTEXT_MAX_CHARS, CHILD_QUESTION_MAX_CHARS } from '../child-profile.ts';
 
 const MAX_PROTOCOL_ERROR_LENGTH = 240;
 
@@ -140,8 +141,10 @@ const PardesReportPayloadSchema = Schema.Struct({
   type: Schema.Literal('report'),
 });
 const PardesQuestionPayloadSchema = Schema.Struct({
-  context: Schema.optionalKey(Schema.String),
-  question: NonEmptyString,
+  context: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(CHILD_QUESTION_CONTEXT_MAX_CHARS)),
+  ),
+  question: NonEmptyString.check(Schema.isMaxLength(CHILD_QUESTION_MAX_CHARS)),
   type: Schema.Literal('question'),
 });
 const WorkerSessionStatsSchema = Schema.Struct({

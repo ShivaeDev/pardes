@@ -22,6 +22,8 @@ export { AgentReportSchema } from '../reporting/index.ts';
 const NonEmptyString = Schema.String.check(Schema.isMinLength(1));
 const FullCommitShaSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40,64}$/));
 export const WorkerTitleSchema = NonEmptyString.check(Schema.isMaxLength(80));
+/** Lossless inbox prose is accepted only within one deliberate durable-state allocation. */
+export const MANAGER_EVENT_DETAILS_MAX_CHARS = 1 * 1_024 * 1_024;
 
 export const WorkstreamStatusSchema = Schema.Literals([
   'planned',
@@ -279,7 +281,9 @@ export const ManagerEventSchema = Schema.Struct({
   agentId: Schema.optionalKey(NonEmptyString),
   createdAt: NonEmptyString,
   /** Optional lossless non-report prose. Compact rows expose only a bounded structural pointer. */
-  details: Schema.optionalKey(Schema.String),
+  details: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(MANAGER_EVENT_DETAILS_MAX_CHARS)),
+  ),
   id: NonEmptyString,
   /** Presentation cursors stop before this row until its bounded software outcome is durable. */
   presentationBlocked: Schema.optionalKey(Schema.Boolean),

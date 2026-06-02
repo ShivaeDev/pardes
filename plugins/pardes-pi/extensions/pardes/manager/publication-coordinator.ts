@@ -27,6 +27,7 @@ import {
   validateRetainedAgentState,
 } from './namespace.ts';
 import {
+  acceptedDurableEventDetails,
   applyHandoffAudit,
   boundedEventSummary,
   boundedFailureSummary,
@@ -357,14 +358,14 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     const association = pullRequest
       ? pullRequestEventAssociation(pullRequest)
       : { agentId: agent.id, workstreamId: agent.workstreamId };
-    const event = {
-      ...makeEvent(
-        'pull_request_auto_sync_attention',
-        boundedEventSummary([summary]),
-        timestamp,
-        association,
-      ),
+    const boundedSummary = boundedEventSummary([summary]);
+    const acceptedDetails = acceptedDurableEventDetails(
       details,
+      'pull-request auto-sync diagnostic',
+    );
+    const event = {
+      ...makeEvent('pull_request_auto_sync_attention', boundedSummary, timestamp, association),
+      ...(acceptedDetails === boundedSummary ? {} : { details: acceptedDetails }),
     };
     const projection = yield* namespace.store.mutate<AutoSyncAttentionProjection, never>(
       (state) => {

@@ -86,6 +86,7 @@ export {
   type InboxWake,
   InboxWakeSchema,
   initialManagerState,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerActivation,
   ManagerActivationSchema,
   type ManagerEvent,

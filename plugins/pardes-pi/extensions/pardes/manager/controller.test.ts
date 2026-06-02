@@ -8425,7 +8425,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain('no published head branch');
   });
 
-  test('deduplicates bounded associated attention when a reporting agent has ambiguous open review gates', async () => {
+  test('deduplicates restored legacy attention when a reporting agent has ambiguous open review gates', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -8445,6 +8445,7 @@ describe('manager controller', () => {
     );
     const statePath = join(activationStateDir(fixture.entries), 'state.json');
     const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      inbox: Array<Record<string, unknown>>;
       pullRequests: Record<string, Record<string, unknown>>;
     };
     persisted.pullRequests['pr-43'] = {
@@ -8453,6 +8454,14 @@ describe('manager controller', () => {
       number: 43,
       url: 'https://github.test/acme/project/pull/43',
     };
+    persisted.inbox.push({
+      agentId: agent.id,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-legacy-auto-sync-attention',
+      summary: `Did not auto-sync ${agent.id}: found 2 persisted open review-gate associations; expected exactly one.`,
+      type: 'pull_request_auto_sync_attention',
+      workstreamId: workstream.id,
+    });
     writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
     await Effect.runPromise(controller.refresh(fixture.ctx));
 

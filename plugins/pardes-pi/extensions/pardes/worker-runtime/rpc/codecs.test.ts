@@ -1,6 +1,7 @@
 import { Effect, Exit, Option } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
+import { CHILD_QUESTION_CONTEXT_MAX_CHARS, CHILD_QUESTION_MAX_CHARS } from '../child-profile.ts';
 import { boundedProtocolErrorMessage, WorkerRpcWire } from './codecs.ts';
 
 describe('worker RPC wire schema', () => {
@@ -78,6 +79,32 @@ describe('worker RPC wire schema', () => {
     expect(
       Option.isNone(
         WorkerRpcWire.decodePardesReportPayload({ ...bounded, details: `${bounded.details}d` }),
+      ),
+    ).toBe(true);
+  });
+
+  test('accepts bounded child questions and rejects oversized question or context fields', () => {
+    const bounded = {
+      context: 'c'.repeat(CHILD_QUESTION_CONTEXT_MAX_CHARS),
+      question: 'q'.repeat(CHILD_QUESTION_MAX_CHARS),
+      type: 'question',
+    } as const;
+
+    expect(Option.isSome(WorkerRpcWire.decodePardesQuestionPayload(bounded))).toBe(true);
+    expect(
+      Option.isNone(
+        WorkerRpcWire.decodePardesQuestionPayload({
+          ...bounded,
+          question: `${bounded.question}q`,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      Option.isNone(
+        WorkerRpcWire.decodePardesQuestionPayload({
+          ...bounded,
+          context: `${bounded.context}c`,
+        }),
       ),
     ).toBe(true);
   });

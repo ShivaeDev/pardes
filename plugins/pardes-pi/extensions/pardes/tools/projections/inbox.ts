@@ -98,11 +98,11 @@ export function inboxDeliveryLine(
   const refinementPending = state.inbox.filter(
     (event) => event.presentationBlocked === true,
   ).length;
-  const readiness = ` · ack-safe ready prefix:${delivery.readyPrefixCount}${delivery.readyPrefixCursor === undefined ? '' : ` through ${summaryAttentionToken(delivery.readyPrefixCursor, 'redacted-event')}`}`;
+  const readiness = ` · ack-safe cursor:${delivery.acknowledgeableCursor === undefined ? 'none' : summaryAttentionToken(delivery.acknowledgeableCursor, 'redacted-event')}/${delivery.acknowledgeableCount} · frontier:${delivery.readyFrontierCursor === undefined ? 'none' : summaryAttentionToken(delivery.readyFrontierCursor, 'redacted-event')}/${delivery.readyFrontierCount}`;
   const refinement =
     delivery.presentationBlockedEventId === undefined
-      ? ` · software refinement pending:${refinementPending}`
-      : ` · software refinement pending:${refinementPending} · first barrier:${summaryAttentionToken(delivery.presentationBlockedEventId, 'redacted-event')} (${delivery.presentationBlockedReason})`;
+      ? ` · blocked:${refinementPending}`
+      : ` · blocked:${refinementPending} · barrier:${summaryAttentionToken(delivery.presentationBlockedEventId, 'redacted-event')}(${delivery.presentationBlockedReason})`;
   return delivery.deliveredCursor === undefined
     ? `delivery: idle · awaiting-user:no · queued suffix:0${readiness}${refinement}`
     : `delivery: cursor ${summaryAttentionToken(delivery.deliveredCursor, 'redacted-event')} · delivered age:${delivery.deliveredCursorAgeMs === undefined ? 'unknown' : elapsed(delivery.deliveredCursorAgeMs)} · queued suffix:${delivery.queuedSuffixCount} · awaiting-user:${delivery.awaitingUser ? 'yes' : 'no'} · wake ${summaryAttentionToken(delivery.wakeToken ?? '', 'redacted-wake')}${readiness}${refinement}`;

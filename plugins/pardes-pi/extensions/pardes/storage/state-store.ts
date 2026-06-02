@@ -1,4 +1,4 @@
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Context, Effect, Layer, Semaphore } from 'effect';
 import type { ManagerEvent, ManagerState } from '../manager/index.ts';
@@ -12,6 +12,11 @@ import {
   readDirectReportArtifact,
   validateSerializedReportWrite,
 } from './report-artifacts.ts';
+import {
+  readBoundedStateSource,
+  validateSerializedEventWrite,
+  validateSerializedStateWrite,
+} from './state-limits.ts';
 
 export interface StateStoreShape {
   readonly directory: string;
@@ -45,7 +50,7 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
   const ensureReportsDirectory = () => ensureDirectReportsDirectory(directory, reportsPath);
 
   const loadUnlocked = Effect.fnUntraced(function* () {
-    const source = yield* fsPromise('read state', statePath, () => readFile(statePath, 'utf8'));
+    const source = yield* readBoundedStateSource(statePath);
     const json = yield* parseStateJson(statePath, source);
     return yield* decodeState(statePath, json);
   });
@@ -53,7 +58,9 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
   const writeUnlocked = Effect.fnUntraced(function* (state: ManagerState) {
     yield* ensureManagerDirectory();
     const encoded = yield* encodeState(statePath, state);
-    yield* writeJsonAtomically(statePath, `${JSON.stringify(encoded, null, 2)}\n`, 'state');
+    const source = `${JSON.stringify(encoded, null, 2)}\n`;
+    yield* validateSerializedStateWrite(statePath, source);
+    yield* writeJsonAtomically(statePath, source, 'state');
   });
 
   const initialize = (state: ManagerState) => semaphore.withPermit(writeUnlocked(state));
@@ -74,9 +81,9 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
       Effect.gen(function* () {
         yield* ensureManagerDirectory();
         const encoded = yield* encodeEvent(eventPath, event);
-        yield* fsPromise('append event', eventPath, () =>
-          appendFile(eventPath, `${JSON.stringify(encoded)}\n`, 'utf8'),
-        );
+        const source = `${JSON.stringify(encoded)}\n`;
+        yield* validateSerializedEventWrite(eventPath, source);
+        yield* fsPromise('append event', eventPath, () => appendFile(eventPath, source, 'utf8'));
       }),
     );
   const writeReport = (report: AgentReport) =>

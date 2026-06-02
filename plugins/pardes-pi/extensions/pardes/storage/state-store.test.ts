@@ -13,14 +13,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
-import { type AgentReport, initialManagerState, type ManagerEvent } from '../manager/index.ts';
+import {
+  type AgentReport,
+  initialManagerState,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
+  type ManagerEvent,
+} from '../manager/index.ts';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../reporting/index.ts';
 import {
   makeFileSystemStateStore,
   STORAGE_EVENT_SCAN_MAX_BYTES,
+  STORAGE_EVENT_WRITE_MAX_BYTES,
   STORAGE_REPORT_ARTIFACT_MAX_BYTES,
   STORAGE_REPORT_SCAN_MAX_ENTRIES,
   STORAGE_REPORT_WRITE_MAX_BYTES,
+  STORAGE_STATE_ARTIFACT_MAX_BYTES,
+  STORAGE_STATE_WRITE_MAX_BYTES,
 } from './index.ts';
 
 const temporaryDirectories: string[] = [];
@@ -98,6 +106,67 @@ describe('filesystem state store', () => {
     await Effect.runPromise(store.initialize(state));
 
     expect(await Effect.runPromise(store.load())).toEqual(state);
+  });
+
+  test('rejects oversized inbox detail and serialized state or event growth before durable allocation', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    const overCapDetail: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      details: 'x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 1),
+      id: 'event-over-detail-cap',
+      summary: 'Reject oversized detail.',
+      type: 'agent_question',
+    };
+
+    expect(
+      await Effect.runPromise(
+        store
+          .mutate((state) =>
+            Effect.succeed([
+              undefined,
+              { ...state, inbox: [...state.inbox, overCapDetail] },
+            ] as const),
+          )
+          .pipe(Effect.flip),
+      ),
+    ).toMatchObject({ _tag: 'StoreError', operation: 'encode state schema' });
+    expect(
+      await Effect.runPromise(store.appendEvent(overCapDetail).pipe(Effect.flip)),
+    ).toMatchObject({ _tag: 'StoreError', operation: 'encode event schema' });
+
+    const expansiveEvent: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-expansive-json',
+      summary: '\u0000'.repeat(STORAGE_EVENT_WRITE_MAX_BYTES),
+      type: 'fixture_event',
+    };
+    expect(
+      await Effect.runPromise(store.appendEvent(expansiveEvent).pipe(Effect.flip)),
+    ).toMatchObject({ _tag: 'StoreError', operation: 'validate serialized event size' });
+
+    const aggregateDirectory = await temporaryDirectory();
+    const aggregateStore = await Effect.runPromise(makeFileSystemStateStore(aggregateDirectory));
+    const expansiveState = { ...initialState(), inbox: [expansiveEvent] };
+    expect(
+      await Effect.runPromise(aggregateStore.initialize(expansiveState).pipe(Effect.flip)),
+    ).toMatchObject({ _tag: 'StoreError', operation: 'validate serialized state size' });
+    expect(existsSync(aggregateStore.statePath)).toBe(false);
+  });
+
+  test('refuses an oversized restored state artifact before reading its contents', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    await truncate(store.statePath, STORAGE_STATE_ARTIFACT_MAX_BYTES + 1);
+
+    expect(await Effect.runPromise(store.load().pipe(Effect.flip))).toMatchObject({
+      _tag: 'StoreError',
+      operation: 'validate state artifact size',
+      path: store.statePath,
+    });
+    expect(STORAGE_STATE_WRITE_MAX_BYTES).toBeLessThan(STORAGE_STATE_ARTIFACT_MAX_BYTES);
   });
 
   test('preserves a legitimate multi-megabyte worker-authored report artifact', async () => {

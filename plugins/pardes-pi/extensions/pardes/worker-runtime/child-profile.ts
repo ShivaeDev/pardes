@@ -7,6 +7,11 @@ export const VERIFIER_TOOLS =
 export const CHILD_REPORT_SUMMARY_MAX_CHARS = 4_000;
 export const CHILD_REPORT_DETAILS_MAX_CHARS = 4 * 1_024 * 1_024;
 
+// Calibrated mirror of manager durable-inbox detail policy. The worst-case
+// JSON-escaped question plus context remains beneath the manager event cap.
+export const CHILD_QUESTION_MAX_CHARS = 32 * 1_024;
+export const CHILD_QUESTION_CONTEXT_MAX_CHARS = 128 * 1_024;
+
 const FULL_COMMIT_SHA = /^[0-9a-f]{40,64}$/;
 
 export interface WorkerChildProfile {

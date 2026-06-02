@@ -1295,7 +1295,7 @@ describe('Pardes model-visible tools', () => {
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(
-      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · ack-safe ready prefix:1 through event-1 · software refinement pending:1 · first barrier:event-blocked-merge (software_refinement_pending)',
+      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · ack-safe cursor:event-1/1 · frontier:event-1/1 · blocked:1 · barrier:event-blocked-merge(software_refinement_pending)',
     );
     expect(pending.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
     expect(pending.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
@@ -1308,7 +1308,7 @@ describe('Pardes model-visible tools', () => {
     );
 
     const summary = await status.execute('call-3', {}, signal, onUpdate, ctx);
-    expect(summary.content[0]?.text).toContain('· software refinement pending:1');
+    expect(summary.content[0]?.text).toContain('· blocked:1');
     expect(summary.content[0]?.text).toContain(
       '! inbox event-blocked-merge [merged] · software refinement pending; judge first: inbox_get({ eventId }); do not acknowledge',
     );

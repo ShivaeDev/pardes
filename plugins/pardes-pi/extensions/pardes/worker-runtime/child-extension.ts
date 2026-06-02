@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import {
+  CHILD_QUESTION_CONTEXT_MAX_CHARS,
+  CHILD_QUESTION_MAX_CHARS,
   CHILD_REPORT_DETAILS_MAX_CHARS,
   CHILD_REPORT_SUMMARY_MAX_CHARS,
   childProfileFromEnvironment,
@@ -428,8 +430,8 @@ export default function pardesWorker(pi: ExtensionAPI): void {
     name: 'ask_manager',
     parameters: Type.Object(
       {
-        context: Type.Optional(Type.String()),
-        question: Type.String({ minLength: 1 }),
+        context: Type.Optional(Type.String({ maxLength: CHILD_QUESTION_CONTEXT_MAX_CHARS })),
+        question: Type.String({ maxLength: CHILD_QUESTION_MAX_CHARS, minLength: 1 }),
       },
       { additionalProperties: false },
     ),

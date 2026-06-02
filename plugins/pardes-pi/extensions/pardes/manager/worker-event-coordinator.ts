@@ -19,6 +19,7 @@ import {
   updateCurrentVerificationAttempt,
 } from './verification/index.ts';
 import {
+  acceptedDurableEventDetails,
   applyHandoffAudit,
   boundedFailureSummary,
   isDuplicateWorkerAttention,
@@ -224,7 +225,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
               })),
               Effect.catch((error) =>
                 Effect.succeed({
-                  failureDetails: formatPardesError(error),
+                  failureDetails: acceptedDurableEventDetails(
+                    formatPardesError(error),
+                    'report artifact persistence diagnostic',
+                  ),
                   failureSummary: boundedFailureSummary(error),
                   status: 'failed' as const,
                 }),

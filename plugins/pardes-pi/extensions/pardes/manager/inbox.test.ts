@@ -94,11 +94,13 @@ describe('manager inbox notification projection', () => {
 
     expect(retainCurrentInboxWake(inbox, legacyWake)).toBeUndefined();
     expect(projectInboxAttention(inbox, legacyWake)).toEqual({
+      acknowledgeableCount: 6,
+      acknowledgeableCursor: 'event-6',
       awaitingUser: false,
       coveredCount: 0,
       queuedSuffixCount: 0,
-      readyPrefixCount: 6,
-      readyPrefixCursor: 'event-6',
+      readyFrontierCount: 6,
+      readyFrontierCursor: 'event-6',
     });
     expect(withInbox(projected, inbox)).toEqual({ ...state(inbox), inbox: [...inbox] });
   });
@@ -124,13 +126,15 @@ describe('manager inbox notification projection', () => {
     const inbox = [...initialInbox, event('event-late')];
 
     expect(projectInboxAttention(inbox, wake, undefined, Date.parse(createdAt) + 2_000)).toEqual({
+      acknowledgeableCount: 2,
+      acknowledgeableCursor: 'event-2',
       awaitingUser: false,
       coveredCount: 2,
       deliveredCursor: 'event-2',
       deliveredCursorAgeMs: 2_000,
       queuedSuffixCount: 1,
-      readyPrefixCount: 3,
-      readyPrefixCursor: 'event-late',
+      readyFrontierCount: 3,
+      readyFrontierCursor: 'event-late',
       wakeToken: wake.token,
     });
     expect(
@@ -141,11 +145,13 @@ describe('manager inbox notification projection', () => {
       queuedSuffixCount: 1,
     });
     expect(projectInboxAttention(inbox, undefined)).toEqual({
+      acknowledgeableCount: 3,
+      acknowledgeableCursor: 'event-late',
       awaitingUser: false,
       coveredCount: 0,
       queuedSuffixCount: 0,
-      readyPrefixCount: 3,
-      readyPrefixCursor: 'event-late',
+      readyFrontierCount: 3,
+      readyFrontierCursor: 'event-late',
     });
   });
 
@@ -314,10 +320,12 @@ describe('manager inbox notification projection', () => {
     expect(message.details).toMatchObject({ digestCount: 1, queuedSuffixCount: 2 });
     expect(makeInboxWake('manager-notification', inbox.slice(1), createdAt)).toBeUndefined();
     expect(projectInboxAttention(inbox, undefined)).toMatchObject({
+      acknowledgeableCount: 1,
+      acknowledgeableCursor: 'event-ready',
       presentationBlockedEventId: 'event-merge',
       presentationBlockedReason: 'merge_retirement_refinement',
-      readyPrefixCount: 1,
-      readyPrefixCursor: 'event-ready',
+      readyFrontierCount: 1,
+      readyFrontierCursor: 'event-ready',
     });
   });
 

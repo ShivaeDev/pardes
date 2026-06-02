@@ -1,15 +1,22 @@
 import { Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import type { WorktreeInspection } from '../git/index.ts';
+import { requiredValue } from '../test-support.ts';
+import {
+  CHILD_QUESTION_CONTEXT_MAX_CHARS,
+  CHILD_QUESTION_MAX_CHARS,
+} from '../worker-runtime/child-profile.ts';
 import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
 import {
   type AgentRecord,
   currentVerificationTerminalReportStatus,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerEvent,
   ManagerEventSchema,
   type VerificationRecord,
 } from './domain.ts';
 import {
+  acceptedDurableEventDetails,
   applyHandoffAudit,
   boundedEventSummary,
   boundedFailureSummary,
@@ -483,6 +490,23 @@ describe('worker-event summary policy', () => {
     expect(projected?.summary.endsWith('…')).toBe(true);
   });
 
+  test('keeps accepted worst-case child question fields lossless beneath the durable inbox cap', () => {
+    const question = '\u0000'.repeat(CHILD_QUESTION_MAX_CHARS);
+    const context = '\u0000'.repeat(CHILD_QUESTION_CONTEXT_MAX_CHARS);
+    const projected = workerEventSummary({
+      agentId: 'agent-one',
+      context,
+      question,
+      type: 'question',
+    });
+
+    expect(projected?.details?.length).toBeLessThanOrEqual(MANAGER_EVENT_DETAILS_MAX_CHARS);
+    expect(JSON.parse(requiredValue(projected?.details))).toEqual({ context, question });
+    expect(
+      acceptedDurableEventDetails('x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 1), 'fixture'),
+    ).toContain('fixture rejected before durable persistence');
+  });
+
   test('makes progress persistence failures actionable and lets Git audit failure type win', () => {
     const progress = workerEventSummary(
       { agentId: 'agent-one', status: 'progress', summary: 'Routine progress.', type: 'report' },
@@ -555,6 +579,10 @@ describe('manager event dedupe policy', () => {
       false,
     );
     expect(hasPendingCanonicalAttention([], candidate)).toBe(false);
+    const legacyAutoSync = { ...prior, details: undefined };
+    expect(
+      hasPendingCanonicalAttention([legacyAutoSync], { ...candidate, details: candidate.summary }),
+    ).toBe(true);
   });
 
   test('deduplicates repeatable pending diagnostics by type plus agent without collapsing terminal reports', () => {

@@ -61,9 +61,12 @@ export interface InboxAttentionProjection {
   readonly coveredCount: number;
   readonly queuedSuffixCount: number;
   readonly awaitingUser: boolean;
-  /** Exact cursor that may be acknowledged proactively without crossing a fail-closed barrier. */
-  readonly readyPrefixCursor?: string;
-  readonly readyPrefixCount: number;
+  /** Exact currently usable cursor: active delivered cursor, or proactive frontier before delivery. */
+  readonly acknowledgeableCursor?: string;
+  readonly acknowledgeableCount: number;
+  /** Structural frontier before the first fail-closed barrier; not necessarily usable while a wake is active. */
+  readonly readyFrontierCursor?: string;
+  readonly readyFrontierCount: number;
   readonly presentationBlockedEventId?: string;
   readonly presentationBlockedReason?: string;
 }
@@ -139,12 +142,12 @@ export function projectInboxAttention(
   nowMs = Date.now(),
 ): InboxAttentionProjection {
   const firstBlockedIndex = inbox.findIndex((event) => event.presentationBlocked === true);
-  const readyPrefixCount = firstBlockedIndex === -1 ? inbox.length : firstBlockedIndex;
-  const readyPrefixCursor = inbox[readyPrefixCount - 1]?.id;
+  const readyFrontierCount = firstBlockedIndex === -1 ? inbox.length : firstBlockedIndex;
+  const readyFrontierCursor = inbox[readyFrontierCount - 1]?.id;
   const presentationBlocked = firstBlockedIndex === -1 ? undefined : inbox[firstBlockedIndex];
-  const readiness = {
-    readyPrefixCount,
-    ...(readyPrefixCursor === undefined ? {} : { readyPrefixCursor }),
+  const frontier = {
+    readyFrontierCount,
+    ...(readyFrontierCursor === undefined ? {} : { readyFrontierCursor }),
     ...(presentationBlocked === undefined
       ? {}
       : {
@@ -155,17 +158,30 @@ export function projectInboxAttention(
   };
   const retainedWake = retainCurrentInboxWake(inbox, wake);
   if (!retainedWake)
-    return { awaitingUser: false, coveredCount: 0, queuedSuffixCount: 0, ...readiness };
+    return {
+      acknowledgeableCount: readyFrontierCount,
+      ...(readyFrontierCursor === undefined ? {} : { acknowledgeableCursor: readyFrontierCursor }),
+      awaitingUser: false,
+      coveredCount: 0,
+      queuedSuffixCount: 0,
+      ...frontier,
+    };
   const cursorIndex = inbox.findIndex((event) => event.id === retainedWake.cursor);
   const deliveredCursorAgeMs = inboxWakeAgeMs(retainedWake, nowMs);
+  const covered = inboxThroughCursor(inbox, retainedWake.cursor);
+  const acknowledgeable =
+    covered !== undefined && !covered.some((event) => event.presentationBlocked === true);
   return {
+    ...(acknowledgeable
+      ? { acknowledgeableCount: cursorIndex + 1, acknowledgeableCursor: retainedWake.cursor }
+      : { acknowledgeableCount: 0 }),
     deliveredCursor: retainedWake.cursor,
     wakeToken: retainedWake.token,
     ...(deliveredCursorAgeMs === undefined ? {} : { deliveredCursorAgeMs }),
     awaitingUser: retainCurrentInboxHandoff(inbox, retainedWake, handoff) !== undefined,
     coveredCount: cursorIndex + 1,
     queuedSuffixCount: Math.max(0, inbox.length - cursorIndex - 1),
-    ...readiness,
+    ...frontier,
   };
 }
 

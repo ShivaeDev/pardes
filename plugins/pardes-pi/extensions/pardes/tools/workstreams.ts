@@ -5,7 +5,8 @@ import {
   MANAGER_INPUT_LONG_TEXT_MAX_LENGTH,
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
 } from '../manager/index.ts';
-import { CONTROL_PLANE_MAX_ROWS, workstreamLines } from './projections.ts';
+import { workstreamLines } from './projections/control-plane.ts';
+import { CONTROL_PLANE_MAX_ROWS } from './projections/core.ts';
 import { json, managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: ManagerController): void {
@@ -105,7 +106,8 @@ export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: Manager
   });
 
   registerPardesTool(pi, {
-    description: 'Mark a Pardes workstream complete so historical work no longer remains active.',
+    description:
+      'Complete a Pardes workstream and safely stop its idle attached children while preserving worktrees, branch history, sessions, reports, and review gates. Fails closed without interrupting busy children or unresolved open-review owners.',
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.completeWorkstream(params.workstreamId, ctx));
       return result.ok
@@ -119,6 +121,6 @@ export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: Manager
       { additionalProperties: false },
     ),
     preview: (args) => [{ name: 'workstreamId', value: args.workstreamId }],
-    promptSnippet: 'Mark a finished Pardes workstream complete',
+    promptSnippet: 'Complete a finished Pardes workstream and safely retain its child artifacts',
   });
 }

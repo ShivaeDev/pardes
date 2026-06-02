@@ -2,7 +2,13 @@ import { Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import type { WorktreeInspection } from '../git/index.ts';
 import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
-import { type AgentRecord, type ManagerEvent, ManagerEventSchema } from './domain.ts';
+import {
+  type AgentRecord,
+  currentVerificationTerminalReportStatus,
+  type ManagerEvent,
+  ManagerEventSchema,
+  type VerificationRecord,
+} from './domain.ts';
 import {
   applyHandoffAudit,
   boundedEventSummary,
@@ -16,6 +22,8 @@ import {
   reportPersistenceSuffix,
   successfulHandoffAudit,
   truncateModelFacingText,
+  type VerifierIdleDisposition,
+  verifierIdleDisposition,
   type WorkerEventSummary,
   workerEventSummary,
 } from './worker-events.ts';
@@ -64,6 +72,53 @@ function inboxEvent(type: string, agentId?: string): ManagerEvent {
     summary: 'Pending attention.',
     type,
     ...(agentId === undefined ? {} : { agentId }),
+  };
+}
+
+function verification(
+  latestReportStatus?: 'progress' | 'completed' | 'blocked',
+): VerificationRecord {
+  return {
+    attempts: [
+      {
+        attempt: 1,
+        createdAt,
+        evidenceStatus: 'current',
+        ...(latestReportStatus === undefined
+          ? {}
+          : {
+              latestReport: {
+                createdAt,
+                reportId: `report-${latestReportStatus}`,
+                status: latestReportStatus,
+                summaryTruncated: false,
+              },
+            }),
+        reviewCheckout: {
+          createdAt,
+          managerId: 'manager-one',
+          path: '/tmp/pardes/reviews/verify-one',
+          reviewedHeadSha: 'b'.repeat(40),
+          verificationId: 'verify-one',
+        },
+        reviewedHeadSha: 'b'.repeat(40),
+        sourceBranchPointSha: 'a'.repeat(40),
+        status:
+          latestReportStatus === 'completed' || latestReportStatus === 'blocked'
+            ? latestReportStatus
+            : 'running',
+        updatedAt: createdAt,
+      },
+    ],
+    createdAt,
+    id: 'verify-one',
+    model: 'fixture/model',
+    sourceAgentId: 'agent-source',
+    task: 'Review.',
+    thinkingLevel: 'high',
+    updatedAt: createdAt,
+    verifierAgentId: 'agent-one',
+    workstreamId: 'ws-one',
   };
 }
 
@@ -212,6 +267,80 @@ describe('manager handoff-audit policy', () => {
   });
 });
 
+describe('verifier idle classification policy', () => {
+  const idle: WorkerSupervisorEvent = { agentId: 'agent-one', status: 'idle', type: 'status' };
+  const verifier = agent({ role: 'verifier', status: 'running' });
+
+  test('distinguishes report completion, transient handoff settlement, stopped or crashed state, and attached idle without a terminal report', () => {
+    const cases: ReadonlyArray<{
+      readonly event?: WorkerSupervisorEvent;
+      readonly agent?: AgentRecord;
+      readonly verification?: VerificationRecord;
+      readonly handoffSettling?: boolean;
+      readonly expected: VerifierIdleDisposition | undefined;
+    }> = [
+      { expected: 'report_complete', verification: verification('completed') },
+      {
+        expected: 'report_complete',
+        verification: verification('blocked'),
+      },
+      {
+        expected: 'handoff_settling',
+        handoffSettling: true,
+        verification: verification(),
+      },
+      {
+        agent: agent({ role: 'verifier', status: 'crashed' }),
+        expected: 'stopped_or_crashed',
+        verification: verification(),
+      },
+      {
+        event: {
+          agentId: 'agent-one',
+          exitCode: 1,
+          signal: null,
+          stderr: 'fixture failure',
+          type: 'unexpected_exit',
+        },
+        expected: 'stopped_or_crashed',
+        verification: verification(),
+      },
+      {
+        expected: 'attached_idle_without_terminal_report',
+        verification: verification(),
+      },
+      {
+        expected: 'attached_idle_without_terminal_report',
+        verification: verification('progress'),
+      },
+      { agent: agent({ role: 'worker', status: 'running' }), expected: undefined },
+      {
+        event: { agentId: 'agent-one', status: 'running', type: 'status' },
+        expected: undefined,
+        verification: verification(),
+      },
+    ];
+
+    for (const entry of cases)
+      expect(
+        verifierIdleDisposition(
+          entry.event ?? idle,
+          entry.agent ?? verifier,
+          entry.verification,
+          entry.handoffSettling,
+        ),
+      ).toBe(entry.expected);
+  });
+
+  test('reads only current-attempt completed or blocked durable report references as terminal', () => {
+    expect(currentVerificationTerminalReportStatus(undefined)).toBeUndefined();
+    expect(currentVerificationTerminalReportStatus(verification())).toBeUndefined();
+    expect(currentVerificationTerminalReportStatus(verification('progress'))).toBeUndefined();
+    expect(currentVerificationTerminalReportStatus(verification('completed'))).toBe('completed');
+    expect(currentVerificationTerminalReportStatus(verification('blocked'))).toBe('blocked');
+  });
+});
+
 describe('worker-event summary policy', () => {
   test('projects the existing actionable and suppressed event table', () => {
     const succeededAudit = successfulHandoffAudit(
@@ -223,7 +352,10 @@ describe('worker-event summary policy', () => {
       readonly event: WorkerSupervisorEvent;
       readonly persistence?: ReportArtifactPersistence;
       readonly audit?: HandoffAuditOutcome;
-      readonly options?: { readonly suppressIdleWakeup?: boolean };
+      readonly options?: {
+        readonly suppressIdleWakeup?: boolean;
+        readonly verifierIdleDisposition?: VerifierIdleDisposition;
+      };
       readonly expected: WorkerEventSummary | undefined;
     }> = [
       {
@@ -309,6 +441,21 @@ describe('worker-event summary policy', () => {
         options: { suppressIdleWakeup: true },
       },
       {
+        event: { agentId: 'agent-one', status: 'idle', type: 'status' },
+        expected: {
+          actionable: true,
+          summary:
+            'agent-one: terminal report missing; follow up; do not poll. Retained advisory verifier remains attached idle.',
+          type: 'verification_terminal_report_missing',
+        },
+        options: { verifierIdleDisposition: 'attached_idle_without_terminal_report' },
+      },
+      {
+        event: { agentId: 'agent-one', status: 'idle', type: 'status' },
+        expected: undefined,
+        options: { verifierIdleDisposition: 'report_complete' },
+      },
+      {
         event: { agentId: 'agent-one', status: 'running', type: 'status' },
         expected: undefined,
       },
@@ -380,7 +527,7 @@ describe('manager event dedupe policy', () => {
     expect(hasPendingAgentAttention(inbox, { type: 'manager_notice' })).toBe(true);
   });
 
-  test('deduplicates only pending progress persistence failures and Git audit failures by type plus agent', () => {
+  test('deduplicates repeatable pending diagnostics by type plus agent without collapsing terminal reports', () => {
     const progress: WorkerSupervisorEvent = {
       agentId: 'agent-one',
       status: 'progress',
@@ -418,6 +565,11 @@ describe('manager event dedupe policy', () => {
       actionable: true,
       summary: 'Audit failed.',
       type: 'agent_git_audit_failed',
+    } satisfies WorkerEventSummary;
+    const verifierMissingReport = {
+      actionable: true,
+      summary: 'Verifier settled without a terminal report.',
+      type: 'verification_terminal_report_missing',
     } satisfies WorkerEventSummary;
     const cases: ReadonlyArray<{
       readonly inbox: ReadonlyArray<ManagerEvent>;
@@ -481,6 +633,20 @@ describe('manager event dedupe policy', () => {
         inbox: [inboxEvent('agent_git_audit_failed', 'agent-one')],
         persistence: persistedReport,
         workerEvent: completed,
+      },
+      {
+        event: verifierMissingReport,
+        expected: true,
+        inbox: [inboxEvent('verification_terminal_report_missing', 'agent-one')],
+        persistence: undefined,
+        workerEvent: { agentId: 'agent-one', status: 'idle', type: 'status' },
+      },
+      {
+        event: verifierMissingReport,
+        expected: false,
+        inbox: [inboxEvent('verification_terminal_report_missing', 'agent-two')],
+        persistence: undefined,
+        workerEvent: { agentId: 'agent-one', status: 'idle', type: 'status' },
       },
     ];
 

@@ -66,6 +66,7 @@ import {
   InvalidManagedStateError,
   ManagerAlreadyActiveError,
   ManagerInactiveError,
+  WorkstreamCompletionRejectedError,
   WorkstreamNotFoundError,
 } from './errors.ts';
 import {
@@ -116,6 +117,7 @@ import {
   type PullRequestPublicationNamespace,
 } from './publication-coordinator.ts';
 import {
+  type GitHubRateLimitSymptomOwnershipPort,
   makeReviewGateLifecycleCoordinator,
   type ReviewGateLifecycleCoordinatorShape,
 } from './review-gate-lifecycle.ts';
@@ -123,7 +125,7 @@ import {
   makeVerificationLifecycleCoordinator,
   updateCurrentVerificationAttempt,
   type VerificationLifecycleCoordinatorShape,
-} from './verification.ts';
+} from './verification/index.ts';
 import {
   makeWorkerSupervisorEventCoordinator,
   type WorkerSupervisorEventCoordinatorShape,
@@ -174,6 +176,11 @@ interface ActiveManager extends PullRequestPublicationNamespace {
   readonly reporting: ReportingShape;
   readonly verifications: VerificationLifecycleCoordinatorShape;
   readonly workerEvents: WorkerSupervisorEventCoordinatorShape;
+}
+
+interface PendingLifecycleRetry {
+  readonly active: PullRequestPublicationNamespace;
+  readonly retry: Effect.Effect<void, unknown>;
 }
 
 export interface AgentSpawnInput {
@@ -245,6 +252,10 @@ function isSameInboxHandoff(
 
 export type { PullRequestCreateInput } from './inputs.ts';
 export type { PullRequestCreateResult } from './publication-coordinator.ts';
+export type {
+  GitHubRateLimitSymptom,
+  GitHubRateLimitSymptomOwnershipPort,
+} from './review-gate-lifecycle.ts';
 
 export interface AgentCompactResult {
   readonly agentId: string;
@@ -269,6 +280,7 @@ export interface ManagerControllerOptions {
   readonly github?: GitHubPublicationShape;
   readonly githubWatcher?: GitHubWatcherShape;
   readonly githubIntegrationHealth?: GitHubIntegrationHealthShape;
+  readonly githubRateLimitSymptomOwnership?: GitHubRateLimitSymptomOwnershipPort;
   readonly makeWorkers?: (
     onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
   ) => GuardedWorkerSupervisorShape;
@@ -333,12 +345,14 @@ export class ManagerController {
   private readonly githubHostedMetadata: GitHubHostedMetadataShape;
   private readonly githubWatcher: GitHubWatcherShape;
   private readonly githubIntegrationHealth: GitHubIntegrationHealthShape;
+  private readonly githubRateLimitSymptomOwnership: GitHubRateLimitSymptomOwnershipPort | undefined;
   private readonly workers: GuardedWorkerSupervisorShape;
   private readonly presentation: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
   private readonly activationSafety: PluginActivationSafetyShape;
   private readonly liveRuntimes = new Map<string, WorkerRuntimeSnapshot>();
   private readonly ignoredWorkerEvents = new Set<string>();
   private readonly lifecycleGate = Semaphore.makeUnsafe(1);
+  private readonly pendingLifecycleRetries = new Map<string, PendingLifecycleRetry>();
   private lifecycleEpoch = 0;
   private lifecycleAcceptingOperations = false;
   private lifecycleTransitioning = false;
@@ -367,6 +381,7 @@ export class ManagerController {
     this.githubIntegrationHealth =
       options.githubIntegrationHealth ??
       makeGitHubIntegrationHealthService({ hostedMetadata: githubHostedMetadata });
+    this.githubRateLimitSymptomOwnership = options.githubRateLimitSymptomOwnership;
     this.presentation = options.presentation ?? makeManagerPresentation();
     this.compactionSafetyScheduler =
       options.compactionSafetyScheduler ?? defaultManagerCompactionSafetyScheduler;
@@ -443,21 +458,90 @@ export class ManagerController {
         const epoch = this.lifecycleEpoch;
         if (!this.lifecycleAcceptingOperations || this.lifecycleTransitioning)
           return yield* this.lifecycleUnavailable();
-        return yield* this.lifecycleGate.withPermit(
-          Effect.gen(
-            function* (this: ManagerController) {
-              if (
-                !this.lifecycleAcceptingOperations ||
-                this.lifecycleTransitioning ||
-                this.lifecycleEpoch !== epoch
-              )
-                return yield* this.lifecycleUnavailable();
-              return yield* operation();
-            }.bind(this),
-          ),
-        );
+        return yield* this.lifecycleGate
+          .withPermit(
+            Effect.gen(
+              function* (this: ManagerController) {
+                if (
+                  !this.lifecycleAcceptingOperations ||
+                  this.lifecycleTransitioning ||
+                  this.lifecycleEpoch !== epoch
+                )
+                  return yield* this.lifecycleUnavailable();
+                return yield* operation();
+              }.bind(this),
+            ),
+          )
+          .pipe(Effect.ensuring(this.drainPendingLifecycleRetries()));
       }.bind(this),
     );
+  }
+
+  private tryWithActiveLifecyclePermit<A, E, R>(
+    active: PullRequestPublicationNamespace,
+    retryKey: string,
+    operation: Effect.Effect<A, E, R>,
+    retry: Effect.Effect<void, unknown>,
+  ): Effect.Effect<boolean, E, R> {
+    return Effect.suspend(() => {
+      if (!this.lifecycleAcceptingOperations || this.lifecycleTransitioning)
+        return Effect.succeed(false);
+      return this.lifecycleGate
+        .withPermitsIfAvailable(1)(operation)
+        .pipe(
+          Effect.flatMap((result) => {
+            if (Option.isSome(result)) return Effect.succeed(true);
+            return Effect.sync(() => {
+              if (
+                this.active === active &&
+                this.lifecycleAcceptingOperations &&
+                !this.lifecycleTransitioning
+              ) {
+                this.pendingLifecycleRetries.set(`${active.managerId}/${retryKey}`, {
+                  active,
+                  retry,
+                });
+              }
+              return false;
+            });
+          }),
+        );
+    });
+  }
+
+  /** Drain each manager-local missed mechanical retirement once after the lifecycle gate is free. */
+  private drainPendingLifecycleRetries(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const active = this.active;
+      if (
+        !active ||
+        !this.lifecycleAcceptingOperations ||
+        this.lifecycleTransitioning ||
+        this.pendingLifecycleRetries.size === 0
+      )
+        return Effect.void;
+      const retries = [...this.pendingLifecycleRetries.entries()].filter(
+        ([, retry]) => retry.active === active,
+      );
+      for (const [key] of this.pendingLifecycleRetries) this.pendingLifecycleRetries.delete(key);
+      if (retries.length === 0) return Effect.void;
+      return this.lifecycleGate
+        .withPermit(
+          Effect.forEach(
+            retries,
+            ([key, retry]) =>
+              retry.retry.pipe(
+                Effect.catch((error) =>
+                  Effect.sync(() =>
+                    console.error(`Pardes failed queued lifecycle retry ${key}.`, error),
+                  ),
+                ),
+              ),
+            { discard: true },
+          ),
+        )
+        .pipe(Effect.andThen(this.drainPendingLifecycleRetries()));
+    });
   }
 
   private withLifecycleTransition<A, E, R>(
@@ -465,6 +549,7 @@ export class ManagerController {
   ): Effect.Effect<A, E, R> {
     return Effect.suspend(() => {
       const epoch = ++this.lifecycleEpoch;
+      this.pendingLifecycleRetries.clear();
       this.lifecycleAcceptingOperations = false;
       this.lifecycleTransitioning = true;
       return this.lifecycleGate.withPermit(operation(epoch)).pipe(
@@ -502,6 +587,9 @@ export class ManagerController {
             ? {}
             : { lastPushedHeadSha: pullRequest.lastPushedHeadSha }),
           ...(pullRequest.headBranch === undefined ? {} : { headBranch: pullRequest.headBranch }),
+          ...(pullRequest.watcherFailure === undefined
+            ? {}
+            : { watcherFailure: pullRequest.watcherFailure }),
         })),
     });
   });
@@ -789,6 +877,7 @@ export class ManagerController {
       callbacks: {
         appendEventSafely: (event) => this.appendEventSafely(active.store, event),
         auditAutoStop: (agent) => attachments.auditHandoffBestEffort(agent, 'auto_stop'),
+        githubRateLimitSymptomOwnership: this.githubRateLimitSymptomOwnership,
         liveRuntimes: () => this.liveRuntimes,
         recordStoppedRuntime: (agentId, runtime) => {
           this.liveRuntimes.set(agentId, runtime);
@@ -798,6 +887,8 @@ export class ManagerController {
         retireResolvedVerificationsForSource: (sourceAgentId) =>
           verifications.retireResolvedForSource(sourceAgentId),
         stopIdleWorker: (agentId) => this.workers.stopIfIdle(agentId),
+        trySerializeWorkstreamCompletion: (retryKey, effect, retry) =>
+          this.tryWithActiveLifecyclePermit(active, retryKey, effect, retry),
       },
       namespace: active,
     });
@@ -1298,7 +1389,7 @@ export class ManagerController {
     return workstream;
   });
 
-  readonly completeWorkstream = Effect.fnUntraced(function* (
+  private readonly completeWorkstreamUnlocked = Effect.fnUntraced(function* (
     this: ManagerController,
     rawWorkstreamId: string,
     ctx?: ExtensionContext,
@@ -1308,12 +1399,68 @@ export class ManagerController {
     const state = yield* this.refresh(ctx);
     const workstream = state.workstreams[workstreamId];
     if (!workstream) return yield* new WorkstreamNotFoundError({ workstreamId });
-    if (workstream.status === 'complete') return workstream;
+    const reject = (reason: string) =>
+      new WorkstreamCompletionRejectedError({ reason, workstreamId });
+    if (
+      Object.values(state.pullRequests).some(
+        (pullRequest) => pullRequest.workstreamId === workstreamId && pullRequest.status === 'open',
+      )
+    ) {
+      return yield* reject('an unresolved open review gate still requires retained ownership');
+    }
+    const attachedChildren = Object.values(state.agents)
+      .filter((agent) => {
+        if (agent.workstreamId !== workstreamId) return false;
+        const runtime = this.liveRuntimes.get(agent.id);
+        return (
+          ATTACHED_STATUSES.has(agent.status) ||
+          (runtime !== undefined && ATTACHED_STATUSES.has(runtime.status))
+        );
+      })
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const busyChild = attachedChildren.find((agent) => {
+      const status = this.liveRuntimes.get(agent.id)?.status ?? agent.status;
+      return status !== 'idle' && status !== 'stopped' && status !== 'crashed';
+    });
+    if (busyChild)
+      return yield* reject(
+        `attached child ${busyChild.id} is not safely idle; no busy child was interrupted`,
+      );
+    for (const agent of attachedChildren) {
+      const stopped = yield* (
+        agent.role === 'verifier'
+          ? active.verifications.stopIdleForWorkstreamCompletion(agent.id, ctx)
+          : active.attachments
+              .stopIfIdleForWorkstreamCompletion(agent.id, ctx)
+              .pipe(Effect.map((record) => record !== undefined))
+      ).pipe(
+        Effect.mapError(() =>
+          reject(
+            `attached child ${agent.id} could not be safely stopped; retained artifacts were preserved`,
+          ),
+        ),
+      );
+      if (!stopped)
+        return yield* reject(
+          `attached child ${agent.id} is not safely idle; no busy child was interrupted`,
+        );
+    }
     const timestamp = yield* nowIso;
-    yield* active.store.mutate((current) => {
+    const transitioned = yield* active.store.mutate((current) => {
       const currentWorkstream = current.workstreams[workstreamId] ?? workstream;
+      if (
+        Object.values(current.pullRequests).some(
+          (pullRequest) =>
+            pullRequest.workstreamId === workstreamId && pullRequest.status === 'open',
+        )
+      ) {
+        return Effect.fail(
+          reject('an unresolved open review gate still requires retained ownership'),
+        );
+      }
+      if (currentWorkstream.status === 'complete') return Effect.succeed([false, current] as const);
       return Effect.succeed([
-        undefined,
+        true,
         {
           ...current,
           workstreams: {
@@ -1323,19 +1470,24 @@ export class ManagerController {
         },
       ] as const);
     });
-    yield* this.appendEventSafely(
-      active.store,
-      makeEvent(
-        'workstream_completed',
-        `Completed ${workstreamId}: ${workstream.title}`,
-        timestamp,
-      ),
-    );
+    if (transitioned) {
+      yield* this.appendEventSafely(
+        active.store,
+        makeEvent(
+          'workstream_completed',
+          `Completed ${workstreamId}: ${workstream.title}. Safely stopped ${attachedChildren.length} idle attached child${attachedChildren.length === 1 ? '' : 'ren'}; retained artifacts and review history preserved.`,
+          timestamp,
+        ),
+      );
+    }
     yield* this.refreshActiveState(active, ctx);
     const completed = active.state.workstreams[workstreamId];
     if (!completed) return yield* new WorkstreamNotFoundError({ workstreamId });
     return completed;
   });
+
+  readonly completeWorkstream = (rawWorkstreamId: string, ctx?: ExtensionContext) =>
+    this.withActiveLifecyclePermit(() => this.completeWorkstreamUnlocked(rawWorkstreamId, ctx));
 
   /** Persist that the one delivered cursor was explicitly surfaced for user feedback. */
   readonly beginInboxHandoff = Effect.fnUntraced(function* (
@@ -1449,6 +1601,7 @@ export class ManagerController {
       const covered = inboxThroughCursor(current.inbox, cursor);
       const eligible =
         covered !== undefined &&
+        !covered.some((event) => event.presentationBlocked === true) &&
         (retainedWake === undefined || retainedWake.cursor === cursor) &&
         (options.handoff === undefined ||
           (retainedWake?.cursor === cursor &&
@@ -1550,7 +1703,7 @@ export class ManagerController {
     return yield* active.reporting.getExcerpt(rawInput);
   });
 
-  readonly createPullRequest = Effect.fnUntraced(function* (
+  private readonly createPullRequestUnlocked = Effect.fnUntraced(function* (
     this: ManagerController,
     rawInput: PullRequestCreateInput,
     ctx?: ExtensionContext,
@@ -1559,6 +1712,9 @@ export class ManagerController {
     const active = yield* this.requireActive();
     return yield* active.pullRequests.publish(input, ctx);
   });
+
+  readonly createPullRequest = (rawInput: PullRequestCreateInput, ctx?: ExtensionContext) =>
+    this.withActiveLifecyclePermit(() => this.createPullRequestUnlocked(rawInput, ctx));
 
   private readonly requestVerificationUnlocked = Effect.fnUntraced(function* (
     this: ManagerController,
@@ -1997,7 +2153,9 @@ export class ManagerController {
     // stopped owner's dirty or failed handoff audit. Re-run conservative merged
     // retirement only after cleanup durably removes that unresolved projection.
     yield* active.reviewGates
-      .retryMergedRetirementForWorkstream(state.agents[input.agentId]?.workstreamId)
+      .retryMergedRetirementForWorkstream(state.agents[input.agentId]?.workstreamId, {
+        alreadySerialized: true,
+      })
       .pipe(
         Effect.catch((error) =>
           Effect.sync(() =>
@@ -2033,7 +2191,7 @@ export class ManagerController {
     // for bounded diagnosis. Stopping that owner is a safe retry edge for the
     // already-terminal stream; open gates and other blockers still fail closed.
     yield* active.reviewGates
-      .retryMergedRetirementForWorkstream(stopped.workstreamId)
+      .retryMergedRetirementForWorkstream(stopped.workstreamId, { alreadySerialized: true })
       .pipe(
         Effect.catch((error) =>
           Effect.sync(() =>

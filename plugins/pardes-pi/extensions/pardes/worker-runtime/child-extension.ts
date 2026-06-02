@@ -11,7 +11,7 @@ import {
   childProfileFromEnvironment,
   type VerifierChildProfile,
 } from './child-profile.ts';
-import { renderChildToolCall } from './child-tool-call-preview.ts';
+import { renderChildToolCall, renderChildToolResult } from './child-tool-call-preview.ts';
 
 const PATH_PARAMETERS: Readonly<Record<string, ReadonlyArray<string>>> = {
   edit: ['path'],
@@ -151,9 +151,13 @@ function registerVerifierTools(
     label: 'Inspect Verification Evidence',
     name: 'verification_evidence',
     parameters: Type.Object({}, { additionalProperties: false }),
-    renderCall(_args, theme) {
-      return renderChildToolCall(theme, 'verification_evidence', []);
+    renderCall(_args, theme, context) {
+      return renderChildToolCall(theme, 'verification_evidence', [], !context.isPartial);
     },
+    renderResult(result, options, theme, context) {
+      return renderChildToolResult(theme, 'verification_evidence', [], result, options, context);
+    },
+    renderShell: 'self',
   });
 }
 
@@ -215,13 +219,33 @@ export default function pardesWorker(pi: ExtensionAPI): void {
       },
       { additionalProperties: false },
     ),
-    renderCall(args, theme) {
-      return renderChildToolCall(theme, 'report_to_manager', [
-        { name: 'status', value: args.status },
-        { mode: 'length', name: 'summary', value: args.summary },
-        { mode: 'length', name: 'details', value: args.details },
-      ]);
+    renderCall(args, theme, context) {
+      return renderChildToolCall(
+        theme,
+        'report_to_manager',
+        [
+          { name: 'status', value: args.status },
+          { mode: 'length', name: 'summary', value: args.summary },
+          { mode: 'length', name: 'details', value: args.details },
+        ],
+        !context.isPartial,
+      );
     },
+    renderResult(result, options, theme, context) {
+      return renderChildToolResult(
+        theme,
+        'report_to_manager',
+        [
+          { name: 'status', value: context.args.status },
+          { mode: 'length', name: 'summary', value: context.args.summary },
+          { mode: 'length', name: 'details', value: context.args.details },
+        ],
+        result,
+        options,
+        context,
+      );
+    },
+    renderShell: 'self',
   });
 
   pi.registerTool({
@@ -245,11 +269,30 @@ export default function pardesWorker(pi: ExtensionAPI): void {
       },
       { additionalProperties: false },
     ),
-    renderCall(args, theme) {
-      return renderChildToolCall(theme, 'ask_manager', [
-        { mode: 'length', name: 'question', value: args.question },
-        { mode: 'length', name: 'context', value: args.context },
-      ]);
+    renderCall(args, theme, context) {
+      return renderChildToolCall(
+        theme,
+        'ask_manager',
+        [
+          { mode: 'length', name: 'question', value: args.question },
+          { mode: 'length', name: 'context', value: args.context },
+        ],
+        !context.isPartial,
+      );
     },
+    renderResult(result, options, theme, context) {
+      return renderChildToolResult(
+        theme,
+        'ask_manager',
+        [
+          { mode: 'length', name: 'question', value: context.args.question },
+          { mode: 'length', name: 'context', value: context.args.context },
+        ],
+        result,
+        options,
+        context,
+      );
+    },
+    renderShell: 'self',
   });
 }

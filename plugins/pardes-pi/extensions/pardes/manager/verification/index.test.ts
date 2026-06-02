@@ -7,22 +7,22 @@ import {
   type DetachedReviewCheckoutLease,
   type ManagedWorktreeShape,
   WorktreeError,
-} from '../git/index.ts';
-import type { StateStoreShape } from '../storage/index.ts';
-import { requiredValue } from '../test-support.ts';
+} from '../../git/index.ts';
+import type { StateStoreShape } from '../../storage/index.ts';
+import { requiredValue } from '../../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
   type WorkerRuntimeSnapshot,
-} from '../worker-runtime/index.ts';
+} from '../../worker-runtime/index.ts';
 import {
   currentVerificationAttempt,
   initialManagerState,
   type ManagerState,
   type VerificationRecord,
-} from './domain.ts';
-import { AgentNotFoundError } from './errors.ts';
-import { makeVerificationLifecycleCoordinator } from './verification.ts';
+} from '../domain.ts';
+import { AgentNotFoundError } from '../errors.ts';
+import { makeVerificationLifecycleCoordinator } from './index.ts';
 
 const temporaryDirectories: string[] = [];
 const timestamp = '2026-01-01T00:00:00.000Z';
@@ -43,6 +43,7 @@ async function withoutConsoleError<A>(run: () => Promise<A>): Promise<A> {
 }
 
 interface VerificationFixtureOptions {
+  readonly dirtyReviewCheckout?: boolean;
   readonly failMutationAt?: number;
   readonly failCallbackRefreshAt?: number;
   readonly failSpawnAt?: number;
@@ -184,7 +185,11 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
     inspect: (_owner, lease) =>
       Effect.succeed({ changedPaths: [], dirty: false, headSha: sourceHeadSha, path: lease.path }),
     inspectDetachedReviewCheckout: (_owner, lease) =>
-      Effect.succeed({ dirty: false, headSha: lease.reviewedHeadSha, path: lease.path }),
+      Effect.succeed({
+        dirty: options.dirtyReviewCheckout === true,
+        headSha: lease.reviewedHeadSha,
+        path: lease.path,
+      }),
     prepareDetachedReviewCheckout: (input) =>
       Effect.succeed(reviewLease(input.verificationId, input.reviewedHeadSha)),
     provisionDetachedReviewCheckout: (_owner, lease) =>
@@ -367,6 +372,26 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
 }
 
 describe('advisory verification lifecycle', () => {
+  test('marks detached review-checkout mutations as stale advisory evidence on status', async () => {
+    const fixture = await verificationFixture({ dirtyReviewCheckout: true });
+    const verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+
+    const stale = await Effect.runPromise(fixture.coordinator.status(verification.id));
+
+    expect(currentVerificationAttempt(stale)).toMatchObject({
+      evidenceStatus: 'stale',
+      staleReason: 'detached review checkout became dirty after the reviewed head was captured',
+    });
+    expect(fixture.namespace.state.inbox).toEqual([
+      expect.objectContaining({
+        type: 'verification_evidence_stale',
+        verificationId: verification.id,
+      }),
+    ]);
+  });
+
   test('briefs initial and retained refresh attempts with one comprehensive advisory reporting protocol', async () => {
     const fixture = await verificationFixture();
     const requestedRiskSurface = 'Inspect authorization fallbacks and every touched caller.';

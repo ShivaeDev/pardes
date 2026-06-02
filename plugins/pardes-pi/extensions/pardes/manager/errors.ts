@@ -19,6 +19,7 @@ import type {
   GitHubResponseError,
   GitHubSyncInputError,
   GitHubWatcherInputError,
+  GitHubWatcherTimeoutError,
 } from '../github/index.ts';
 import type {
   ReportArtifactError,
@@ -59,6 +60,13 @@ export class PluginActivationBlockedError extends Data.TaggedError('PluginActiva
 
 export class WorkstreamNotFoundError extends Data.TaggedError('WorkstreamNotFoundError')<{
   readonly workstreamId: string;
+}> {}
+
+export class WorkstreamCompletionRejectedError extends Data.TaggedError(
+  'WorkstreamCompletionRejectedError',
+)<{
+  readonly workstreamId: string;
+  readonly reason: string;
 }> {}
 
 export class InboxEventNotFoundError extends Data.TaggedError('InboxEventNotFoundError')<{
@@ -138,6 +146,7 @@ export type PardesError =
   | PluginActivationBlockedError
   | ManagerInputValidationError
   | WorkstreamNotFoundError
+  | WorkstreamCompletionRejectedError
   | InboxEventNotFoundError
   | InboxHandoffUnavailableError
   | AgentNotFoundError
@@ -153,6 +162,7 @@ export type PardesError =
   | GitHubPublicationInputError
   | GitHubSyncInputError
   | GitHubWatcherInputError
+  | GitHubWatcherTimeoutError
   | PullRequestPublicationValidationError
   | VerificationRequestRejectedError
   | VerificationNotFoundError
@@ -196,6 +206,13 @@ export function formatPardesError(error: unknown): string {
     }
     if (tagged._tag === 'WorkstreamNotFoundError' && 'workstreamId' in tagged) {
       return `Unknown workstream: ${String(tagged.workstreamId)}`;
+    }
+    if (
+      tagged._tag === 'WorkstreamCompletionRejectedError' &&
+      'workstreamId' in tagged &&
+      'reason' in tagged
+    ) {
+      return `Cannot complete workstream ${String(tagged.workstreamId)}: ${String(tagged.reason)}`;
     }
     if (tagged._tag === 'InboxEventNotFoundError' && 'eventId' in tagged) {
       return `Unknown pending inbox event: ${String(tagged.eventId)}`;
@@ -298,6 +315,9 @@ export function formatPardesError(error: unknown): string {
     }
     if (tagged._tag === 'GitHubWatcherInputError') {
       return 'Invalid persisted GitHub watcher association.';
+    }
+    if (tagged._tag === 'GitHubWatcherTimeoutError') {
+      return 'GitHub watcher command timed out.';
     }
     if (tagged._tag === 'InvalidWorktreeInputError' && 'field' in tagged && tagged.message) {
       return `Invalid ${String(tagged.field)}: ${tagged.message}`;

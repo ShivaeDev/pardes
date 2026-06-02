@@ -12,7 +12,7 @@ import { managerId, registerPardesTool, runTool, textResult } from './registrati
 export function registerPullRequestTools(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
     description:
-      "Audit a managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Rejects completed or otherwise non-active workstreams. Never merges.",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.createPullRequest(params, ctx));
       if (!result.ok) return textResult(`Error: ${result.error}`);
@@ -35,7 +35,8 @@ export function registerPullRequestTools(pi: ExtensionAPI, manager: ManagerContr
           pattern: MANAGER_INPUT_PULL_REQUEST_BRANCH_PATTERN,
         }),
         body: Type.String({
-          description: 'Pull-request body with summary and validation',
+          description:
+            'Reviewer-first pull-request body with concise Why / How / Decisions / Callouts content',
           maxLength: PULL_REQUEST_BODY_MAX_LENGTH,
           minLength: 1,
         }),

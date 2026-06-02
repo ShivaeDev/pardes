@@ -6,16 +6,16 @@ import {
   MANAGER_INPUT_BASELINE_BRANCH_PATTERN,
   MANAGER_INPUT_LONG_TEXT_MAX_LENGTH,
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
+  PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
 } from '../manager/index.ts';
 import {
   agentLeaseCleanupLines,
   auditAgentStatus,
-  CONTROL_PLANE_MAX_LINE_LENGTH,
-  compactText,
   conciseAgentStatus,
   runtimeAgentStatus,
   stopAuditWarning,
-} from './projections.ts';
+} from './projections/agents.ts';
+import { CONTROL_PLANE_MAX_LINE_LENGTH, compactText } from './projections/core.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerController): void {
@@ -128,8 +128,7 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
   });
 
   registerPardesTool(pi, {
-    description:
-      'Send guidance to a retained Pardes worker conversation. Defaults to routine auto-routing: prompt while idle, queued follow-up while active. Reserve explicit steer for urgent interruption; use prompt or followUp only as intentional overrides.',
+    description: `Send guidance to a retained Pardes worker conversation. Defaults to routine auto-routing: prompt while idle, queued follow-up while active. Reserve explicit steer for urgent interruption; use prompt or followUp only as intentional overrides. When routing PR feedback, include this constraint: ${PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE}`,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const requestedBehavior = params.behavior ?? 'auto';
       const result = await runTool(
@@ -173,8 +172,9 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
       { mode: 'length', name: 'message', value: args.message },
       { name: 'behavior', value: args.behavior },
     ],
+    promptGuidelines: [PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE],
     promptSnippet:
-      'Send routine auto-routed guidance to a retained Pardes worker; steer only for urgent interruption',
+      'Send routine auto-routed guidance to a retained Pardes worker; for published-review feedback require additive descendant commits only; steer only for urgent interruption',
   });
 
   registerPardesTool(pi, {

@@ -5,11 +5,16 @@ import { GitHubCommandError, type GitHubIntegrationHealthInspection } from '../g
 import {
   type AgentRecord,
   type AgentStatus,
+  AUTONOMOUS_INBOX_PATH,
+  INBOX_TWO_PATH_GUIDANCE,
   initialManagerState,
   type ManagerController,
   type ManagerEvent,
   type PluginActivationStatus,
+  PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
   type PullRequestRecord,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
   type VerificationRecord,
   type Workstream,
 } from '../manager/index.ts';
@@ -43,12 +48,9 @@ import {
   registerQuestionTool,
   registerWorkstreamTools,
 } from './index.ts';
-import {
-  compositionLines,
-  githubIntegrationHealthLines,
-  verificationLines,
-  verificationStatusLines,
-} from './projections.ts';
+import { githubIntegrationHealthLines } from './projections/inspections.ts';
+import { compositionLines } from './projections/reviews.ts';
+import { verificationLines, verificationStatusLines } from './projections/verifications.ts';
 
 interface ToolResult {
   readonly content: ReadonlyArray<{ readonly type: 'text'; readonly text: string }>;
@@ -59,6 +61,7 @@ interface RegisteredTool {
   readonly name: string;
   readonly description: string;
   readonly promptSnippet: string;
+  readonly promptGuidelines?: ReadonlyArray<string>;
   readonly parameters: {
     readonly additionalProperties?: boolean;
     readonly properties: Readonly<
@@ -362,6 +365,49 @@ describe('Pardes model-visible tools', () => {
     );
   });
 
+  test('teaches the same explicit two-path cursor rule across inbox and user-judgment tool descriptions', () => {
+    const { pi, tools } = registry();
+    registerQuestionTool(pi);
+    registerWorkstreamTools(pi, {} as ManagerController);
+
+    const canonicalGuidelines = [
+      AUTONOMOUS_INBOX_PATH,
+      USER_JUDGMENT_INBOX_PATH,
+      USER_JUDGMENT_HANDOFF_PATH,
+    ];
+    const status = requiredValue(tools.get('pardes_status'));
+    expect(status.promptGuidelines).toEqual(canonicalGuidelines);
+    expect(status.promptSnippet).toBe(
+      'Inspect concise bounded Pardes manager status and judge inbox attention before acknowledgement',
+    );
+    for (const name of ['inbox_get', 'inbox_acknowledge', 'await_user_feedback', 'question']) {
+      const tool = requiredValue(tools.get(name));
+      expect(tool.description, name).toContain(INBOX_TWO_PATH_GUIDANCE);
+      expect(tool.promptGuidelines, name).toEqual(expect.arrayContaining(canonicalGuidelines));
+    }
+    expect(requiredValue(tools.get('inbox_get')).promptSnippet).toBe(
+      'Read and judge one known durable Pardes attention row after compact inbox status',
+    );
+    expect(requiredValue(tools.get('inbox_acknowledge')).promptSnippet).toBe(
+      'Acknowledge autonomous handled Pardes inbox rows through one exact cursor; never pre-acknowledge user judgment',
+    );
+    expect(requiredValue(tools.get('await_user_feedback')).promptSnippet).toBe(
+      'Surface the active delivered Pardes attention cursor for free-form user feedback without acknowledging it first',
+    );
+    expect(requiredValue(tools.get('question')).promptSnippet).toBe(
+      'Ask a structured user-judgment question while leaving any active Pardes attention cursor open until response',
+    );
+    expect(requiredValue(tools.get('inbox_acknowledge')).description).toContain(
+      'Use only for the autonomous path after rows are handled',
+    );
+    expect(requiredValue(tools.get('await_user_feedback')).description).toContain(
+      'Do not acknowledge the active cursor first',
+    );
+    expect(requiredValue(tools.get('question')).description).toContain(
+      'this tool does not consume that cursor',
+    );
+  });
+
   test('exposes a cheap concise aggregate status without refreshing or leaking raw state', async () => {
     const base = managerState();
     const active = workstream('ws-active', 'active', 'Active implementation');
@@ -414,6 +460,12 @@ describe('Pardes model-visible tools', () => {
 
     const status = requiredValue(tools.get('pardes_status'));
     expect(status.parameters.properties.maxRows?.maximum).toBe(CONTROL_PLANE_MAX_ROWS);
+    expect(status.parameters.properties.maxRows?.description).toContain(
+      'Maximum returned rows for views other than inbox',
+    );
+    expect(status.parameters.properties.maxRows?.description).toContain(
+      'Inbox preserves its fixed authored orientation rows and omission metadata even when they exceed this target.',
+    );
     const result = await status.execute('call-1', {}, signal, onUpdate, ctx);
     expect(result.content[0]?.text).toBe(
       [
@@ -422,7 +474,7 @@ describe('Pardes model-visible tools', () => {
         'workers: 1 running · 0 idle · 0 starting · 0 crashed · 1 warnings',
         'review gates: 1 open · 1 attention · advisory verifications: 0 current · 0 stale · inbox: 1 pending',
         'attention index: 3 signals · first 3 shown · drill down: inbox | reviews(attention) | agents(warnings)',
-        '! inbox event-1 [ci_failed] · read: inbox_get({ eventId })',
+        '! inbox event-1 [ci_failed] · judge first: inbox_get({ eventId })',
         '! review #42 [open] · ws-active · agent-12345678 · ⚠ ci:failing',
         '! worker agent-12345678 [running] · ws-active · ⚠ error',
       ].join('\n'),
@@ -529,8 +581,8 @@ describe('Pardes model-visible tools', () => {
       'attention index: 6 signals · first 5 shown · drill down: inbox | reviews(attention) | agents(warnings)',
     ]);
     expect(lines.slice(5, 10)).toEqual([
-      '! inbox event-z [discussion_feedback] · read: inbox_get({ eventId })',
-      '! inbox redacted-event [agent_question] · read: inbox_get({ eventId })',
+      '! inbox event-z [discussion_feedback] · judge first: inbox_get({ eventId })',
+      '! inbox redacted-event [agent_question] · judge first: inbox_get({ eventId })',
       '! review #41 [open] · ws-active · agent-a · ⚠ ci:failing',
       '! review #42 [open] · ws-active · agent-z · ⚠ merge:conflicting',
       '! worker agent-a [running] · ws-active · ⚠ dirty worktree',
@@ -590,7 +642,7 @@ describe('Pardes model-visible tools', () => {
       'attention index: 1 signal · first 1 shown · drill down: inbox',
     );
     expect(summary.content[0]?.text).toContain(
-      '! inbox event-activation [ci_failed] · read: inbox_get({ eventId })',
+      '! inbox event-activation [ci_failed] · judge first: inbox_get({ eventId })',
     );
     expect(inspections).toBe(0);
 
@@ -648,6 +700,10 @@ describe('Pardes model-visible tools', () => {
           observedHeadSha: 'b'.repeat(40),
           pullRequestHead: 'current',
           sharedFailingWorkflowCount: 1,
+          watcherFailure: {
+            kind: 'authentication_likely',
+            summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+          },
         },
       ],
       rateLimit: {
@@ -710,6 +766,7 @@ describe('Pardes model-visible tools', () => {
         'rate budget: graphql:100/5000 [near_exhaustion/graphql] · reset:2026-06-01T01:00:00Z',
         'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher-last-disposition:deferred(proactive_throttle)',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
+        '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
       ].join('\n'),
     );
@@ -1088,6 +1145,20 @@ describe('Pardes model-visible tools', () => {
     expect(pending.content[0]?.text.split('\n').length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_ROWS);
     expect(pending.content[0]?.text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
     expect(pending.content[0]?.text).not.toContain(longSummary);
+
+    const tinyInbox = await status.execute(
+      'call-3',
+      { maxRows: 1, view: 'inbox' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(tinyInbox.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
+    expect(tinyInbox.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
+    expect(tinyInbox.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
+    expect(tinyInbox.content[0]?.text).toContain('… +11 more inbox index rows omitted');
+    expect(tinyInbox.content[0]?.text.split('\n').length).toBeGreaterThan(1);
+    expect(tinyInbox.content[0]?.text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
   });
 
   test('filters compact workstream surfaces so active work and planned backlog avoid completed history', async () => {
@@ -1175,7 +1246,16 @@ describe('Pardes model-visible tools', () => {
     const state = {
       ...base,
       githubRateMetadataUnavailableAt: createdAt,
-      inbox,
+      inbox: [
+        ...inbox,
+        {
+          createdAt,
+          id: 'event-blocked-merge',
+          presentationBlocked: true,
+          summary: '#42 externally merged; bounded retirement outcome is pending.',
+          type: 'merged',
+        },
+      ],
       inboxWake: { createdAt, cursor: 'event-1', pendingCount: 1, token: 'wake-fixture' },
       pullRequests: { [calm.id]: calm, [attention.id]: attention },
       workstreams: { [active.id]: active },
@@ -1206,14 +1286,26 @@ describe('Pardes model-visible tools', () => {
 
     const pending = await status.execute('call-2', { view: 'inbox' }, signal, onUpdate, ctx);
     expect(pending.content[0]?.text).toContain(
-      'inbox: 1 pending event · read one: inbox_get({ eventId })',
+      'inbox: 2 pending events · read and judge one: inbox_get({ eventId })',
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(
-      '· queued suffix:0 · awaiting-user:no · wake wake-fixture',
+      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · software refinement pending:1',
     );
+    expect(pending.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
+    expect(pending.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
+    expect(pending.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
     expect(pending.content[0]?.text).toContain(
       'event-1 [review_feedback] Review gate needs a follow-up.',
+    );
+    expect(pending.content[0]?.text).toContain(
+      'event-blocked-merge [merged] · software refinement pending; do not acknowledge #42 externally merged; bounded retirement outcome is pending.',
+    );
+
+    const summary = await status.execute('call-3', {}, signal, onUpdate, ctx);
+    expect(summary.content[0]?.text).toContain('· software refinement pending:1');
+    expect(summary.content[0]?.text).toContain(
+      '! inbox event-blocked-merge [merged] · software refinement pending; judge first: inbox_get({ eventId }); do not acknowledge',
     );
   });
 
@@ -1417,6 +1509,58 @@ describe('Pardes model-visible tools', () => {
     );
   });
 
+  test('keeps the current bounded watcher diagnosis visible in default and review status after inbox acknowledgement', async () => {
+    const base = managerState();
+    const active = workstream('ws-active', 'active');
+    const gate: PullRequestRecord = {
+      agentId: 'agent-watcher',
+      createdAt,
+      id: 'pr-watcher',
+      number: 42,
+      status: 'open',
+      updatedAt: createdAt,
+      url: 'https://github.test/acme/project/pull/42',
+      watcherFailedAt: createdAt,
+      watcherFailure: {
+        kind: 'authentication_likely',
+        summary: 'GitHub CLI authentication likely failed; run gh auth status.',
+      },
+      workstreamId: active.id,
+    };
+    const manager = {
+      runtimeSnapshots: () => new Map(),
+      snapshot: () => ({
+        ...base,
+        inbox: [],
+        pullRequests: { [gate.id]: gate },
+        workstreams: { [active.id]: active },
+      }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerWorkstreamTools(pi, manager);
+    const status = requiredValue(tools.get('pardes_status'));
+
+    const summary = await status.execute('call-1', {}, signal, onUpdate, ctx);
+    const reviews = await status.execute(
+      'call-2',
+      { reviewFilter: 'attention', view: 'reviews' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+
+    expect(summary.content[0]?.text).toContain(
+      '! review #42 [open] · ws-active · agent-watcher · ⚠ watcher:authentication_likely',
+    );
+    expect(reviews.content[0]?.text).toContain(
+      '#42 [open] ws-active · agent-watcher · observation:none · ⚠ watcher:authentication_likely',
+    );
+    expect(reviews.content[0]?.text).toContain(
+      '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
+    );
+    expect(`${summary.content[0]?.text}\n${reviews.content[0]?.text}`).not.toContain('stderr');
+  });
+
   test('exposes delivered, awaiting-user, and queued-suffix inbox handoff state compactly', async () => {
     const first = {
       createdAt,
@@ -1594,6 +1738,11 @@ describe('Pardes model-visible tools', () => {
       'Defaults to routine auto-routing: prompt while idle, queued follow-up while active',
     );
     expect(send.description).toContain('Reserve explicit steer for urgent interruption');
+    expect(send.description).toContain(PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE);
+    expect(send.promptGuidelines).toEqual([PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE]);
+    expect(send.promptSnippet).toBe(
+      'Send routine auto-routed guidance to a retained Pardes worker; for published-review feedback require additive descendant commits only; steer only for urgent interruption',
+    );
     const automatic = await send.execute(
       'call-1',
       { agentId: 'agent-12345678', message: 'Routine follow-up.' },
@@ -1864,7 +2013,7 @@ describe('Pardes model-visible tools', () => {
 
     const publish = requiredValue(tools.get('pull_request_create'));
     expect(publish.description).toBe(
-      "Audit a managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Rejects completed or otherwise non-active workstreams. Never merges.",
     );
     expect(publish.promptSnippet).toBe(
       'Publish a committed Pardes worker branch as a pull-request review gate',
@@ -1878,6 +2027,9 @@ describe('Pardes model-visible tools', () => {
     ]);
     expect(publish.parameters.properties.title?.maxLength).toBe(256);
     expect(publish.parameters.properties.body?.maxLength).toBe(10_000);
+    expect(publish.parameters.properties.body?.description).toBe(
+      'Reviewer-first pull-request body with concise Why / How / Decisions / Callouts content',
+    );
     expect(publish.parameters.properties.baseBranch?.maxLength).toBe(255);
     expect(publish.parameters.required).not.toContain('openInBrowser');
     expect([...tools.keys()].some((name) => name.includes('merge'))).toBe(false);
@@ -1886,7 +2038,7 @@ describe('Pardes model-visible tools', () => {
       {
         agentId: 'agent-1',
         baseBranch: 'main',
-        body: 'Summary and validation.',
+        body: '### Why?\n\nApproved intent.\n\n### How?\n\nHigh-level approach.',
         title: 'Review gate',
         workstreamId: 'ws-1',
       },
@@ -2158,8 +2310,25 @@ describe('Pardes model-visible tools', () => {
       'event-hostile': {
         createdAt,
         id: 'event-hostile',
+        reportId: '\u0000'.repeat(5_000),
         summary: '\u0000'.repeat(5_000),
         type: 'forward_compatible_event',
+      },
+      'event-merged': {
+        createdAt,
+        id: 'event-merged',
+        pullRequestId: 'pr-42',
+        summary:
+          '#42 merge observed; owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge. Owner agent-1 was already stopped; managed worktree was cleaned or is absent (removed_clean); retained Pi session metadata is history-only.',
+        type: 'merged',
+      },
+      'event-merged-blocked': {
+        createdAt,
+        id: 'event-merged-blocked',
+        presentationBlocked: true,
+        pullRequestId: 'pr-43',
+        summary: '#43 was merged externally; Pardes observed only and did not merge.',
+        type: 'merged',
       },
       'event-metadata': {
         createdAt,
@@ -2176,6 +2345,15 @@ describe('Pardes model-visible tools', () => {
         reportPreviewTruncated: false,
         summary: 'Worker completed the focused slice.',
         type: 'agent_report_completed',
+      },
+      'event-verifier-missing-report': {
+        agentId: 'verifier-1',
+        createdAt,
+        id: 'event-verifier-missing-report',
+        summary:
+          'verifier-1: terminal report missing; follow up; do not poll. Retained advisory verifier remains attached idle.',
+        type: 'verification_terminal_report_missing',
+        verificationId: 'verify-1',
       },
       'event-verifier-question': {
         agentId: 'verifier-1',
@@ -2194,6 +2372,14 @@ describe('Pardes model-visible tools', () => {
         summary: 'Verifier completed a consolidated advisory pass.',
         type: 'agent_report_completed',
         verificationId: 'verify-1',
+      },
+      'event-watcher': {
+        createdAt,
+        id: 'event-watcher',
+        pullRequestId: 'pr-42',
+        summary:
+          '#42 watcher failed [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
+        type: 'watcher_failed',
       },
     };
     const manager = {
@@ -2224,7 +2410,15 @@ describe('Pardes model-visible tools', () => {
     expect(external.content[0]?.text).toContain(
       'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.',
     );
-    expect(external.content[0]?.text).toContain('after handling: inbox_acknowledge()');
+    expect(external.content[0]?.text).toContain(
+      'path autonomous: Autonomous rows may be acknowledged once handled.',
+    );
+    expect(external.content[0]?.text).toContain(
+      'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(external.content[0]?.text).toContain(
+      'judgment handoff: Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+    );
     expect(external.details).toEqual({
       agentId: 'agent-1',
       createdAt,
@@ -2271,6 +2465,72 @@ describe('Pardes model-visible tools', () => {
       trust: 'external_metadata',
     });
 
+    const watcher = await inboxGet.execute(
+      'call-watcher',
+      { eventId: 'event-watcher' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(watcher.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
+    expect(watcher.content[0]?.text).toContain(
+      'GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
+    );
+    expect(watcher.content[0]?.text).not.toContain('stderr');
+    expect(watcher.details).toMatchObject({
+      eventId: 'event-watcher',
+      pullRequestId: 'pr-42',
+      trust: 'external_metadata',
+      type: 'watcher_failed',
+    });
+
+    const merged = await inboxGet.execute(
+      'call-merged',
+      { eventId: 'event-merged' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(merged.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
+    expect(merged.content[0]?.text).toContain(
+      '#42 merge observed; owner:stopped; stream:complete; follow-up:0.',
+    );
+    expect(merged.content[0]?.text).toContain(
+      'managed worktree was cleaned or is absent (removed_clean); retained Pi session metadata is history-only.',
+    );
+    expect(merged.content[0]?.text).not.toContain('managed worktree and session remain preserved');
+    expect(merged.content[0]?.text).toContain(
+      'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.',
+    );
+    expect(merged.content[0]?.text).toContain(
+      'path autonomous: Autonomous rows may be acknowledged once handled.',
+    );
+    expect(merged.content[0]?.text).not.toContain('after handling: inbox_acknowledge()');
+
+    const blockedMerged = await inboxGet.execute(
+      'call-merged-blocked',
+      { eventId: 'event-merged-blocked' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(blockedMerged.content[0]?.text).toContain(
+      'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is pending software refinement; no worker message was sent.',
+    );
+    expect(blockedMerged.content[0]?.text).toContain(
+      'next: wait for software refinement; do not acknowledge this row or any later suffix cursor yet.',
+    );
+    expect(blockedMerged.content[0]?.text).not.toContain(
+      'bounded Pardes retirement outcome is included above',
+    );
+    expect(blockedMerged.content[0]?.text).not.toContain('after handling: inbox_acknowledge()');
+    expect(blockedMerged.details).toMatchObject({
+      eventId: 'event-merged-blocked',
+      presentationBlocked: true,
+      pullRequestId: 'pr-43',
+      trust: 'external_metadata',
+    });
+
     const report = await inboxGet.execute(
       'call-3',
       { eventId: 'event-report' },
@@ -2311,6 +2571,24 @@ describe('Pardes model-visible tools', () => {
       verificationId: 'verify-1',
     });
 
+    const verifierMissingReport = await inboxGet.execute(
+      'call-verifier-missing-report',
+      { eventId: 'event-verifier-missing-report' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(verifierMissingReport.content[0]?.text).toContain(
+      '[Pardes-authored durable inbox summary]',
+    );
+    expect(verifierMissingReport.details).toMatchObject({
+      agentId: 'verifier-1',
+      eventId: 'event-verifier-missing-report',
+      trust: 'pardes',
+      type: 'verification_terminal_report_missing',
+      verificationId: 'verify-1',
+    });
+
     const verifierQuestion = await inboxGet.execute(
       'call-verifier-question',
       { eventId: 'event-verifier-question' },
@@ -2338,8 +2616,21 @@ describe('Pardes model-visible tools', () => {
     expect(hostile.content[0]?.text.length).toBeLessThanOrEqual(
       INBOX_EVENT_DETAIL_RENDER_MAX_CHARS,
     );
+    expect(hostile.content[0]?.text).toContain(
+      'durable child artifact: report_get({ reportId: "<redacted-invalid-metadata>" })',
+    );
+    expect(hostile.content[0]?.text).toContain(
+      'path autonomous: Autonomous rows may be acknowledged once handled.',
+    );
+    expect(hostile.content[0]?.text).toContain(
+      'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(hostile.content[0]?.text).toContain(
+      'judgment handoff: Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+    );
     expect(hostile.details).toMatchObject({
       eventId: 'event-hostile',
+      reportId: '<redacted-invalid-metadata>',
       returnedSummaryChars: 900,
       summaryChars: 5_000,
       summaryTruncated: true,

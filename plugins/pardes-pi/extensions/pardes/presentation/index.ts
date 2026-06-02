@@ -39,13 +39,28 @@ export {
   sanitizeQuestionOptionLabel,
   selectPardesQuestionOption,
 } from './question-dialog.ts';
+export {
+  DEFAULT_PARDES_RENDERER_CONFIG,
+  loadPardesRendererConfig,
+  type PardesRendererConfig,
+  PardesRendererConfigError,
+  pardesRendererConfigPath,
+  savePardesRendererConfig,
+  showPardesRendererConfigOverlay,
+} from './renderer-config.ts';
 export { bridgeMonitorLines, TUI_TERMINAL_TEXT_LAYOUT } from './terminal-layout.ts';
 export {
   PARDES_TOOL_CALL_PREVIEW_MAX_CHARS,
   PARDES_TOOL_CALL_VALUE_MAX_CHARS,
+  PARDES_TOOL_RESULT_EXPANDED_MAX_CHARS,
+  PARDES_TOOL_RESULT_EXPANDED_MAX_LINES,
+  PARDES_TOOL_RESULT_SUMMARY_MAX_CHARS,
+  PARDES_TOOL_RESULT_VERBOSE_MAX_CHARS,
+  PARDES_TOOL_RESULT_VERBOSE_MAX_LINES,
   type PardesToolCallPreviewField,
   pardesToolCallPreview,
   renderPardesToolCall,
+  renderPardesToolResult,
 } from './tool-call-preview.ts';
 
 export function registerManagerPresentation(

@@ -20,6 +20,10 @@ const RATE_LIMIT = {
   remaining: 4_999,
   resetAt: '2099-01-15T08:00:00Z',
 };
+const AUTH_WATCHER_FAILURE = {
+  kind: 'authentication_likely' as const,
+  summary: 'GitHub CLI authentication likely failed; run gh auth status.' as const,
+};
 
 function defaultBranchResult(sha = MAIN_SHA) {
   return result(
@@ -166,7 +170,7 @@ describe('GitHub integration-health inspection', () => {
     const inspection = await Effect.runPromise(
       makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
         cwd: '/tmp/project',
-        pullRequests: [association()],
+        pullRequests: [{ ...association(), watcherFailure: AUTH_WATCHER_FAILURE }],
       }),
     );
 
@@ -208,6 +212,7 @@ describe('GitHub integration-health inspection', () => {
           observedHeadSha: AUDITED_PR_SHA,
           pullRequestHead: 'current',
           sharedFailingWorkflowCount: 1,
+          watcherFailure: AUTH_WATCHER_FAILURE,
         },
       ],
       rateLimit: {

@@ -4,13 +4,19 @@ import {
   Effect,
   Exit,
   Layer,
+  Option,
   Schedule,
   Schema,
   Scope,
   Semaphore,
 } from 'effect';
 import { decodeGitHubJson } from './codecs.ts';
-import { type GitHubCommandError, GitHubResponseError, GitHubWatcherInputError } from './errors.ts';
+import {
+  type GitHubCommandError,
+  GitHubResponseError,
+  GitHubWatcherInputError,
+  GitHubWatcherTimeoutError,
+} from './errors.ts';
 import {
   GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
@@ -37,6 +43,7 @@ import {
 } from './transport.ts';
 
 export const DEFAULT_GITHUB_WATCHER_CADENCE: Duration.Input = '15 seconds';
+export const DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT: Duration.Input = '10 seconds';
 const WATCHER_JSON_FIELDS = 'number,headRefOid,state,mergeable,reviewDecision,statusCheckRollup';
 const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}} rateLimit{cost limit remaining resetAt}}`;
 
@@ -46,7 +53,11 @@ export type PullRequestWatcherTransition =
   | 'conflict'
   | 'merged'
   | 'closed_unmerged';
-export type GitHubWatcherError = GitHubWatcherInputError | GitHubResponseError | GitHubCommandError;
+export type GitHubWatcherError =
+  | GitHubWatcherInputError
+  | GitHubResponseError
+  | GitHubCommandError
+  | GitHubWatcherTimeoutError;
 
 /** Content-free projection emitted from the GitHub adapter into manager state. */
 export interface PullRequestObservation {
@@ -320,6 +331,7 @@ export function makeGitHubWatcherService(
   options: {
     readonly runner?: GitHubCommandRunnerShape;
     readonly cadence?: Duration.Input;
+    readonly commandTimeout?: Duration.Input;
     readonly hostedMetadata?: GitHubHostedMetadataShape;
   } = {},
 ): GitHubWatcherShape {
@@ -327,6 +339,17 @@ export function makeGitHubWatcherService(
   const github = makeGitHubCli(runner);
   const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
+  const commandTimeout = options.commandTimeout ?? DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT;
+  const run = (cwd: string, args: ReadonlyArray<string>) =>
+    github.run(cwd, args).pipe(
+      Effect.timeoutOption(commandTimeout),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.fail(new GitHubWatcherTimeoutError({ timeout: commandTimeout })),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
   let active: ActiveWatcher | undefined;
   let rateMetadataCallbacks: GitHubWatcherCallbacks | undefined;
   let rateMetadataStatus: string | undefined;
@@ -372,15 +395,7 @@ export function makeGitHubWatcherService(
     const viewed = yield* hostedMetadata.accountReservedOpaqueRequest(
       'graphql',
       watcherCliReservationId,
-      github.run(cwd, [
-        'pr',
-        'view',
-        identifier,
-        '--json',
-        WATCHER_JSON_FIELDS,
-        '--repo',
-        route.slug,
-      ]),
+      run(cwd, ['pr', 'view', identifier, '--json', WATCHER_JSON_FIELDS, '--repo', route.slug]),
     );
     const decoded = yield* decodeGitHubJson(
       'watch pull request',
@@ -422,7 +437,7 @@ export function makeGitHubWatcherService(
     watcherRestReservationId: string,
   ) {
     yield* hostedMetadata.launchGraphQLRequest(graphqlReservationId);
-    const discussionResponse = yield* github.run(cwd, [
+    const discussionResponse = yield* run(cwd, [
       'api',
       'graphql',
       '--hostname',
@@ -447,7 +462,7 @@ export function makeGitHubWatcherService(
     const inlineResponse = yield* hostedMetadata.accountReservedOpaqueRequest(
       'rest',
       watcherRestReservationId,
-      github.run(cwd, [
+      run(cwd, [
         'api',
         `repos/${route.owner}/${route.repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
         '--hostname',

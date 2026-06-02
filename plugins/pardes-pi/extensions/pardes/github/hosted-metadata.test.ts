@@ -87,7 +87,11 @@ describe('GitHub hosted metadata adapter', () => {
         resetAt: '2027-01-15T08:00:00.000Z',
         source: 'rest_fallback',
       },
-      watcherPolling: { status: 'ready' },
+      watcherPolling: {
+        reason: 'rate_metadata_unavailable',
+        status: 'deferred',
+        tier: 'unavailable',
+      },
     });
     expect(JSON.stringify(health)).not.toContain('ignored');
     expect(JSON.stringify(health)).not.toContain('private');
@@ -109,7 +113,11 @@ describe('GitHub hosted metadata adapter', () => {
       graphql: { availability: 'unavailable' },
       observation: 'bounded_hosted_rate_budget',
       rest: { availability: 'unavailable' },
-      watcherPolling: { status: 'ready' },
+      watcherPolling: {
+        reason: 'rate_metadata_unavailable',
+        status: 'deferred',
+        tier: 'unavailable',
+      },
     });
   });
 
@@ -197,6 +205,7 @@ describe('GitHub hosted metadata adapter', () => {
     expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toEqual({
       reason: 'rate_metadata_unavailable',
       status: 'deferred',
+      tier: 'unavailable',
     });
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       fallback: 'unavailable',
@@ -252,6 +261,118 @@ describe('GitHub hosted metadata adapter', () => {
     });
   });
 
+  test('applies deterministic normal, moderate, aggressive, and paused watcher admission tiers', async () => {
+    const scenario = async (remaining: number) => {
+      let now = 1_700_000_000_000;
+      const fixture = scriptedRunner([
+        fallbackResult(remaining, remaining),
+        fallbackResult(remaining, remaining),
+      ]);
+      const adapter = makeGitHubHostedMetadataAdapter({
+        nowMillis: Effect.sync(() => now),
+        runner: fixture.runner,
+      });
+      return {
+        adapter,
+        advance: (millis: number) => {
+          now += millis;
+        },
+      };
+    };
+
+    const normal = await scenario(3_000);
+    expect(
+      await Effect.runPromise(normal.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'ready',
+      tier: 'normal',
+    });
+    expect(
+      await Effect.runPromise(normal.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'ready',
+      tier: 'normal',
+    });
+
+    const moderate = await scenario(1_500);
+    expect(
+      await Effect.runPromise(moderate.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'ready',
+      tier: 'moderate',
+    });
+    expect(moderate.adapter.compactStatusUnsafe()).toEqual({
+      effectiveRemaining: 1_490,
+      throttle: 'moderate',
+    });
+    expect(
+      await Effect.runPromise(moderate.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      reason: 'proactive_throttle',
+      status: 'deferred',
+      tier: 'moderate',
+      until: '2023-11-14T22:13:50.000Z',
+    });
+    expect(await Effect.runPromise(moderate.adapter.snapshot())).toMatchObject({
+      watcherPolling: {
+        reason: 'proactive_throttle',
+        status: 'deferred',
+        tier: 'moderate',
+      },
+    });
+    moderate.advance(30_000);
+    expect(
+      await Effect.runPromise(moderate.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'ready',
+      tier: 'moderate',
+    });
+
+    const aggressive = await scenario(900);
+    expect(
+      await Effect.runPromise(aggressive.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'ready',
+      tier: 'aggressive',
+    });
+    expect(
+      await Effect.runPromise(aggressive.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      reason: 'proactive_throttle',
+      status: 'deferred',
+      tier: 'aggressive',
+      until: '2023-11-14T22:14:20.000Z',
+    });
+
+    const paused = await scenario(400);
+    expect(
+      await Effect.runPromise(paused.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      reason: 'proactive_throttle',
+      status: 'deferred',
+      tier: 'paused',
+      until: '2023-11-14T22:14:20.000Z',
+    });
+    expect(paused.adapter.compactStatusUnsafe()).toEqual({
+      effectiveRemaining: 400,
+      throttle: 'paused',
+    });
+    paused.advance(59_999);
+    expect(
+      await Effect.runPromise(paused.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'deferred',
+      tier: 'paused',
+    });
+    paused.advance(1);
+    expect(
+      await Effect.runPromise(paused.adapter.reserveWatcherPoll('/tmp/project', 1)),
+    ).toMatchObject({
+      status: 'ready',
+      tier: 'paused',
+    });
+  });
+
   test('moves a deferred watcher budget back to ready only after a decoded post-reset fallback refresh', async () => {
     let now = 1_700_000_000_000;
     const fixture = scriptedRunner([
@@ -264,10 +385,10 @@ describe('GitHub hosted metadata adapter', () => {
     });
 
     expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
-      reason: 'near_exhaustion',
+      reason: 'proactive_throttle',
       status: 'deferred',
     });
-    now = 1_700_000_002_000;
+    now = 1_700_000_061_000;
     expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
       status: 'ready',
     });
@@ -275,7 +396,7 @@ describe('GitHub hosted metadata adapter', () => {
       fallback: 'available',
       graphql: { remaining: 3_990, source: 'local_estimate' },
       rest: { remaining: 3_000, source: 'rest_fallback' },
-      watcherPolling: { status: 'ready' },
+      watcherPolling: { effectiveRemaining: 3_000, status: 'ready', tier: 'normal' },
     });
     expect(fixture.invocations).toHaveLength(2);
   });
@@ -353,7 +474,7 @@ describe('GitHub hosted metadata adapter', () => {
     expect(health.graphql).toEqual({
       availability: 'available',
       limit: 5_000,
-      pressure: 'ready',
+      pressure: 'near_exhaustion',
       remaining: 245,
       resetAt: '2027-01-15T08:01:40Z',
       source: 'local_estimate',

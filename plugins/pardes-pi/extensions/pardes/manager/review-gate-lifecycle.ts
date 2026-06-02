@@ -834,8 +834,11 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
   const handleWatcherThrottleDiagnostic = Effect.fnUntraced(function* (
     event: GitHubWatcherThrottleDiagnostic,
   ) {
-    if (event.status === 'rate_metadata_recovered') {
-      if (namespace.state.githubRateMetadataUnavailableAt === undefined) return;
+    if (event.status !== 'rate_metadata_unavailable') {
+      if (namespace.state.githubRateMetadataUnavailableAt === undefined) {
+        yield* callbacks.refresh();
+        return;
+      }
       const timestamp = yield* nowIso;
       const changed = yield* namespace.store.mutate((state) => {
         if (state.githubRateMetadataUnavailableAt === undefined)

@@ -7,6 +7,7 @@ import {
   makeManagedWorktreeService,
 } from '../git/index.ts';
 import {
+  type GitHubHostedMetadataShape,
   type GitHubIntegrationHealthShape,
   type GitHubPublicationShape,
   type GitHubWatcherShape,
@@ -329,6 +330,7 @@ export class ManagerController {
   private latestContext: ExtensionContext | undefined;
   private readonly worktrees: ManagedWorktreeShape;
   private readonly github: GitHubPublicationShape;
+  private readonly githubHostedMetadata: GitHubHostedMetadataShape;
   private readonly githubWatcher: GitHubWatcherShape;
   private readonly githubIntegrationHealth: GitHubIntegrationHealthShape;
   private readonly workers: GuardedWorkerSupervisorShape;
@@ -357,6 +359,7 @@ export class ManagerController {
     // credentials in place is unsupported; reload the manager so a fresh controller naturally
     // drops this bounded hosted-metadata cache and debt ledger.
     const githubHostedMetadata = makeGitHubHostedMetadataAdapter();
+    this.githubHostedMetadata = githubHostedMetadata;
     this.github =
       options.github ?? makeGitHubPublicationService({ hostedMetadata: githubHostedMetadata });
     this.githubWatcher =
@@ -511,6 +514,7 @@ export class ManagerController {
         this.active.state,
         this.liveRuntimes,
         this.compactionSafety,
+        this.githubHostedMetadata.compactStatusUnsafe(),
       );
     else this.presentation.clearDashboard(ctx);
   }

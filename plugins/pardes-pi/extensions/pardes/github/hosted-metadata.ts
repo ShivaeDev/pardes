@@ -10,6 +10,12 @@ import {
 
 export const GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS = 60_000;
 export const GITHUB_WATCHER_RATE_LIMIT_RESERVE = 100;
+export const GITHUB_WATCHER_MODERATE_THRESHOLD = 2_000;
+export const GITHUB_WATCHER_AGGRESSIVE_THRESHOLD = 1_000;
+export const GITHUB_WATCHER_PAUSE_THRESHOLD = 500;
+export const GITHUB_WATCHER_MODERATE_INTERVAL_MILLIS = 30_000;
+export const GITHUB_WATCHER_AGGRESSIVE_INTERVAL_MILLIS = 60_000;
+export const GITHUB_WATCHER_PAUSE_INTERVAL_MILLIS = 60_000;
 export const GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST = 10;
 export const GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST = 1;
 export const GITHUB_CLI_GRAPHQL_ESTIMATED_COST = 5;
@@ -36,13 +42,32 @@ export interface GitHubGraphQLRequestReservation {
   readonly id: string;
 }
 
+export type GitHubWatcherThrottleTier =
+  | 'normal'
+  | 'moderate'
+  | 'aggressive'
+  | 'paused'
+  | 'unavailable';
+
 export type GitHubWatcherRateLimitStatus =
-  | { readonly status: 'ready'; readonly graphqlReservationId?: string }
+  | {
+      readonly status: 'ready';
+      readonly tier: Exclude<GitHubWatcherThrottleTier, 'unavailable'>;
+      readonly effectiveRemaining: number;
+      readonly graphqlReservationId?: string;
+    }
   | {
       readonly status: 'deferred';
-      readonly reason: 'near_exhaustion' | 'rate_metadata_unavailable';
+      readonly reason: 'proactive_throttle' | 'rate_metadata_unavailable';
+      readonly tier: Exclude<GitHubWatcherThrottleTier, 'normal'>;
+      readonly effectiveRemaining?: number;
       readonly until?: string;
     };
+
+export interface GitHubRateLimitCompactStatus {
+  readonly effectiveRemaining?: number;
+  readonly throttle: GitHubWatcherThrottleTier;
+}
 
 export interface GitHubRateLimitHealth {
   /** One adapter belongs to one fresh controller and its fixed GitHub.com credential context. */
@@ -89,6 +114,8 @@ export interface GitHubHostedMetadataShape {
     pullRequestCount: number,
   ) => Effect.Effect<GitHubWatcherRateLimitStatus>;
   readonly snapshot: () => Effect.Effect<GitHubRateLimitHealth>;
+  /** Bounded transient UI sample only; never persist this controller-scoped telemetry. */
+  readonly compactStatusUnsafe: () => GitHubRateLimitCompactStatus;
 }
 
 type InternalObservedBudgetSource = Exclude<GitHubRateLimitBudgetSource, 'local_estimate'>;
@@ -120,18 +147,51 @@ interface HostedMetadataState {
   readonly graphql?: InternalObservedBudget;
   readonly rest?: InternalObservedBudget;
   readonly nextReservation: number;
+  readonly nextWatcherAdmissionAtMillis?: number;
   readonly watcherPolling: GitHubWatcherRateLimitStatus;
 }
 
 function projectWatcherPolling(
   watcherPolling: GitHubWatcherRateLimitStatus,
 ): GitHubWatcherRateLimitStatus {
-  return watcherPolling.status === 'ready' ? { status: 'ready' } : watcherPolling;
+  if (watcherPolling.status === 'deferred') return watcherPolling;
+  const { graphqlReservationId: _graphqlReservationId, ...projected } = watcherPolling;
+  return projected;
+}
+
+function watcherThrottleTier(
+  effectiveRemaining: number,
+): Exclude<GitHubWatcherThrottleTier, 'unavailable'> {
+  if (effectiveRemaining <= GITHUB_WATCHER_PAUSE_THRESHOLD) return 'paused';
+  if (effectiveRemaining <= GITHUB_WATCHER_AGGRESSIVE_THRESHOLD) return 'aggressive';
+  if (effectiveRemaining <= GITHUB_WATCHER_MODERATE_THRESHOLD) return 'moderate';
+  return 'normal';
+}
+
+function watcherIntervalMillis(tier: GitHubWatcherThrottleTier): number {
+  if (tier === 'paused') return GITHUB_WATCHER_PAUSE_INTERVAL_MILLIS;
+  if (tier === 'aggressive') return GITHUB_WATCHER_AGGRESSIVE_INTERVAL_MILLIS;
+  if (tier === 'moderate') return GITHUB_WATCHER_MODERATE_INTERVAL_MILLIS;
+  return 0;
+}
+
+function proactiveWatcherThrottle(
+  tier: Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>,
+  effectiveRemaining: number,
+  untilMillis: number,
+): GitHubWatcherRateLimitStatus {
+  return {
+    effectiveRemaining,
+    reason: 'proactive_throttle',
+    status: 'deferred',
+    tier,
+    until: new Date(untilMillis).toISOString(),
+  };
 }
 
 function pressure(remaining: number): GitHubRateLimitPressure {
   if (remaining === 0) return 'exhausted';
-  return remaining <= GITHUB_WATCHER_RATE_LIMIT_RESERVE ? 'near_exhaustion' : 'ready';
+  return remaining <= GITHUB_WATCHER_PAUSE_THRESHOLD ? 'near_exhaustion' : 'ready';
 }
 
 function saturatedAdd(left: number, right: number): number {
@@ -242,6 +302,26 @@ function effectiveBudget(
   };
 }
 
+function effectiveRemaining(state: HostedMetadataState, debt = state.debt): number | undefined {
+  const graphql = effectiveBudget(state.graphql, debt.graphql);
+  const rest = effectiveBudget(state.rest, debt.rest);
+  return graphql === undefined || rest === undefined
+    ? undefined
+    : Math.min(graphql.remaining, rest.remaining);
+}
+
+function compactStatus(
+  state: HostedMetadataState,
+  nowMillis: number,
+): GitHubRateLimitCompactStatus {
+  const debt = pruneLedger(state.debt, nowMillis);
+  const remaining = effectiveRemaining(state, debt);
+  return {
+    ...(remaining === undefined ? {} : { effectiveRemaining: remaining }),
+    throttle: remaining === undefined ? 'unavailable' : watcherThrottleTier(remaining),
+  };
+}
+
 function observeBudget(
   observed: InternalObservedBudget | undefined,
   debt: ReadonlyArray<InternalDebtBucket>,
@@ -332,19 +412,6 @@ function observeFallback(
   };
 }
 
-function deferredUntil(
-  graphql: GitHubRateLimitBudget,
-  rest: GitHubRateLimitBudget,
-  graphqlRequired: number,
-  restRequired: number,
-): string | undefined {
-  const resets = [
-    ...(graphql.remaining <= graphqlRequired ? [graphql.resetAt] : []),
-    ...(rest.remaining <= restRequired ? [rest.resetAt] : []),
-  ];
-  return resets.sort().at(-1);
-}
-
 function validEstimatedCost(value: number): number {
   return Number.isSafeInteger(value) && value >= 0 ? value : GITHUB_CLI_GRAPHQL_ESTIMATED_COST;
 }
@@ -409,7 +476,11 @@ export function makeGitHubHostedMetadataAdapter(
     debt: { graphql: [], rest: [] },
     fallback: 'not_requested',
     nextReservation: 1,
-    watcherPolling: { status: 'ready' },
+    watcherPolling: {
+      reason: 'rate_metadata_unavailable',
+      status: 'deferred',
+      tier: 'unavailable',
+    },
   });
   const fixedRouteSemaphore = Semaphore.makeUnsafe(1);
   const refreshSemaphore = Semaphore.makeUnsafe(1);
@@ -558,7 +629,27 @@ export function makeGitHubHostedMetadataAdapter(
 
   const reserveWatcherPoll: GitHubHostedMetadataShape['reserveWatcherPoll'] = Effect.fnUntraced(
     function* (cwd, pullRequestCount) {
-      if (pullRequestCount === 0) return { status: 'ready' } as const;
+      const beforeRefresh = yield* nowMillis;
+      const deferred = yield* Ref.modify(state, (value) => {
+        const debt = pruneLedger(value.debt, beforeRefresh);
+        const remaining = effectiveRemaining(value, debt);
+        if (
+          value.nextWatcherAdmissionAtMillis === undefined ||
+          value.nextWatcherAdmissionAtMillis <= beforeRefresh ||
+          remaining === undefined
+        )
+          return [undefined, { ...value, debt }] as const;
+        const tier = watcherThrottleTier(remaining);
+        const watcherPolling = proactiveWatcherThrottle(
+          tier === 'normal'
+            ? 'moderate'
+            : (tier as Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>),
+          remaining,
+          value.nextWatcherAdmissionAtMillis,
+        );
+        return [watcherPolling, { ...value, debt, watcherPolling }] as const;
+      });
+      if (deferred !== undefined) return deferred;
       yield* Effect.result(refreshFallback(cwd));
       const now = yield* nowMillis;
       const count =
@@ -574,35 +665,58 @@ export function makeGitHubHostedMetadataAdapter(
             const watcherPolling = {
               reason: 'rate_metadata_unavailable',
               status: 'deferred',
+              tier: 'unavailable',
             } as const;
             return [watcherPolling, { ...pruned, watcherPolling }];
           }
           const graphql = effectiveBudget(pruned.graphql, debt.graphql);
           const rest = effectiveBudget(pruned.rest, debt.rest);
-          if (graphql === undefined || rest === undefined) {
+          const remaining = effectiveRemaining(pruned, debt);
+          if (graphql === undefined || rest === undefined || remaining === undefined) {
             const watcherPolling = {
               reason: 'rate_metadata_unavailable',
               status: 'deferred',
+              tier: 'unavailable',
             } as const;
             return [watcherPolling, { ...pruned, watcherPolling }];
           }
-          const graphqlRequired = GITHUB_WATCHER_RATE_LIMIT_RESERVE + graphqlCost;
-          const restRequired = GITHUB_WATCHER_RATE_LIMIT_RESERVE + restCost;
-          if (graphql.remaining <= graphqlRequired || rest.remaining <= restRequired) {
-            const until = deferredUntil(graphql, rest, graphqlRequired, restRequired);
-            const watcherPolling = {
-              reason: 'near_exhaustion',
-              status: 'deferred',
-              ...(until === undefined ? {} : { until }),
-            } as const;
-            return [watcherPolling, { ...pruned, watcherPolling }];
+          const tier = watcherThrottleTier(remaining);
+          const interval = watcherIntervalMillis(tier);
+          const nextAdmission = pruned.nextWatcherAdmissionAtMillis;
+          const insufficient = graphql.remaining <= graphqlCost || rest.remaining <= restCost;
+          const newlyPaused = tier === 'paused' && pruned.watcherPolling.tier !== 'paused';
+          if (
+            interval > 0 &&
+            (newlyPaused || insufficient || (nextAdmission !== undefined && nextAdmission > now))
+          ) {
+            const untilMillis = insufficient
+              ? Math.max(now + interval, Date.parse(graphql.resetAt), Date.parse(rest.resetAt))
+              : nextAdmission !== undefined && nextAdmission > now
+                ? nextAdmission
+                : now + interval;
+            const watcherPolling = proactiveWatcherThrottle(
+              tier as Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>,
+              remaining,
+              untilMillis,
+            );
+            return [
+              watcherPolling,
+              { ...pruned, nextWatcherAdmissionAtMillis: untilMillis, watcherPolling },
+            ];
           }
           const graphqlReservationId = `graphql-${pruned.nextReservation}`;
-          const watcherPolling = { graphqlReservationId, status: 'ready' } as const;
+          const watcherPolling = {
+            effectiveRemaining: remaining,
+            graphqlReservationId,
+            status: 'ready',
+            tier,
+          } as const;
+          const { nextWatcherAdmissionAtMillis: _nextWatcherAdmissionAtMillis, ...withoutNext } =
+            pruned;
           return [
             watcherPolling,
             {
-              ...pruned,
+              ...withoutNext,
               debt: {
                 ...debt,
                 graphql: addDebt(
@@ -613,6 +727,7 @@ export function makeGitHubHostedMetadataAdapter(
                 ),
               },
               nextReservation: pruned.nextReservation + 1,
+              ...(interval === 0 ? {} : { nextWatcherAdmissionAtMillis: now + interval }),
               watcherPolling,
             },
           ];
@@ -620,6 +735,9 @@ export function makeGitHubHostedMetadataAdapter(
       );
     },
   );
+
+  const compactStatusUnsafe: GitHubHostedMetadataShape['compactStatusUnsafe'] = () =>
+    compactStatus(Ref.getUnsafe(state), Date.now());
 
   const snapshot: GitHubHostedMetadataShape['snapshot'] = () =>
     Effect.flatMap(nowMillis, (now) =>
@@ -642,6 +760,7 @@ export function makeGitHubHostedMetadataAdapter(
 
   return {
     cancelGraphQLReservation,
+    compactStatusUnsafe,
     decodeGraphQL,
     ensureFixedGitHubComRepository,
     ensureFixedGitHubComUrl,

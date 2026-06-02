@@ -15,6 +15,7 @@ import {
   GITHUB_HOSTED_METADATA_HOSTNAME,
   type GitHubHostedMetadataShape,
   type GitHubWatcherRateLimitStatus,
+  type GitHubWatcherThrottleTier,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -113,7 +114,8 @@ export interface PullRequestWatcherHeadDivergence {
 
 /** Content-free adjacent diagnostic: unavailable metadata warns once durably; near-exhaustion stays quiet. */
 export interface GitHubWatcherThrottleDiagnostic {
-  readonly status: 'rate_metadata_unavailable' | 'rate_metadata_recovered';
+  readonly status: 'rate_metadata_unavailable' | 'rate_metadata_recovered' | 'proactive_throttle';
+  readonly tier?: GitHubWatcherThrottleTier;
 }
 
 export interface GitHubWatcherCallbacks {
@@ -325,22 +327,25 @@ export function makeGitHubWatcherService(
   const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
   let active: ActiveWatcher | undefined;
-  let rateMetadataStatus: GitHubWatcherThrottleDiagnostic['status'] | undefined;
+  let rateMetadataStatus: string | undefined;
   const pollSemaphore = Semaphore.makeUnsafe(1);
 
   const notifyThrottleDiagnostic = (
     callbacks: GitHubWatcherCallbacks,
     reservation: GitHubWatcherRateLimitStatus,
   ) => {
-    const status =
-      reservation.status === 'deferred' && reservation.reason === 'rate_metadata_unavailable'
-        ? ('rate_metadata_unavailable' as const)
-        : ('rate_metadata_recovered' as const);
-    if (rateMetadataStatus === status) return Effect.void;
-    return callbacks.onThrottleDiagnostic({ status }).pipe(
+    const diagnostic: GitHubWatcherThrottleDiagnostic =
+      reservation.status === 'deferred'
+        ? reservation.reason === 'rate_metadata_unavailable'
+          ? { status: 'rate_metadata_unavailable', tier: reservation.tier }
+          : { status: 'proactive_throttle', tier: reservation.tier }
+        : { status: 'rate_metadata_recovered', tier: reservation.tier };
+    const key = `${diagnostic.status}:${diagnostic.tier ?? 'unknown'}`;
+    if (rateMetadataStatus === key) return Effect.void;
+    return callbacks.onThrottleDiagnostic(diagnostic).pipe(
       Effect.tap(() =>
         Effect.sync(() => {
-          rateMetadataStatus = status;
+          rateMetadataStatus = key;
         }),
       ),
     );

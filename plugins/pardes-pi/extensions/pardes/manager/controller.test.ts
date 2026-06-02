@@ -470,13 +470,20 @@ function manualGithubWatcher() {
             observation,
           })
         : Effect.die('GitHub watcher fixture is not active'),
+    proactiveThrottle: () =>
+      callbacks
+        ? callbacks.onThrottleDiagnostic({ status: 'proactive_throttle', tier: 'paused' })
+        : Effect.die('GitHub watcher fixture is not active'),
     rateMetadataRecovered: () =>
       callbacks
-        ? callbacks.onThrottleDiagnostic({ status: 'rate_metadata_recovered' })
+        ? callbacks.onThrottleDiagnostic({ status: 'rate_metadata_recovered', tier: 'normal' })
         : Effect.die('GitHub watcher fixture is not active'),
     rateMetadataUnavailable: () =>
       callbacks
-        ? callbacks.onThrottleDiagnostic({ status: 'rate_metadata_unavailable' })
+        ? callbacks.onThrottleDiagnostic({
+            status: 'rate_metadata_unavailable',
+            tier: 'unavailable',
+          })
         : Effect.die('GitHub watcher fixture is not active'),
     reconciliations: () => reconciliations,
     starts: () => starts,
@@ -6240,6 +6247,9 @@ describe('manager controller', () => {
     const controller = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
     await Effect.runPromise(controller.activate(fixture.ctx));
 
+    await Effect.runPromise(watcher.proactiveThrottle());
+    expect(controller.snapshot()).not.toHaveProperty('githubRateMetadataUnavailableAt');
+    expect(controller.snapshot()?.inbox).toEqual([]);
     await Effect.runPromise(watcher.rateMetadataUnavailable());
     await Effect.runPromise(watcher.rateMetadataUnavailable());
     expect(controller.snapshot()?.githubRateMetadataUnavailableAt).toBeDefined();
@@ -6260,7 +6270,7 @@ describe('manager controller', () => {
     );
     expect(JSON.stringify(fixture.messages[0]?.message).length).toBeLessThan(1_200);
 
-    await Effect.runPromise(watcher.rateMetadataRecovered());
+    await Effect.runPromise(watcher.proactiveThrottle());
     expect(controller.snapshot()?.githubRateMetadataUnavailableAt).toBeUndefined();
     await Effect.runPromise(watcher.rateMetadataUnavailable());
     expect(

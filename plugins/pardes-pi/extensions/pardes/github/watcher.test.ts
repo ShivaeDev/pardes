@@ -620,14 +620,16 @@ describe('GitHub watcher service', () => {
 
     await Effect.runPromise(service.poll(received.callbacks));
     await Effect.runPromise(service.poll(received.callbacks));
-    expect(received.throttleDiagnostics).toEqual([{ status: 'rate_metadata_unavailable' }]);
+    expect(received.throttleDiagnostics).toEqual([
+      { status: 'rate_metadata_unavailable', tier: 'unavailable' },
+    ]);
     expect(received.failures).toEqual([]);
     expect(received.observations).toEqual([]);
 
     await Effect.runPromise(service.poll(received.callbacks));
     expect(received.throttleDiagnostics).toEqual([
-      { status: 'rate_metadata_unavailable' },
-      { status: 'rate_metadata_recovered' },
+      { status: 'rate_metadata_unavailable', tier: 'unavailable' },
+      { status: 'rate_metadata_recovered', tier: 'normal' },
     ]);
     expect(received.observations).toHaveLength(2);
   });
@@ -641,6 +643,9 @@ describe('GitHub watcher service', () => {
 
     expect(received.observations).toEqual([]);
     expect(received.failures).toEqual([]);
+    expect(received.throttleDiagnostics).toEqual([
+      { status: 'proactive_throttle', tier: 'paused' },
+    ]);
     expect(fixture.invocations).toEqual([
       {
         args: ['api', 'rate_limit', '--hostname', 'github.com'],
@@ -680,6 +685,10 @@ describe('GitHub watcher service', () => {
     expect(received.observations.map(({ pullRequestId }) => pullRequestId)).toEqual([
       'pr-42',
       'pr-42',
+    ]);
+    expect(received.throttleDiagnostics).toEqual([
+      { status: 'rate_metadata_recovered', tier: 'normal' },
+      { status: 'proactive_throttle', tier: 'paused' },
     ]);
     expect(fixture.invocations).toHaveLength(4);
     expect(fixture.invocations[0]?.args).toEqual(['api', 'rate_limit', '--hostname', 'github.com']);

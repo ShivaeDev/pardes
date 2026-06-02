@@ -222,7 +222,11 @@ describe('GitHub integration-health inspection', () => {
         },
         observation: 'bounded_hosted_rate_budget',
         rest: { availability: 'unavailable' },
-        watcherPolling: { status: 'ready' },
+        watcherPolling: {
+          reason: 'rate_metadata_unavailable',
+          status: 'deferred',
+          tier: 'unavailable',
+        },
       },
     });
     expect(fixture.invocations.map(({ command }) => command)).toEqual(['gh', 'gh', 'gh', 'gh']);

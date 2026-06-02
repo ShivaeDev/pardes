@@ -328,13 +328,19 @@ export function makeGitHubWatcherService(
   const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
   let active: ActiveWatcher | undefined;
+  let rateMetadataCallbacks: GitHubWatcherCallbacks | undefined;
   let rateMetadataStatus: string | undefined;
+  let nextAssociationOffset = 0;
   const pollSemaphore = Semaphore.makeUnsafe(1);
 
   const notifyThrottleDiagnostic = (
     callbacks: GitHubWatcherCallbacks,
     reservation: GitHubWatcherRateLimitStatus,
   ) => {
+    if (rateMetadataCallbacks !== callbacks) {
+      rateMetadataCallbacks = callbacks;
+      rateMetadataStatus = undefined;
+    }
     const diagnostic: GitHubWatcherThrottleDiagnostic =
       reservation.status === 'deferred'
         ? reservation.reason === 'rate_metadata_unavailable'
@@ -503,10 +509,14 @@ export function makeGitHubWatcherService(
   } as const;
 
   const pollUnlocked = (callbacks: GitHubWatcherCallbacks) =>
-    Effect.suspend(() =>
-      Effect.forEach(
-        callbacks.persistedAssociations(),
-        (pullRequest) => {
+    Effect.suspend(() => {
+      const associations = callbacks.persistedAssociations();
+      const offset = associations.length === 0 ? 0 : nextAssociationOffset % associations.length;
+      const indexed = associations.map((pullRequest, index) => [index, pullRequest] as const);
+      const ordered = [...indexed.slice(offset), ...indexed.slice(0, offset)];
+      return Effect.forEach(
+        ordered,
+        ([associationIndex, pullRequest]) => {
           const cwd = callbacks.cwd();
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
           const failure = (error: GitHubWatcherError) =>
@@ -525,6 +535,16 @@ export function makeGitHubWatcherService(
                     onFailure: operationalFailure,
                     onSuccess: (route) =>
                       hostedMetadata.reserveWatcherPoll(cwd, 1, route).pipe(
+                        Effect.tap((reservation) =>
+                          reservation.status === 'ready'
+                            ? Effect.sync(() => {
+                                nextAssociationOffset =
+                                  associations.length === 0
+                                    ? 0
+                                    : (associationIndex + 1) % associations.length;
+                              })
+                            : Effect.void,
+                        ),
                         Effect.matchEffect({
                           onFailure: operationalFailure,
                           onSuccess: (reservation) =>
@@ -597,7 +617,7 @@ export function makeGitHubWatcherService(
                               Effect.ensuring(
                                 reservation.status === 'ready' &&
                                   reservation.graphqlReservationId !== undefined
-                                  ? hostedMetadata.cancelUnlaunchedGraphQLReservation(
+                                  ? hostedMetadata.finalizeGraphQLRequest(
                                       reservation.graphqlReservationId,
                                     )
                                   : Effect.void,
@@ -611,8 +631,8 @@ export function makeGitHubWatcherService(
           );
         },
         { discard: true },
-      ),
-    );
+      );
+    });
 
   const poll: GitHubWatcherShape['poll'] = (callbacks) =>
     pollSemaphore.withPermit(pollUnlocked(callbacks));
@@ -620,6 +640,8 @@ export function makeGitHubWatcherService(
   const stop: GitHubWatcherShape['stop'] = Effect.fnUntraced(function* () {
     const current = active;
     active = undefined;
+    rateMetadataCallbacks = undefined;
+    rateMetadataStatus = undefined;
     if (current) yield* Scope.close(current.scope, Exit.void);
   });
 

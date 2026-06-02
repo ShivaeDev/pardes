@@ -106,7 +106,9 @@ export interface GitHubHostedMetadataShape {
   readonly launchGraphQLRequest: (reservationId: string) => Effect.Effect<void>;
   /** Cleanup only known-unlaunched work. Launched-but-unobserved debt remains conservative. */
   readonly cancelUnlaunchedGraphQLReservation: (reservationId: string) => Effect.Effect<void>;
-  /** Reserve, launch, and causally settle one opaque CLI or REST request only after success. */
+  /** Finalize a GraphQL handoff: cancel unlaunched work or retain completed-unobserved debt. */
+  readonly finalizeGraphQLRequest: (reservationId: string) => Effect.Effect<void>;
+  /** Reserve, launch, and retain conservative opaque CLI or REST debt until later observation. */
   readonly accountOpaqueRequest: <A, E, R>(
     resource: GitHubRateLimitResource,
     request: Effect.Effect<A, E, R>,
@@ -117,8 +119,17 @@ export interface GitHubHostedMetadataShape {
     cwd: string,
     urls?: ReadonlyArray<string>,
   ) => Effect.Effect<GitHubRepositoryIdentity, GitHubCommandError | GitHubResponseError>;
+  /** Once bound, enforce the fixed repository across manager lifecycle activation boundaries. */
+  readonly ensureControllerScope: (
+    cwd: string,
+  ) => Effect.Effect<void, GitHubCommandError | GitHubResponseError>;
   /** Refresh bounded REST and GraphQL budgets from GitHub's metadata-only fallback endpoint. */
   readonly refreshFallback: (
+    cwd: string,
+    route?: GitHubRepositoryIdentity,
+  ) => Effect.Effect<void, GitHubCommandError | GitHubResponseError>;
+  /** Force one bounded authoritative fallback reconciliation after the reservation cap is reached. */
+  readonly recoverRequestCapacity: (
     cwd: string,
     route?: GitHubRepositoryIdentity,
   ) => Effect.Effect<void, GitHubCommandError | GitHubResponseError>;
@@ -134,7 +145,7 @@ export interface GitHubHostedMetadataShape {
 }
 
 type InternalObservedBudgetSource = Exclude<GitHubRateLimitBudgetSource, 'local_estimate'>;
-type InternalReservationPhase = 'reserved' | 'launched';
+type InternalReservationPhase = 'reserved' | 'launched' | 'completed_unobserved';
 
 interface InternalObservedBudget {
   readonly limit: number;
@@ -147,9 +158,13 @@ interface InternalDebtBucket {
   readonly amount: number;
   /** Undefined only until one decoded observation can bind debt to a reset window. */
   readonly resetAt?: string;
+  /** Monotonic local launch ordering permits only causally later observations to reconcile debt. */
+  readonly sequence?: number;
   /** Identity-bearing requests remain distinct until causal settlement or conservative reset pruning. */
   readonly reservationId?: string;
   readonly phase?: InternalReservationPhase;
+  /** A GraphQL response may reconcile only completed local debt present when its request launched. */
+  readonly causalBoundarySequence?: number;
 }
 
 interface InternalDebtLedger {
@@ -227,7 +242,9 @@ function identityDebtCount(debt: InternalDebtLedger): number {
 /** Collapse anonymous estimates while retaining bounded identity-bearing in-flight requests. */
 function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<InternalDebtBucket> {
   let unknownAmount = 0;
+  let unknownSequence: number | undefined;
   let knownAmount = 0;
+  let knownSequence: number | undefined;
   let latestResetAt: string | undefined;
   const reservations: InternalDebtBucket[] = [];
   for (const bucket of debt) {
@@ -237,17 +254,40 @@ function compactDebt(debt: ReadonlyArray<InternalDebtBucket>): ReadonlyArray<Int
     }
     if (bucket.resetAt === undefined) {
       unknownAmount = saturatedAdd(unknownAmount, bucket.amount);
+      unknownSequence = maximumSequence(unknownSequence, bucket.sequence);
       continue;
     }
     knownAmount = saturatedAdd(knownAmount, bucket.amount);
+    knownSequence = maximumSequence(knownSequence, bucket.sequence);
     if (latestResetAt === undefined || Date.parse(bucket.resetAt) > Date.parse(latestResetAt))
       latestResetAt = bucket.resetAt;
   }
   return [
     ...reservations,
-    ...(unknownAmount === 0 ? [] : [{ amount: unknownAmount }]),
-    ...(latestResetAt === undefined ? [] : [{ amount: knownAmount, resetAt: latestResetAt }]),
+    ...(unknownAmount === 0
+      ? []
+      : [
+          {
+            amount: unknownAmount,
+            ...(unknownSequence === undefined ? {} : { sequence: unknownSequence }),
+          },
+        ]),
+    ...(latestResetAt === undefined
+      ? []
+      : [
+          {
+            amount: knownAmount,
+            resetAt: latestResetAt,
+            ...(knownSequence === undefined ? {} : { sequence: knownSequence }),
+          },
+        ]),
   ];
+}
+
+function maximumSequence(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
 }
 
 function pruneDebt(
@@ -287,7 +327,11 @@ function addDebt(
   debt: ReadonlyArray<InternalDebtBucket>,
   amount: number,
   resetAt?: string,
-  reservation?: { readonly id: string; readonly phase: InternalReservationPhase },
+  reservation?: {
+    readonly id: string;
+    readonly phase: InternalReservationPhase;
+    readonly sequence: number;
+  },
 ): ReadonlyArray<InternalDebtBucket> {
   return compactDebt([
     ...debt,
@@ -296,7 +340,11 @@ function addDebt(
       ...(resetAt === undefined ? {} : { resetAt }),
       ...(reservation === undefined
         ? {}
-        : { phase: reservation.phase, reservationId: reservation.id }),
+        : {
+            phase: reservation.phase,
+            reservationId: reservation.id,
+            sequence: reservation.sequence,
+          }),
     },
   ]);
 }
@@ -315,6 +363,31 @@ function updateReservation(
       }),
     );
   return { graphql: map(debt.graphql), rest: map(debt.rest) };
+}
+
+function reconcileObservedDebt(
+  debt: ReadonlyArray<InternalDebtBucket>,
+  causalBoundarySequence: number | undefined,
+): ReadonlyArray<InternalDebtBucket> {
+  if (causalBoundarySequence === undefined) return debt;
+  return compactDebt(
+    debt.filter(
+      (bucket) =>
+        bucket.sequence === undefined ||
+        bucket.sequence > causalBoundarySequence ||
+        bucket.phase === 'reserved' ||
+        bucket.phase === 'launched',
+    ),
+  );
+}
+
+function reservationCausalBoundary(
+  debt: InternalDebtLedger,
+  reservationId: string | undefined,
+): number | undefined {
+  if (reservationId === undefined) return undefined;
+  return [...debt.graphql, ...debt.rest].find((bucket) => bucket.reservationId === reservationId)
+    ?.causalBoundarySequence;
 }
 
 function effectiveBudget(
@@ -343,7 +416,9 @@ function effectiveRemaining(state: HostedMetadataState, debt = state.debt): numb
 function compactStatus(
   state: HostedMetadataState,
   nowMillis: number,
+  fallbackMaxAgeMillis: number,
 ): GitHubRateLimitCompactStatus {
+  if (!fallbackUsable(state, nowMillis, fallbackMaxAgeMillis)) return { throttle: 'unavailable' };
   const remaining = effectiveRemaining(state, pruneLedger(state.debt, nowMillis));
   return {
     ...(remaining === undefined ? {} : { effectiveRemaining: remaining }),
@@ -403,6 +478,7 @@ function observeGraphql(
   reservationId?: string,
 ): HostedMetadataState {
   const debt = pruneLedger(state.debt, nowMillis);
+  const causalBoundarySequence = reservationCausalBoundary(debt, reservationId);
   const settled =
     reservationId === undefined ? debt : updateReservation(debt, reservationId, () => undefined);
   const graphql = mergeObservedBudget(state.graphql, incoming);
@@ -410,7 +486,11 @@ function observeGraphql(
     ...state,
     debt: {
       ...settled,
-      graphql: bindUnknownDebt(settled.graphql, graphql.resetAt, nowMillis),
+      graphql: bindUnknownDebt(
+        reconcileObservedDebt(settled.graphql, causalBoundarySequence),
+        graphql.resetAt,
+        nowMillis,
+      ),
     },
     graphql,
   };
@@ -421,6 +501,7 @@ function observeFallback(
   graphqlIncoming: InternalObservedBudget,
   restIncoming: InternalObservedBudget,
   nowMillis: number,
+  causalBoundarySequence: number,
 ): HostedMetadataState {
   const debt = pruneLedger(state.debt, nowMillis);
   const graphql = mergeObservedBudget(state.graphql, graphqlIncoming);
@@ -428,8 +509,16 @@ function observeFallback(
   return {
     ...state,
     debt: {
-      graphql: bindUnknownDebt(debt.graphql, graphql.resetAt, nowMillis),
-      rest: bindUnknownDebt(debt.rest, rest.resetAt, nowMillis),
+      graphql: bindUnknownDebt(
+        reconcileObservedDebt(debt.graphql, causalBoundarySequence),
+        graphql.resetAt,
+        nowMillis,
+      ),
+      rest: bindUnknownDebt(
+        reconcileObservedDebt(debt.rest, causalBoundarySequence),
+        rest.resetAt,
+        nowMillis,
+      ),
     },
     fallback: 'available',
     fallbackObservedAtMillis: nowMillis,
@@ -478,7 +567,14 @@ function repositoryParts(
 ): GitHubRepositoryIdentity | undefined {
   const repo = repoWithSuffix.endsWith('.git') ? repoWithSuffix.slice(0, -4) : repoWithSuffix;
   const safe = /^[a-zA-Z0-9_.-]+$/;
-  return safe.test(owner) && safe.test(repo) && owner.length > 0 && repo.length > 0
+  return safe.test(owner) &&
+    safe.test(repo) &&
+    owner.length > 0 &&
+    repo.length > 0 &&
+    owner !== '.' &&
+    owner !== '..' &&
+    repo !== '.' &&
+    repo !== '..'
     ? { owner, repo, slug: `${owner}/${repo}` }
     : undefined;
 }
@@ -540,6 +636,7 @@ export function makeGitHubHostedMetadataAdapter(
     readonly fallbackMaxAgeMillis?: number;
     readonly nowMillis?: Effect.Effect<number>;
     readonly runner?: GitHubCommandRunnerShape;
+    readonly unsafeNowMillis?: () => number;
   } = {},
 ): GitHubHostedMetadataShape {
   const runner = options.runner ?? makeExecFileGitHubCommandRunner();
@@ -549,6 +646,7 @@ export function makeGitHubHostedMetadataAdapter(
   if (!Number.isSafeInteger(fallbackMaxAgeMillis) || fallbackMaxAgeMillis < 0)
     throw new RangeError('fallbackMaxAgeMillis must be a non-negative safe integer.');
   const nowMillis = options.nowMillis ?? Clock.currentTimeMillis;
+  const unsafeNowMillis = options.unsafeNowMillis ?? Date.now;
   const state = Ref.makeUnsafe<HostedMetadataState>({
     debt: { graphql: [], rest: [] },
     fallback: 'not_requested',
@@ -584,7 +682,16 @@ export function makeGitHubHostedMetadataAdapter(
       ),
     );
 
-  const refreshFallback: GitHubHostedMetadataShape['refreshFallback'] = (cwd, route) =>
+  const ensureControllerScope: GitHubHostedMetadataShape['ensureControllerScope'] = (cwd) =>
+    Effect.suspend(() =>
+      canonicalIdentity === undefined ? Effect.void : fixedRoute(cwd).pipe(Effect.asVoid),
+    );
+
+  const refreshFallbackInternal = (
+    cwd: string,
+    route: GitHubRepositoryIdentity | undefined,
+    force: boolean,
+  ) =>
     refreshSemaphore.withPermit(
       Effect.gen(function* () {
         yield* route === undefined ? fixedRoute(cwd) : Effect.succeed(route);
@@ -594,12 +701,14 @@ export function makeGitHubHostedMetadataAdapter(
           (current.graphql !== undefined && Date.parse(current.graphql.resetAt) <= now) ||
           (current.rest !== undefined && Date.parse(current.rest.resetAt) <= now);
         if (
+          !force &&
           current.fallback === 'available' &&
           current.fallbackObservedAtMillis !== undefined &&
           now - current.fallbackObservedAtMillis < fallbackMaxAgeMillis &&
           !resetReached
         )
           return;
+        const causalBoundarySequence = current.nextReservation - 1;
         const response = yield* cli
           .run(cwd, ['api', 'rate_limit', '--hostname', GITHUB_HOSTED_METADATA_HOSTNAME])
           .pipe(Effect.tapError(() => Ref.update(state, metadataUnavailable)));
@@ -614,10 +723,19 @@ export function makeGitHubHostedMetadataAdapter(
             restFallbackBudget(decoded.resources.graphql),
             restFallbackBudget(decoded.resources.core),
             now,
+            causalBoundarySequence,
           ),
         );
       }),
     );
+
+  const refreshFallback: GitHubHostedMetadataShape['refreshFallback'] = (cwd, route) =>
+    refreshFallbackInternal(cwd, route, false);
+
+  const recoverRequestCapacity: GitHubHostedMetadataShape['recoverRequestCapacity'] = (
+    cwd,
+    route,
+  ) => refreshFallbackInternal(cwd, route, true);
 
   const reserveIdentityRequest = (
     resource: GitHubRateLimitResource,
@@ -639,7 +757,7 @@ export function makeGitHubHostedMetadataAdapter(
                 debt[resource],
                 validEstimatedCost(estimatedCost),
                 debtResetAt(value[resource], now),
-                { id, phase: 'reserved' },
+                { id, phase: 'reserved', sequence: value.nextReservation },
               ),
             },
             nextReservation: value.nextReservation + 1,
@@ -659,14 +777,28 @@ export function makeGitHubHostedMetadataAdapter(
       ...value,
       debt: updateReservation(value.debt, reservationId, (bucket) => ({
         ...bucket,
+        causalBoundarySequence: value.nextReservation - 1,
         phase: 'launched',
       })),
     }));
 
-  const settleRequest = (reservationId: string) =>
+  const completeUnobservedRequest = (reservationId: string) =>
     Ref.update(state, (value) => ({
       ...value,
-      debt: updateReservation(value.debt, reservationId, () => undefined),
+      debt: updateReservation(value.debt, reservationId, (bucket) => ({
+        ...bucket,
+        phase: bucket.phase === 'reserved' ? 'reserved' : 'completed_unobserved',
+      })),
+    }));
+
+  const retainCompletedOpaqueDebt = (reservationId: string) =>
+    Ref.update(state, (value) => ({
+      ...value,
+      debt: updateReservation(value.debt, reservationId, (bucket) => ({
+        amount: bucket.amount,
+        ...(bucket.resetAt === undefined ? {} : { resetAt: bucket.resetAt }),
+        ...(bucket.sequence === undefined ? {} : { sequence: bucket.sequence }),
+      })),
     }));
 
   const cancelUnlaunchedGraphQLReservation: GitHubHostedMetadataShape['cancelUnlaunchedGraphQLReservation'] =
@@ -677,6 +809,16 @@ export function makeGitHubHostedMetadataAdapter(
           bucket.phase === 'reserved' ? undefined : bucket,
         ),
       }));
+
+  const finalizeGraphQLRequest: GitHubHostedMetadataShape['finalizeGraphQLRequest'] = (
+    reservationId,
+  ) =>
+    Ref.update(state, (value) => ({
+      ...value,
+      debt: updateReservation(value.debt, reservationId, (bucket) =>
+        bucket.phase === 'reserved' ? undefined : { ...bucket, phase: 'completed_unobserved' },
+      ),
+    }));
 
   const reserveGraphQLRequest: GitHubHostedMetadataShape['reserveGraphQLRequest'] = (
     estimatedCost = GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
@@ -695,8 +837,10 @@ export function makeGitHubHostedMetadataAdapter(
       Effect.gen(function* () {
         const reservation = yield* reserveIdentityRequest(resource, estimatedCost);
         yield* launchRequest(reservation.id);
-        const value = yield* restore(request);
-        yield* settleRequest(reservation.id);
+        const value = yield* restore(request).pipe(
+          Effect.ensuring(completeUnobservedRequest(reservation.id)),
+        );
+        yield* retainCompletedOpaqueDebt(reservation.id);
         return value;
       }),
     );
@@ -727,14 +871,14 @@ export function makeGitHubHostedMetadataAdapter(
         if (
           value.nextWatcherAdmissionAtMillis === undefined ||
           value.nextWatcherAdmissionAtMillis <= beforeRefresh ||
-          remaining === undefined
+          remaining === undefined ||
+          !fallbackUsable(value, beforeRefresh, fallbackMaxAgeMillis)
         )
           return [undefined, { ...value, debt }] as const;
         const tier = watcherThrottleTier(remaining);
+        if (tier === 'normal') return [undefined, { ...value, debt }] as const;
         const watcherPolling = proactiveWatcherThrottle(
-          tier === 'normal'
-            ? 'moderate'
-            : (tier as Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>),
+          tier,
           remaining,
           value.nextWatcherAdmissionAtMillis,
         );
@@ -745,8 +889,14 @@ export function makeGitHubHostedMetadataAdapter(
       const now = yield* nowMillis;
       const count =
         Number.isSafeInteger(pullRequestCount) && pullRequestCount > 0 ? pullRequestCount : 1;
-      const graphqlCost = count * GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST;
-      const restCost = count * GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST;
+      const graphqlCost = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        count * GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST,
+      );
+      const restCost = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        count * GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
+      );
       return yield* Ref.modify(
         state,
         (value): readonly [GitHubWatcherRateLimitStatus, HostedMetadataState] => {
@@ -774,22 +924,29 @@ export function makeGitHubHostedMetadataAdapter(
           const tier = watcherThrottleTier(remaining);
           const interval = watcherIntervalMillis(tier);
           const nextAdmission = pruned.nextWatcherAdmissionAtMillis;
-          const insufficient = graphql.remaining <= graphqlCost || rest.remaining <= restCost;
+          const insufficient =
+            graphql.remaining <= saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, graphqlCost) ||
+            rest.remaining <= saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, restCost);
           const newlyPaused = tier === 'paused' && pruned.watcherPolling.tier !== 'paused';
           if (
-            interval > 0 &&
-            (newlyPaused || insufficient || (nextAdmission !== undefined && nextAdmission > now))
+            insufficient ||
+            (interval > 0 && (newlyPaused || (nextAdmission !== undefined && nextAdmission > now)))
           ) {
+            const deferredTier =
+              tier === 'normal'
+                ? ('paused' as const)
+                : (tier as Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>);
+            const deferredInterval = watcherIntervalMillis(deferredTier);
             const untilMillis = insufficient
-              ? Math.max(now + interval, Date.parse(graphql.resetAt), Date.parse(rest.resetAt))
+              ? Math.max(
+                  now + deferredInterval,
+                  Date.parse(graphql.resetAt),
+                  Date.parse(rest.resetAt),
+                )
               : nextAdmission !== undefined && nextAdmission > now
                 ? nextAdmission
-                : now + interval;
-            const watcherPolling = proactiveWatcherThrottle(
-              tier as Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>,
-              remaining,
-              untilMillis,
-            );
+                : now + deferredInterval;
+            const watcherPolling = proactiveWatcherThrottle(deferredTier, remaining, untilMillis);
             return [
               watcherPolling,
               { ...pruned, nextWatcherAdmissionAtMillis: untilMillis, watcherPolling },
@@ -828,6 +985,7 @@ export function makeGitHubHostedMetadataAdapter(
                 graphql: addDebt(debt.graphql, graphqlCost, debtResetAt(pruned.graphql, now), {
                   id: graphqlReservationId,
                   phase: 'reserved',
+                  sequence: pruned.nextReservation,
                 }),
               },
               nextReservation: pruned.nextReservation + 1,
@@ -841,7 +999,7 @@ export function makeGitHubHostedMetadataAdapter(
   );
 
   const compactStatusUnsafe: GitHubHostedMetadataShape['compactStatusUnsafe'] = () =>
-    compactStatus(Ref.getUnsafe(state), Date.now());
+    compactStatus(Ref.getUnsafe(state), unsafeNowMillis(), fallbackMaxAgeMillis);
 
   const snapshot: GitHubHostedMetadataShape['snapshot'] = () =>
     Effect.flatMap(nowMillis, (now) =>
@@ -867,8 +1025,11 @@ export function makeGitHubHostedMetadataAdapter(
     cancelUnlaunchedGraphQLReservation,
     compactStatusUnsafe,
     decodeGraphQL,
+    ensureControllerScope,
+    finalizeGraphQLRequest,
     fixedRoute,
     launchGraphQLRequest,
+    recoverRequestCapacity,
     refreshFallback,
     reserveGraphQLRequest,
     reserveWatcherPoll,

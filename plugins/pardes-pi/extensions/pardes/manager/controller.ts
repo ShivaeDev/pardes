@@ -940,6 +940,15 @@ export class ManagerController {
       return yield* new ManagerAlreadyActiveError({ managerId: this.active.state.managerId });
     this.clearCompactionSafety();
     const repo = yield* discoverRepository(ctx.cwd);
+    yield* this.githubHostedMetadata
+      .ensureControllerScope(repo.primaryCheckout)
+      .pipe(
+        Effect.mapError(() =>
+          invalidManagedState(
+            'loaded controller is pinned to another GitHub.com repository context; reload the manager extension to create a fresh controller',
+          ),
+        ),
+      );
     const managerId = randomUUID();
     const directory = managerDirectory(repo, managerId);
     const state = initialManagerState(managerId, repo);
@@ -1094,6 +1103,15 @@ export class ManagerController {
       return yield* invalidManagedState('manager activation namespace is invalid');
     }
     const repo = yield* discoverRepository(ctx.cwd);
+    yield* this.githubHostedMetadata
+      .ensureControllerScope(repo.primaryCheckout)
+      .pipe(
+        Effect.mapError(() =>
+          invalidManagedState(
+            'loaded controller is pinned to another GitHub.com repository context; reload the manager extension to create a fresh controller',
+          ),
+        ),
+      );
     if (activation.stateDir !== managerDirectory(repo, activation.managerId)) {
       return yield* invalidManagedState(
         'manager state directory does not match its activation namespace',

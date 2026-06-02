@@ -459,13 +459,15 @@ describe('GitHub integration-health inspection', () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
   });
 
-  test('bounds repeated failed health GraphQL launches and then fails closed before another request', async () => {
+  test('bounds repeated failed health GraphQL launches when forced fallback recovery also fails', async () => {
+    let fallbackRequests = 0;
     let graphqlRequests = 0;
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
         if (invocation.command === 'git')
           return Effect.succeed(result('git@github.com:acme/project.git\n'));
-        graphqlRequests += 1;
+        if (invocation.args[1] === 'graphql') graphqlRequests += 1;
+        else fallbackRequests += 1;
         return Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }));
       },
     };
@@ -479,6 +481,35 @@ describe('GitHub integration-health inspection', () => {
     }
 
     expect(graphqlRequests).toBe(MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS);
+    expect(fallbackRequests).toBe(3);
+  });
+
+  test('recovers failed health GraphQL capacity through a bounded authoritative fallback retry', async () => {
+    let fallbackRequests = 0;
+    let graphqlRequests = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        if (invocation.args[1] === 'rate_limit') {
+          fallbackRequests += 1;
+          return Effect.succeed(rateLimitFallbackResult());
+        }
+        graphqlRequests += 1;
+        return Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }));
+      },
+    };
+    const service = makeGitHubIntegrationHealthService({ runner });
+
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS + 1; index += 1) {
+      const inspection = await Effect.runPromise(
+        service.inspect({ cwd: '/tmp/project', pullRequests: [] }),
+      );
+      expect(inspection.defaultBranch).toMatchObject({ availability: 'unavailable' });
+    }
+
+    expect(graphqlRequests).toBe(MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS + 1);
+    expect(fallbackRequests).toBe(1);
   });
 
   test('continues bounded PR observation when default-branch metadata is unavailable', async () => {

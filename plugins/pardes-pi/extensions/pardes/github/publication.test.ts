@@ -135,7 +135,7 @@ describe('GitHub publication boundary', () => {
     });
   });
 
-  test('causally settles completed CLI-only hosted requests without changing exact-SHA publication', async () => {
+  test('retains completed CLI-only hosted spend conservatively without changing exact-SHA publication', async () => {
     const fallback = scriptedRunner([
       result(
         JSON.stringify({
@@ -162,7 +162,7 @@ describe('GitHub publication boundary', () => {
     await Effect.runPromise(service.publish(input));
     const rateLimit = await Effect.runPromise(hostedMetadata.snapshot());
 
-    expect(rateLimit.graphql).toMatchObject({ remaining: 4_000, source: 'rest_fallback' });
+    expect(rateLimit.graphql).toMatchObject({ remaining: 3_985, source: 'local_estimate' });
     expect(rateLimit.rest).toMatchObject({ remaining: 3_000, source: 'rest_fallback' });
     expect(fixture.invocations[0]).toEqual({
       args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],

@@ -638,6 +638,29 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toHaveLength(2);
   });
 
+  test('re-emits unavailable metadata diagnostics when watcher callbacks are rebound', async () => {
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) =>
+        invocation.command === 'git'
+          ? Effect.succeed(result('git@github.com:acme/project.git\n'))
+          : Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' })),
+    };
+    const service = makeGitHubWatcherServiceProduction({ runner });
+    const first = callbacks([pullRequest()]);
+    const rebound = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(first.callbacks));
+    await Effect.runPromise(service.poll(first.callbacks));
+    await Effect.runPromise(service.poll(rebound.callbacks));
+
+    expect(first.throttleDiagnostics).toEqual([
+      { status: 'rate_metadata_unavailable', tier: 'unavailable' },
+    ]);
+    expect(rebound.throttleDiagnostics).toEqual([
+      { status: 'rate_metadata_unavailable', tier: 'unavailable' },
+    ]);
+  });
+
   test('defers watcher polling before watched PR requests when the bounded fallback reports near exhaustion', async () => {
     const fixture = scriptedRunner([rateLimitFallbackResult(100)]);
     const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
@@ -699,6 +722,64 @@ describe('GitHub watcher service', () => {
     expect(fixture.invocations.some(({ args }) => args.includes('43'))).toBe(false);
   });
 
+  test('rotates throttled admission fairly across review gates in every low-budget tier', async () => {
+    for (const { initialDelay, interval, remaining } of [
+      { initialDelay: 0, interval: 30_000, remaining: 1_500 },
+      { initialDelay: 0, interval: 60_000, remaining: 900 },
+      { initialDelay: 60_000, interval: 60_000, remaining: 400 },
+    ]) {
+      let now = 1_700_000_000_000;
+      const metadata = (number: number) =>
+        result(
+          JSON.stringify({
+            headRefOid: HEAD_SHA,
+            mergeable: 'MERGEABLE',
+            number,
+            reviewDecision: 'APPROVED',
+            state: 'OPEN',
+            statusCheckRollup: [],
+          }),
+        );
+      const fixture = scriptedRunner([
+        rateLimitFallbackResult(remaining),
+        ...(initialDelay === 0 ? [] : [rateLimitFallbackResult(remaining)]),
+        metadata(42),
+        discussionResult({ rateLimit: { ...RATE_LIMIT, remaining } }),
+        inlineCommentsResult(),
+        ...(interval < 60_000 ? [] : [rateLimitFallbackResult(remaining)]),
+        metadata(43),
+        discussionResult({ rateLimit: { ...RATE_LIMIT, remaining } }),
+        inlineCommentsResult(),
+      ]);
+      const hostedMetadata = makeGitHubHostedMetadataAdapter({
+        nowMillis: Effect.sync(() => now),
+        runner: fixture.runner,
+      });
+      const service = makeGitHubWatcherServiceProduction({
+        hostedMetadata,
+        runner: fixture.runner,
+      });
+      const received = callbacks([
+        pullRequest(),
+        pullRequest({ id: 'pr-43', number: 43, url: 'https://github.com/acme/project/pull/43' }),
+      ]);
+
+      await Effect.runPromise(service.poll(received.callbacks));
+      now += initialDelay;
+      if (initialDelay > 0) await Effect.runPromise(service.poll(received.callbacks));
+      now += interval;
+      await Effect.runPromise(service.poll(received.callbacks));
+
+      expect(received.failures).toEqual([]);
+      expect(received.observations.map(({ pullRequestId }) => pullRequestId)).toEqual([
+        'pr-42',
+        'pr-42',
+        'pr-43',
+        'pr-43',
+      ]);
+    }
+  });
+
   test('settles each healthy watcher GraphQL reservation after its exact decoded observation', async () => {
     const metadata = result(
       JSON.stringify({
@@ -731,11 +812,11 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toHaveLength(4);
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
       graphql: { remaining: 4_998, source: 'graphql' },
-      rest: { remaining: 5_000, source: 'rest_fallback' },
+      rest: { remaining: 4_998, source: 'local_estimate' },
     });
   });
 
-  test('keeps 12 healthy review gates live across repeated watcher cycles without retaining completed opaque debt', async () => {
+  test('keeps 12 healthy review gates live across repeated watcher cycles with conservative REST debt', async () => {
     const gates = Array.from({ length: 12 }, (_, index) =>
       pullRequest({
         id: `pr-${index + 1}`,
@@ -782,7 +863,7 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toHaveLength(48);
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
       graphql: { remaining: 4_976, source: 'graphql' },
-      rest: { remaining: 5_000, source: 'rest_fallback' },
+      rest: { remaining: 4_976, source: 'local_estimate' },
       watcherPolling: { status: 'ready', tier: 'normal' },
     });
     expect(fixture.invocations).toHaveLength(1 + 2 * 12 * 3);
@@ -815,7 +896,7 @@ describe('GitHub watcher service', () => {
 
     expect(failure).toBe(callbackFailure);
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
-      graphql: { remaining: 5_000, source: 'rest_fallback' },
+      graphql: { remaining: 4_995, source: 'local_estimate' },
     });
     expect(fixture.invocations).toHaveLength(2);
   });
@@ -850,7 +931,7 @@ describe('GitHub watcher service', () => {
     await Effect.runPromise(Fiber.interrupt(fiber));
 
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
-      graphql: { remaining: 5_000, source: 'rest_fallback' },
+      graphql: { remaining: 4_995, source: 'local_estimate' },
     });
     expect(fixture.invocations).toHaveLength(2);
   });

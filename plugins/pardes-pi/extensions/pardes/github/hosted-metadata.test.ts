@@ -187,6 +187,91 @@ describe('GitHub hosted metadata adapter', () => {
     expect(originChecks).toBe(2);
   });
 
+  test('enforces one fixed repository scope until a fresh controller adapter is created', async () => {
+    let origin = 'git@github.com:acme/one.git\n';
+    const adapter = makeGitHubHostedMetadataAdapter({
+      runner: {
+        run: () => Effect.succeed(result(origin)),
+      },
+    });
+
+    await Effect.runPromise(adapter.fixedRoute('/tmp/one'));
+    await Effect.runPromise(adapter.ensureControllerScope('/tmp/one'));
+    origin = 'git@github.com:acme/two.git\n';
+    const failure = await Effect.runPromise(
+      adapter.ensureControllerScope('/tmp/two').pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+  });
+
+  test('shows unavailable compact telemetry after current route proof failure', async () => {
+    let origin = 'git@github.com:acme/project.git\n';
+    const now = 1_700_000_000_000;
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.succeed(now),
+      runner: {
+        run: (invocation) =>
+          invocation.command === 'git'
+            ? Effect.succeed(result(origin))
+            : Effect.succeed(fallbackResult()),
+      },
+      unsafeNowMillis: () => now,
+    });
+    const reservation = await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1));
+    if (reservation.status !== 'ready' || reservation.graphqlReservationId === undefined)
+      throw new Error('fixture watcher reservation was not admitted');
+    await Effect.runPromise(
+      adapter.cancelUnlaunchedGraphQLReservation(reservation.graphqlReservationId),
+    );
+    expect(adapter.compactStatusUnsafe()).toEqual({
+      effectiveRemaining: 3_000,
+      throttle: 'normal',
+    });
+
+    origin = 'git@github.com:other/project.git\n';
+    await Effect.runPromise(adapter.fixedRoute('/tmp/project').pipe(Effect.flip));
+
+    expect(adapter.compactStatusUnsafe()).toEqual({ throttle: 'unavailable' });
+  });
+
+  test('does not project proactive recovery from stale budget while fallback remains unavailable', async () => {
+    const now = 1_700_000_000_000;
+    let origin = 'git@github.com:acme/project.git\n';
+    let hostedRequests = 0;
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: {
+        run: (invocation) => {
+          if (invocation.command === 'git') return Effect.succeed(result(origin));
+          hostedRequests += 1;
+          return hostedRequests === 1
+            ? Effect.succeed(fallbackResult(1_500, 1_500))
+            : Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }));
+        },
+      },
+    });
+    const reservation = await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1));
+    if (reservation.status !== 'ready' || reservation.graphqlReservationId === undefined)
+      throw new Error('fixture watcher reservation was not admitted');
+    await Effect.runPromise(
+      adapter.cancelUnlaunchedGraphQLReservation(reservation.graphqlReservationId),
+    );
+    origin = 'git@github.com:other/project.git\n';
+    await Effect.runPromise(adapter.fixedRoute('/tmp/project').pipe(Effect.flip));
+    origin = 'git@github.com:acme/project.git\n';
+
+    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toEqual({
+      reason: 'rate_metadata_unavailable',
+      status: 'deferred',
+      tier: 'unavailable',
+    });
+    expect(hostedRequests).toBe(2);
+  });
+
   test('bounds launched-but-unobserved identity debt after repeated failed health-style requests', async () => {
     const adapter = makeGitHubHostedMetadataAdapter();
     for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS; index += 1) {
@@ -200,6 +285,24 @@ describe('GitHub hosted metadata adapter', () => {
       _tag: 'GitHubResponseError',
       operation: 'reserve hosted GitHub request',
     });
+  });
+
+  test('recovers completed-unobserved identity capacity through one forced authoritative fallback', async () => {
+    const fixture = scriptedRunner([fallbackResult()]);
+    const adapter = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS; index += 1) {
+      const reservation = await Effect.runPromise(adapter.reserveGraphQLRequest());
+      await Effect.runPromise(adapter.launchGraphQLRequest(reservation.id));
+      await Effect.runPromise(adapter.finalizeGraphQLRequest(reservation.id));
+    }
+    await Effect.runPromise(adapter.reserveGraphQLRequest().pipe(Effect.flip));
+
+    await Effect.runPromise(adapter.recoverRequestCapacity('/tmp/project'));
+
+    expect(await Effect.runPromise(adapter.reserveGraphQLRequest())).toMatchObject({
+      id: 'request-65',
+    });
+    expect(fixture.invocations).toHaveLength(1);
   });
 
   test('rejects malformed fallback metadata with a typed operation-specific response error', async () => {
@@ -272,7 +375,7 @@ describe('GitHub hosted metadata adapter', () => {
     expect(invocations).toBe(2);
   });
 
-  test('binds a pre-observation CLI debit to the first fallback reset window instead of overwriting it', async () => {
+  test('reconciles pre-observation completed debt only after a causally later fallback observation', async () => {
     const fixture = scriptedRunner([fallbackResult()]);
     const adapter = makeGitHubHostedMetadataAdapter({
       nowMillis: Effect.succeed(1_700_000_000_000),
@@ -285,11 +388,35 @@ describe('GitHub hosted metadata adapter', () => {
     await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
 
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
-      graphql: { remaining: 3_995, source: 'local_estimate' },
+      graphql: { remaining: 4_000, source: 'rest_fallback' },
     });
   });
 
-  test('keeps local watcher reservations and CLI debits outstanding across delayed hosted observations', async () => {
+  test('retains successful opaque spend until a causally later authoritative fallback reconciles it', async () => {
+    let now = 1_700_000_000_000;
+    const fixture = scriptedRunner([fallbackResult(), fallbackResult(3_900, 2_900)]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: fixture.runner,
+    });
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+
+    await Effect.runPromise(adapter.accountOpaqueRequest('graphql', Effect.succeed('ok')));
+    await Effect.runPromise(adapter.accountOpaqueRequest('rest', Effect.succeed('ok')));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 3_995, source: 'local_estimate' },
+      rest: { remaining: 2_999, source: 'local_estimate' },
+    });
+
+    now += GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS;
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 3_900, source: 'rest_fallback' },
+      rest: { remaining: 2_900, source: 'rest_fallback' },
+    });
+  });
+
+  test('keeps local watcher reservations outstanding across delayed hosted observations', async () => {
     let now = 1_700_000_000_000;
     const fixture = scriptedRunner([fallbackResult(), fallbackResult()]);
     const adapter = makeGitHubHostedMetadataAdapter({
@@ -318,7 +445,7 @@ describe('GitHub hosted metadata adapter', () => {
     now += GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS;
     await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
-      graphql: { remaining: 3_985, source: 'local_estimate' },
+      graphql: { remaining: 3_990, source: 'local_estimate' },
       rest: { remaining: 3_000, source: 'rest_fallback' },
     });
   });
@@ -333,6 +460,7 @@ describe('GitHub hosted metadata adapter', () => {
       const adapter = makeGitHubHostedMetadataAdapter({
         nowMillis: Effect.sync(() => now),
         runner: fixture.runner,
+        unsafeNowMillis: () => now,
       });
       return {
         adapter,
@@ -432,6 +560,31 @@ describe('GitHub hosted metadata adapter', () => {
     ).toMatchObject({
       status: 'ready',
       tier: 'paused',
+    });
+  });
+
+  test('preserves the explicit watcher reserve floor while paused', async () => {
+    let now = 1_700_000_000_000;
+    const fixture = scriptedRunner([fallbackResult(105, 105), fallbackResult(105, 105)]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: fixture.runner,
+    });
+
+    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
+      reason: 'proactive_throttle',
+      status: 'deferred',
+      tier: 'paused',
+    });
+    now += 60_000;
+    expect(await Effect.runPromise(adapter.reserveWatcherPoll('/tmp/project', 1))).toMatchObject({
+      reason: 'proactive_throttle',
+      status: 'deferred',
+      tier: 'paused',
+    });
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 105 },
+      rest: { remaining: 105 },
     });
   });
 

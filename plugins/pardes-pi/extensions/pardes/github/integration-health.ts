@@ -302,6 +302,19 @@ export function makeGitHubIntegrationHealthService(
       ),
     );
 
+  const reserveHealthGraphQLRequest = (cwd: string, route: GitHubRepositoryIdentity) =>
+    hostedMetadata
+      .reserveGraphQLRequest()
+      .pipe(
+        Effect.catchTag('GitHubResponseError', (error) =>
+          error.operation === 'reserve hosted GitHub request'
+            ? hostedMetadata
+                .recoverRequestCapacity(cwd, route)
+                .pipe(Effect.andThen(hostedMetadata.reserveGraphQLRequest()))
+            : Effect.fail(error),
+        ),
+      );
+
   const hostedChecks = Effect.fnUntraced(function* (
     cwd: string,
     expression: string,
@@ -309,7 +322,7 @@ export function makeGitHubIntegrationHealthService(
     route: GitHubRepositoryIdentity,
   ) {
     const decoded = yield* Effect.acquireUseRelease(
-      hostedMetadata.reserveGraphQLRequest(),
+      reserveHealthGraphQLRequest(cwd, route),
       (reservation) =>
         Effect.gen(function* () {
           yield* hostedMetadata.launchGraphQLRequest(reservation.id);
@@ -336,7 +349,7 @@ export function makeGitHubIntegrationHealthService(
             reservation.id,
           );
         }),
-      (reservation) => hostedMetadata.cancelUnlaunchedGraphQLReservation(reservation.id),
+      (reservation) => hostedMetadata.finalizeGraphQLRequest(reservation.id),
     );
     return projectHostedChecks(decoded, referenceHeadSha);
   });
@@ -359,7 +372,7 @@ export function makeGitHubIntegrationHealthService(
     route: GitHubRepositoryIdentity,
   ) {
     const decoded = yield* Effect.acquireUseRelease(
-      hostedMetadata.reserveGraphQLRequest(),
+      reserveHealthGraphQLRequest(cwd, route),
       (reservation) =>
         Effect.gen(function* () {
           yield* hostedMetadata.launchGraphQLRequest(reservation.id);
@@ -382,7 +395,7 @@ export function makeGitHubIntegrationHealthService(
             reservation.id,
           );
         }),
-      (reservation) => hostedMetadata.cancelUnlaunchedGraphQLReservation(reservation.id),
+      (reservation) => hostedMetadata.finalizeGraphQLRequest(reservation.id),
     );
     const defaultBranch = decoded.data.repository.defaultBranchRef;
     if (defaultBranch === null) {

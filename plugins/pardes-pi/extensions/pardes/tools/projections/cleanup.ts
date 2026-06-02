@@ -1,8 +1,8 @@
 import type {
   ResolvedWorkCleanupIdPreview,
   ResolvedWorkCleanupProjection,
-} from '../manager/index.ts';
-import { boundedRows, compactText, plural } from './projections.ts';
+} from '../../manager/index.ts';
+import { boundedRows, compactText, plural } from './core.ts';
 
 export const RESOLVED_WORK_CLEANUP_DEFAULT_ROWS = 8;
 

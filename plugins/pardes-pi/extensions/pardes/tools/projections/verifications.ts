@@ -1,9 +1,9 @@
-import type { ManagerState, VerificationRecord } from '../manager/index.ts';
+import type { ManagerState, VerificationRecord } from '../../manager/index.ts';
 import {
   currentVerificationAttempt,
   projectVerificationReviewLoopDisposition,
-} from '../manager/index.ts';
-import { boundedRows } from './projections.ts';
+} from '../../manager/index.ts';
+import { boundedRows } from './core.ts';
 
 function verificationReviewLoopLine(
   state: Pick<ManagerState, 'pullRequests'>,

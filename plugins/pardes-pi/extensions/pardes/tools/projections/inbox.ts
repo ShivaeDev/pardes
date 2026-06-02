@@ -1,6 +1,6 @@
-import type { ManagerEvent, ManagerState } from '../manager/index.ts';
-import { projectInboxAttention } from '../manager/index.ts';
-import { boundedRows, compactText, elapsed, plural, summaryAttentionToken } from './projections.ts';
+import type { ManagerEvent, ManagerState } from '../../manager/index.ts';
+import { projectInboxAttention } from '../../manager/index.ts';
+import { boundedRows, compactText, elapsed, plural, summaryAttentionToken } from './core.ts';
 
 const INBOX_REPORT_PREVIEW_LENGTH = 96;
 export const INBOX_EVENT_DETAIL_SUMMARY_MAX_CHARS = 900;

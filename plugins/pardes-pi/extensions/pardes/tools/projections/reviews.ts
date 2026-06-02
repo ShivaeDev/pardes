@@ -1,11 +1,6 @@
-import type { ManagerState, PullRequestRecord } from '../manager/index.ts';
-import { pullRequestNeedsAttention } from '../manager/index.ts';
-import {
-  boundedRows,
-  CONTROL_PLANE_MAX_ROWS,
-  compactText,
-  summaryAttentionToken,
-} from './projections.ts';
+import type { ManagerState, PullRequestRecord } from '../../manager/index.ts';
+import { pullRequestNeedsAttention } from '../../manager/index.ts';
+import { boundedRows, CONTROL_PLANE_MAX_ROWS, compactText, summaryAttentionToken } from './core.ts';
 
 export const COMPOSITION_MAX_CLUSTERS = 4;
 export const COMPOSITION_MAX_UNCERTAIN_GATES = 3;

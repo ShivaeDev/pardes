@@ -3,18 +3,13 @@ import type {
   PluginActivationStatus,
   PullRequestRecord,
   Workstream,
-} from '../manager/index.ts';
-import { currentVerificationAttempt, pullRequestNeedsAttention } from '../manager/index.ts';
-import type { WorkerRuntimeSnapshot, WorkerStatus } from '../worker-runtime/index.ts';
-import { agentWarnings, effectiveAgentStatus } from './agent-projections.ts';
-import { inboxDeliveryLine } from './inbox-projections.ts';
-import {
-  boundedRows,
-  CONTROL_PLANE_MAX_ROWS,
-  plural,
-  summaryAttentionToken,
-} from './projections.ts';
-import { reviewWarningMetadata } from './review-projections.ts';
+} from '../../manager/index.ts';
+import { currentVerificationAttempt, pullRequestNeedsAttention } from '../../manager/index.ts';
+import type { WorkerRuntimeSnapshot, WorkerStatus } from '../../worker-runtime/index.ts';
+import { agentWarnings, effectiveAgentStatus } from './agents.ts';
+import { boundedRows, CONTROL_PLANE_MAX_ROWS, plural, summaryAttentionToken } from './core.ts';
+import { inboxDeliveryLine } from './inbox.ts';
+import { reviewWarningMetadata } from './reviews.ts';
 
 const SUMMARY_ATTENTION_MAX_ROWS = 5;
 

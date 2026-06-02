@@ -12,8 +12,13 @@ import { registerReportTools } from './reports.ts';
 import { registerVerificationTools } from './verifications.ts';
 import { registerWorkstreamDomainTools } from './workstreams.ts';
 
-export { conciseAgentStatus } from './agent-projections.ts';
-export { RESOLVED_WORK_CLEANUP_DEFAULT_ROWS } from './cleanup-projections.ts';
+export { conciseAgentStatus } from './projections/agents.ts';
+export { RESOLVED_WORK_CLEANUP_DEFAULT_ROWS } from './projections/cleanup.ts';
+export {
+  CONTROL_PLANE_DEFAULT_ROWS,
+  CONTROL_PLANE_MAX_ROWS,
+  CONTROL_PLANE_MAX_TEXT_LENGTH,
+} from './projections/core.ts';
 export {
   INBOX_EVENT_CHILD_TRUST_LABEL,
   INBOX_EVENT_DETAIL_RENDER_MAX_CHARS,
@@ -21,19 +26,14 @@ export {
   INBOX_EVENT_EXTERNAL_FEEDBACK_TRUST_LABEL,
   INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL,
   INBOX_EVENT_VERIFIER_TRUST_LABEL,
-} from './inbox-projections.ts';
-export {
-  CONTROL_PLANE_DEFAULT_ROWS,
-  CONTROL_PLANE_MAX_ROWS,
-  CONTROL_PLANE_MAX_TEXT_LENGTH,
-} from './projections.ts';
-export { registerQuestionTool } from './question.ts';
+} from './projections/inbox.ts';
 export {
   COMPOSITION_MAX_CLUSTERS,
   COMPOSITION_MAX_GATES_PER_CLUSTER,
   COMPOSITION_MAX_PATHS_PER_ROW,
   COMPOSITION_MAX_UNCERTAIN_GATES,
-} from './review-projections.ts';
+} from './projections/reviews.ts';
+export { registerQuestionTool } from './question.ts';
 export { registerPullRequestTools };
 
 export function registerWorkstreamTools(pi: ExtensionAPI, manager: ManagerController): void {

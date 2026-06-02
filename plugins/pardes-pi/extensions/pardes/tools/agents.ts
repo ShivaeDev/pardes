@@ -13,8 +13,8 @@ import {
   conciseAgentStatus,
   runtimeAgentStatus,
   stopAuditWarning,
-} from './agent-projections.ts';
-import { CONTROL_PLANE_MAX_LINE_LENGTH, compactText } from './projections.ts';
+} from './projections/agents.ts';
+import { CONTROL_PLANE_MAX_LINE_LENGTH, compactText } from './projections/core.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerController): void {

@@ -3,16 +3,10 @@ import type {
   AgentRecord,
   AgentStatus,
   ManagerState,
-} from '../manager/index.ts';
-import { projectIdleWorkerDisposition } from '../manager/index.ts';
-import type { WorkerRuntimeSnapshot, WorkerStatus } from '../worker-runtime/index.ts';
-import {
-  boundedRows,
-  CONTROL_PLANE_MAX_ROWS,
-  compactText,
-  elapsed,
-  plural,
-} from './projections.ts';
+} from '../../manager/index.ts';
+import { projectIdleWorkerDisposition } from '../../manager/index.ts';
+import type { WorkerRuntimeSnapshot, WorkerStatus } from '../../worker-runtime/index.ts';
+import { boundedRows, CONTROL_PLANE_MAX_ROWS, compactText, elapsed, plural } from './core.ts';
 
 const COLLECTION_PREVIEW_ITEMS = 4;
 const ATTACHED_AGENT_STATUSES = new Set<WorkerStatus>(['starting', 'running', 'idle']);

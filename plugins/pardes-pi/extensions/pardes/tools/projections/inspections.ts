@@ -1,14 +1,14 @@
 import type {
   GitHubHostedChecksObservation,
   GitHubIntegrationHealthInspection,
-} from '../github/index.ts';
-import type { PluginActivationStatus, PluginSourceObservation } from '../manager/index.ts';
+} from '../../github/index.ts';
+import type { PluginActivationStatus, PluginSourceObservation } from '../../manager/index.ts';
 import type {
   StorageInspection,
   StorageLeafObservation,
   StorageMetricAccuracy,
-} from '../storage/index.ts';
-import { boundedRows, compactText, plural } from './projections.ts';
+} from '../../storage/index.ts';
+import { boundedRows, compactText, plural } from './core.ts';
 
 function storageLeafLabel(
   leaf: StorageLeafObservation,

@@ -5,8 +5,8 @@ import {
   MANAGER_INPUT_LONG_TEXT_MAX_LENGTH,
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
 } from '../manager/index.ts';
-import { workstreamLines } from './control-plane-projections.ts';
-import { CONTROL_PLANE_MAX_ROWS } from './projections.ts';
+import { workstreamLines } from './projections/control-plane.ts';
+import { CONTROL_PLANE_MAX_ROWS } from './projections/core.ts';
 import { json, managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: ManagerController): void {

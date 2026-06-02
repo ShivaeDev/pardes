@@ -51,6 +51,23 @@ describe('loadPlugins', () => {
     ]);
   });
 
+  it('rejects unsafe names because tags and changelog paths are keyed by plugin name', () => {
+    const root = fixture();
+    writeFileSync(
+      join(root, '.agents/plugins/marketplace.json'),
+      JSON.stringify({
+        plugins: [
+          {
+            name: '../escape',
+            source: { path: './plugins/codex-plugin', source: 'local' },
+          },
+        ],
+      }),
+    );
+
+    expect(() => loadPlugins(root)).toThrow('plugin name must be a lowercase slug');
+  });
+
   it('rejects duplicate names because tags and changelogs are keyed by plugin name', () => {
     const root = fixture();
     writeFileSync(

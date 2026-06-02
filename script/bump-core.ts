@@ -72,6 +72,11 @@ export function loadPlugins(root = '.'): Plugin[] {
       if (typeof entry.name !== 'string' || !entry.name) {
         throw new Error(`${catalog.marketplacePath}: plugin name must be a non-empty string`);
       }
+      if (entry.name.length > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.name)) {
+        throw new Error(
+          `${catalog.marketplacePath}: plugin name must be a lowercase slug: ${entry.name}`,
+        );
+      }
       const previous = names.get(entry.name);
       if (previous) {
         throw new Error(

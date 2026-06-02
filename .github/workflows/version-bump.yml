@@ -16,8 +16,13 @@ name: version-bump
 #   `*--v*` blocks tag update + delete (supply-chain protection). The script never
 #   force/moves them — only the disposable bot-owned `bump/<sha>` branch may be
 #   force-with-leased on a re-run.
-# - Untrusted strings (commit messages/diffs) are passed to tools as argv DATA,
-#   never interpolated into a shell. opencode runs read-only (classify only).
+# - Bounded untrusted strings (commit subjects/diffs) are one argv DATA value,
+#   never interpolated into a shell. OpenCode runs in a disposable non-repo
+#   cwd/HOME with a wildcard-deny PRIMARY classifier and one schema-first verdict
+#   submission tool. Its narrowed child env has OPENCODE_API_KEY plus runtime
+#   paths only — never GH_TOKEN, persisted credentials, or publication secrets.
+#   The script rejects fallback-agent warnings, prose salvage, unexpected tools,
+#   invalid/multiple submissions, and non-allowlisted release diffs before push.
 
 on:
   push:
@@ -63,6 +68,6 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}   # set this repo VARIABLE to your zen/go model id (provider/model)
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL }}   # OpenCode/OpenCode Go only: opencode[-go]/model
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun script/bump.ts

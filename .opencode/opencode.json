@@ -1,0 +1,6 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "submit_verdict": "deny"
+  }
+}

@@ -176,7 +176,8 @@ describe('question tool execution semantics', () => {
     });
   });
 
-  test('sanitizes and bounds a returned custom response', async () => {
+  test('rejects an oversized custom response without returning a clipped answer', async () => {
+    const oversized = `safe-${'x'.repeat(QUESTION_CUSTOM_ANSWER_MAX_CHARS)}`;
     const result = await questionTool().execute(
       'call-1',
       {
@@ -185,21 +186,20 @@ describe('question tool execution semantics', () => {
       },
       signal,
       onUpdate,
-      interactiveContext(
-        ['\x1b[B', '\r'],
-        `  safe\u001b${'x'.repeat(QUESTION_CUSTOM_ANSWER_MAX_CHARS)}  `,
-      ),
+      interactiveContext(['\x1b[B', '\r'], oversized),
     );
-    const answer = (result.details as { readonly answer: string }).answer;
 
-    expect(answer).toHaveLength(QUESTION_CUSTOM_ANSWER_MAX_CHARS);
-    expect(answer.startsWith('safe ')).toBe(true);
-    expect(answer.endsWith('…')).toBe(true);
-    expect(answer).not.toContain('\u001b');
     expect(result).toEqual({
-      content: [{ text: `User answered: ${answer}`, type: 'text' }],
-      details: { answer, custom: true },
+      content: [
+        {
+          text: `User custom answer exceeded the ${QUESTION_CUSTOM_ANSWER_MAX_CHARS}-character bound. Ask the user to retry with a shorter answer.`,
+          type: 'text',
+        },
+      ],
+      details: { answer: null, custom: true, rejected: true },
     });
+    expect(result.content[0]?.text).not.toContain(oversized.slice(0, 100));
+    expect(result.content[0]?.text).not.toContain('…');
   });
 
   test('falls back to Pi dialog methods when custom components are unavailable in RPC mode', async () => {

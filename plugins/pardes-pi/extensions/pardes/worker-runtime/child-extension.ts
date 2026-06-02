@@ -22,7 +22,10 @@ const PATH_PARAMETERS: Readonly<Record<string, ReadonlyArray<string>>> = {
   write: ['path'],
 };
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
-const VERIFIER_OUTPUT_MAX_CHARS = 12_000;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: Git diagnostics are rendered inert before model-visible display.
+const GIT_DIAGNOSTIC_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
+const GIT_DIAGNOSTIC_MAX_CHARS = 1_000;
+export const VERIFIER_CHANGED_PATHS_MAX_CHARS = 12_000;
 
 function nearestExistingAncestor(path: string): string {
   let candidate = path;
@@ -83,13 +86,63 @@ function text(text: string, details: unknown) {
   return { content: [{ text, type: 'text' as const }], details };
 }
 
-function boundedVerifierOutput(output: string): {
+export function boundedVerifierPathRows(output: string): {
+  readonly omitted: number;
   readonly output: string;
+  readonly shown: number;
+  readonly total: number;
   readonly truncated: boolean;
 } {
-  return output.length <= VERIFIER_OUTPUT_MAX_CHARS
-    ? { output, truncated: false }
-    : { output: `${output.slice(0, VERIFIER_OUTPUT_MAX_CHARS - 1)}…`, truncated: true };
+  const rows = output === '' ? [] : output.replace(/\n$/, '').split('\n');
+  const shownRows: string[] = [];
+  let shownChars = 0;
+  for (const row of rows) {
+    const nextChars = shownChars + (shownRows.length === 0 ? 0 : 1) + row.length;
+    if (nextChars > VERIFIER_CHANGED_PATHS_MAX_CHARS) break;
+    shownRows.push(row);
+    shownChars = nextChars;
+  }
+  const shown = shownRows.length;
+  const omitted = rows.length - shown;
+  return {
+    omitted,
+    output: shownRows.join('\n'),
+    shown,
+    total: rows.length,
+    truncated: omitted > 0,
+  };
+}
+
+export function boundedGitDiagnostic(
+  stderr: string,
+  fallback: string,
+): {
+  readonly normalizedAwayChars: number;
+  readonly omittedChars: number;
+  readonly originalChars: number;
+  readonly preview: string;
+  readonly safeChars: number;
+  readonly shownChars: number;
+  readonly source: 'error' | 'stderr';
+  readonly truncated: boolean;
+} {
+  const source = stderr.trim() ? 'stderr' : 'error';
+  const diagnostic = source === 'stderr' ? stderr : fallback;
+  const safe = diagnostic
+    .replace(GIT_DIAGNOSTIC_CONTROL_CHARACTERS, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const preview = safe.slice(0, GIT_DIAGNOSTIC_MAX_CHARS);
+  return {
+    normalizedAwayChars: diagnostic.length - safe.length,
+    omittedChars: safe.length - preview.length,
+    originalChars: diagnostic.length,
+    preview,
+    safeChars: safe.length,
+    shownChars: preview.length,
+    source,
+    truncated: preview.length < safe.length,
+  };
 }
 
 function git(root: string, args: ReadonlyArray<string>): Promise<string> {
@@ -100,11 +153,8 @@ function git(root: string, args: ReadonlyArray<string>): Promise<string> {
       { cwd: root, encoding: 'utf8', maxBuffer: 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
-          const reason = (String(stderr).replace(/\s+/g, ' ').trim() || error.message).slice(
-            0,
-            1_000,
-          );
-          reject(new Error(`Git inspection failed: ${reason}`));
+          const diagnostic = boundedGitDiagnostic(String(stderr), error.message);
+          reject(new Error(`Git inspection failed: ${JSON.stringify(diagnostic)}`));
         } else resolve(stdout);
       },
     );
@@ -126,19 +176,25 @@ function registerVerifierTools(
       const dirty =
         (await git(root, ['status', '--porcelain=v1', '--untracked-files=all'])).trim().length > 0;
       const names = await git(root, ['diff', '--name-only', `${baselineSha}...${reviewedHeadSha}`]);
-      const bounded = boundedVerifierOutput(names);
+      const bounded = boundedVerifierPathRows(names);
       return text(
         [
           `reviewedHeadSha: ${reviewedHeadSha}`,
           `checkoutHeadSha: ${headSha}`,
           `baselineSha: ${baselineSha}`,
           `checkoutClean: ${String(!dirty)}`,
+          `changed path evidence: total=${bounded.total}; shown=${bounded.shown}; omitted=${bounded.omitted}`,
           'changed paths:',
-          bounded.output || '(none)',
+          bounded.output || (bounded.total === 0 ? '(none)' : '(none shown within bound)'),
           ...(bounded.truncated ? ['changed path evidence truncated: true'] : []),
         ].join('\n'),
         {
           pardesVerifier: {
+            changedPaths: {
+              omitted: bounded.omitted,
+              shown: bounded.shown,
+              total: bounded.total,
+            },
             checkoutClean: !dirty,
             checkoutHeadSha: headSha,
             reviewedHeadSha,

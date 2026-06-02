@@ -10,9 +10,12 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../reporting/index.ts';
 import { requiredValue } from '../test-support.ts';
 import pardesWorker, {
+  boundedGitDiagnostic,
+  boundedVerifierPathRows,
   getWorkerToolPathDenialReason,
   isPathInsideWorktree,
   normalizeWorkerToolPath,
+  VERIFIER_CHANGED_PATHS_MAX_CHARS,
 } from './child-extension.ts';
 
 const temporaryDirectories: string[] = [];
@@ -80,6 +83,32 @@ describe('worker path boundary', () => {
   });
 });
 
+describe('verifier evidence output bounds', () => {
+  test('omits changed-path suffixes instead of slicing through a path row', () => {
+    const first = 'a'.repeat(VERIFIER_CHANGED_PATHS_MAX_CHARS);
+    const second = 'src/second-complete-path.ts';
+    const bounded = boundedVerifierPathRows(`${first}\n${second}\nsrc/tail.ts\n`);
+
+    expect(bounded).toEqual({
+      omitted: 2,
+      output: first,
+      shown: 1,
+      total: 3,
+      truncated: true,
+    });
+    expect(bounded.output).not.toContain(second.slice(0, 4));
+  });
+
+  test('makes bounded Git diagnostic omission explicit and keeps terminal controls inert', () => {
+    const diagnostic = boundedGitDiagnostic(`fatal:\u001b[31m ${'x'.repeat(1_100)}`, 'fallback');
+
+    expect(diagnostic).toMatchObject({ shownChars: 1_000, source: 'stderr', truncated: true });
+    expect(diagnostic.omittedChars).toBeGreaterThan(0);
+    expect(diagnostic.preview).toHaveLength(diagnostic.shownChars);
+    expect(diagnostic.preview).not.toContain('\u001b');
+  });
+});
+
 describe('worker child extension loading boundary', () => {
   test('registers worker-only hooks and never installs coordinating-manager compaction', () => {
     const { worktree } = createFixture();
@@ -134,6 +163,9 @@ describe('verifier child profile', () => {
       expect(evidence.renderShell).toBe('self');
       expect(typeof evidence.renderCall).toBe('function');
       expect(typeof evidence.renderResult).toBe('function');
+      await expect((evidence.execute as unknown as ExecuteToolForTest)('call', {})).rejects.toThrow(
+        'Git inspection failed: {"normalizedAwayChars":',
+      );
       const report = requiredValue(tools.find((tool) => tool.name === 'report_to_manager'));
       const parameters = report.parameters as unknown as ToolParametersPreview;
       expect(report.description).toContain(
@@ -232,11 +264,16 @@ describe('verifier child profile', () => {
       const result = await (evidence.execute as unknown as ExecuteToolForTest)('call', {});
       expect(result.content[0].text).toContain(`checkoutHeadSha: ${reviewed}`);
       expect(result.content[0].text).toContain('checkoutClean: true');
+      expect(result.content[0].text).toContain(
+        'changed path evidence: total=1; shown=1; omitted=0',
+      );
       expect(result.details).toMatchObject({
         pardesVerifier: {
+          changedPaths: { omitted: 0, shown: 1, total: 1 },
           checkoutClean: true,
           checkoutHeadSha: reviewed,
           reviewedHeadSha: reviewed,
+          truncated: false,
           type: 'evidence',
         },
       });

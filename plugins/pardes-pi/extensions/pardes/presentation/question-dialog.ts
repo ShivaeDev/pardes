@@ -80,11 +80,9 @@ function sanitizeQuestionOption(option: QuestionDialogOption): QuestionDialogOpt
   };
 }
 
-export function sanitizeQuestionCustomAnswer(answer: string): string {
+export function sanitizeQuestionCustomAnswer(answer: string): string | undefined {
   const sanitized = answer.replace(TERMINAL_CONTROL_CHARACTERS, ' ').trim();
-  return sanitized.length <= QUESTION_CUSTOM_ANSWER_MAX_CHARS
-    ? sanitized
-    : `${sanitized.slice(0, QUESTION_CUSTOM_ANSWER_MAX_CHARS - 1)}…`;
+  return sanitized.length <= QUESTION_CUSTOM_ANSWER_MAX_CHARS ? sanitized : undefined;
 }
 
 function displayValue(option: QuestionDialogOption): string {

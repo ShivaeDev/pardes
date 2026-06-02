@@ -1,5 +1,6 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Cause, Effect, Exit } from 'effect';
+import { currentVerificationTerminalReportStatus } from '../domain.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   boundedVerificationReason,
@@ -32,7 +33,12 @@ export function makeVerificationRetirement(
     )
       return false;
     const verifierAgent = namespace.state.agents[verification.verifierAgentId];
-    if (!verifierAgent || verifierAgent.role !== 'verifier' || verifierAgent.status !== 'idle')
+    if (
+      !verifierAgent ||
+      verifierAgent.role !== 'verifier' ||
+      verifierAgent.status !== 'idle' ||
+      currentVerificationTerminalReportStatus(verification) === undefined
+    )
       return false;
     const stoppedResult = yield* workers.stopIfIdle(verifierAgent.id).pipe(Effect.exit);
     if (Exit.isFailure(stoppedResult)) {

@@ -548,7 +548,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     if (agent.status === 'stopped')
       return {
         compact: 'owner:stopped',
-        detail: `Owner ${agent.id} was already stopped; managed worktree and session remain preserved.`,
+        detail:
+          agent.worktree === undefined && agent.leaseCleanup !== undefined
+            ? `Owner ${agent.id} was already stopped; managed worktree was cleaned or is absent (${agent.leaseCleanup.worktreeOutcome}); retained Pi session metadata is history-only.`
+            : `Owner ${agent.id} was already stopped; managed worktree and session remain preserved.`,
       };
     if (agent.status !== 'idle')
       return {

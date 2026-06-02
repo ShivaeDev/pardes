@@ -2140,7 +2140,7 @@ describe('Pardes model-visible tools', () => {
         id: 'event-merged',
         pullRequestId: 'pr-42',
         summary:
-          '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge.',
+          '#42 merge observed; owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge. Owner agent-1 was already stopped; managed worktree was cleaned or is absent (removed_clean); retained Pi session metadata is history-only.',
         type: 'merged',
       },
       'event-merged-blocked': {
@@ -2255,8 +2255,12 @@ describe('Pardes model-visible tools', () => {
     );
     expect(merged.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
     expect(merged.content[0]?.text).toContain(
-      '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+      '#42 merge observed; owner:stopped; stream:complete; follow-up:0.',
     );
+    expect(merged.content[0]?.text).toContain(
+      'managed worktree was cleaned or is absent (removed_clean); retained Pi session metadata is history-only.',
+    );
+    expect(merged.content[0]?.text).not.toContain('managed worktree and session remain preserved');
     expect(merged.content[0]?.text).toContain(
       'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.',
     );

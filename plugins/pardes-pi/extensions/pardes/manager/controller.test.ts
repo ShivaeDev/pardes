@@ -4725,6 +4725,12 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.agents[agent.id]).not.toHaveProperty('changedPaths');
     expect(controller.snapshot()?.agents[agent.id]).not.toHaveProperty('worktree');
     expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    const refinedMerge = controller.snapshot()?.inbox.find(({ type }) => type === 'merged');
+    expect(refinedMerge?.summary).toContain('owner:stopped; stream:complete;');
+    expect(refinedMerge?.summary).toContain(
+      'managed worktree was cleaned or is absent (discarded_dirty); retained Pi session metadata is history-only.',
+    );
+    expect(refinedMerge?.summary).not.toContain('managed worktree and session remain preserved');
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 

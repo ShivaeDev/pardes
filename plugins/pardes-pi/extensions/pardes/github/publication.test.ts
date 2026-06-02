@@ -555,7 +555,68 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
-  test('rejects an updated review gate whose final PR number differs from the selected existing PR', async () => {
+  test('accepts explicit existing-PR publication after its temporarily stale hosted head OID converges', async () => {
+    const existing = pullRequest();
+    const stale = result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) })));
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      stale,
+      result(JSON.stringify(pullRequest())),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const published = await Effect.runPromise(service.publish(input));
+
+    expect(published.action).toBe('updated');
+    expect(fixture.invocations).toHaveLength(5);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+    expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
+      false,
+    );
+  });
+
+  test('fails explicit existing-PR publication after bounded hosted head OID convergence attempts', async () => {
+    const existing = pullRequest();
+    const divergent = result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) })));
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      divergent,
+      divergent,
+      divergent,
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    if (failure._tag !== 'GitHubResponseError') throw failure;
+    expect(failure.operation).toBe('verify published pull request head and base');
+    expect(fixture.invocations).toHaveLength(6);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+    expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
+      false,
+    );
+  });
+
+  test('rejects explicit existing-PR identity drift immediately without repeating publication effects', async () => {
     const existing = pullRequest();
     const fixture = scriptedRunner([
       result(),
@@ -563,7 +624,11 @@ describe('GitHub publication boundary', () => {
       result(),
       result(JSON.stringify(pullRequest({ number: 43 }))),
     ]);
-    const service = makeGitHubPublicationService({ runner: fixture.runner });
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
 
     const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
 
@@ -571,6 +636,74 @@ describe('GitHub publication boundary', () => {
     if (failure._tag !== 'GitHubResponseError') throw failure;
     expect(failure.operation).toBe('verify published pull request head and base');
     expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+    expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
+      false,
+    );
+  });
+
+  test('rejects malformed explicit existing-PR publication metadata immediately without repeating effects', async () => {
+    const existing = pullRequest();
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      result('{'),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+  });
+
+  test('does not retry an explicit existing-PR command failure after hosted-OID lag', async () => {
+    const existing = pullRequest();
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) }))),
+    ]);
+    let invocationCount = 0;
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: {
+        run: (invocation) => {
+          invocationCount += 1;
+          return invocationCount === 5
+            ? Effect.fail(
+                new GitHubCommandError({
+                  ...invocation,
+                  cause: 'fixture publication verification outage',
+                }),
+              )
+            : fixture.runner.run(invocation);
+        },
+      },
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubCommandError');
+    expect(invocationCount).toBe(5);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
   });
 
   test('rejects malformed gh JSON through a typed response error', async () => {

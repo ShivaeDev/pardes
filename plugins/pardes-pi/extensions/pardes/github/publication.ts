@@ -251,6 +251,30 @@ export function makeGitHubPublicationService(
     }
   });
 
+  const retryPushedHeadMetadataLag = <A>(
+    verification: Effect.Effect<A, PushedHeadVerificationError>,
+    operation = 'verify pushed pull request head',
+  ) =>
+    verification.pipe(
+      Effect.retry(
+        Schedule.both(
+          Schedule.spaced(pushedHeadVerificationDelayMillis),
+          Schedule.recurs(pushedHeadVerificationRetries),
+        ).pipe(
+          Schedule.setInputType<PushedHeadVerificationError>(),
+          Schedule.while(({ input: error }) => error._tag === 'GitHubPushedHeadMetadataLag'),
+        ),
+      ),
+      Effect.catchTag('GitHubPushedHeadMetadataLag', (error) =>
+        Effect.fail(
+          responseError(operation, {
+            expected: error.expected,
+            pullRequest: error.pullRequest,
+          }),
+        ),
+      ),
+    );
+
   const fallbackActor = Effect.fnUntraced(function* (cwd: string) {
     const configured = yield* command(cwd, 'git', ['config', '--get', 'user.name']).pipe(
       Effect.map(({ stdout }) => stdout.trim()),
@@ -457,25 +481,7 @@ export function makeGitHubPublicationService(
     // `gh pr view` may briefly report the previous hosted OID after the exact
     // remote ref update. Retry only that decoded OID mismatch: identity drift,
     // malformed metadata, and transport failures still fail immediately.
-    yield* verifyPushedHead(input).pipe(
-      Effect.retry(
-        Schedule.both(
-          Schedule.spaced(pushedHeadVerificationDelayMillis),
-          Schedule.recurs(pushedHeadVerificationRetries),
-        ).pipe(
-          Schedule.setInputType<PushedHeadVerificationError>(),
-          Schedule.while(({ input: error }) => error._tag === 'GitHubPushedHeadMetadataLag'),
-        ),
-      ),
-      Effect.mapError((error) =>
-        error._tag === 'GitHubPushedHeadMetadataLag'
-          ? responseError('verify pushed pull request head', {
-              expected: error.expected,
-              pullRequest: error.pullRequest,
-            })
-          : error,
-      ),
-    );
+    yield* retryPushedHeadMetadataLag(verifyPushedHead(input));
     return { status: 'synced' };
   });
 
@@ -603,30 +609,68 @@ export function makeGitHubPublicationService(
       ]);
     }
     const identifier = existing ? String(existing.number) : input.headBranch;
-    const viewed = yield* github.run(input.cwd, [
-      'pr',
-      'view',
-      identifier,
-      '--json',
-      PUBLICATION_METADATA_JSON_FIELDS,
-    ]);
-    const pullRequest = yield* decodeGitHubJson(
-      'view pull request',
-      GitHubPublicationMetadataSchema,
-      viewed.stdout,
-    );
-    if (
-      (existing !== undefined && pullRequest.number !== existing.number) ||
-      pullRequest.headRefName !== input.headBranch ||
-      pullRequest.headRefOid !== input.headSha ||
-      pullRequest.baseRefName !== input.baseBranch
-    ) {
-      return yield* responseError('verify published pull request head and base', {
-        expected: input,
-        pullRequest,
-        selectedExistingPullRequest: existing,
-      });
-    }
+    const viewPublishedPullRequest = Effect.fnUntraced(function* () {
+      const viewed = yield* github.run(input.cwd, [
+        'pr',
+        'view',
+        identifier,
+        '--json',
+        PUBLICATION_METADATA_JSON_FIELDS,
+      ]);
+      const pullRequest = yield* decodeGitHubJson(
+        'view pull request',
+        GitHubPublicationMetadataSchema,
+        viewed.stdout,
+      );
+      if (
+        (existing !== undefined && pullRequest.number !== existing.number) ||
+        pullRequest.headRefName !== input.headBranch ||
+        pullRequest.baseRefName !== input.baseBranch
+      ) {
+        return yield* responseError('verify published pull request head and base', {
+          expected: input,
+          pullRequest,
+          selectedExistingPullRequest: existing,
+        });
+      }
+      return pullRequest;
+    });
+    const verifyPublishedPullRequest =
+      existing === undefined
+        ? viewPublishedPullRequest().pipe(
+            Effect.flatMap((pullRequest) =>
+              pullRequest.headRefOid === input.headSha
+                ? Effect.succeed(pullRequest)
+                : Effect.fail(
+                    responseError('verify published pull request head and base', {
+                      expected: input,
+                      pullRequest,
+                      selectedExistingPullRequest: existing,
+                    }),
+                  ),
+            ),
+          )
+        : retryPushedHeadMetadataLag(
+            viewPublishedPullRequest().pipe(
+              Effect.flatMap((pullRequest) =>
+                pullRequest.headRefOid === input.headSha
+                  ? Effect.succeed(pullRequest)
+                  : Effect.fail(
+                      new GitHubPushedHeadMetadataLag({
+                        expected: {
+                          cwd: input.cwd,
+                          headBranch: input.headBranch,
+                          headSha: input.headSha,
+                          pullRequestNumber: existing.number,
+                        },
+                        pullRequest,
+                      }),
+                    ),
+              ),
+            ),
+            'verify published pull request head and base',
+          );
+    const pullRequest = yield* verifyPublishedPullRequest;
     if (input.openInBrowser === true)
       yield* github.run(input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
     return {

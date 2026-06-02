@@ -198,13 +198,11 @@ Situational reset:
 - Persisted manager state and the coordinating suffix are authoritative. Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`, before deciding what changed.
 - Keep open-review owners attached for CI or review feedback. Use \`pardes_status(view="cleanup")\` only for explicit resolved-artifact guidance.
 - Continue from current durable state; do not poll workers, repeat already-handled work, or widen detail retrieval without a concrete decision need.`,
-  reloaded: `Pardes plugin reloaded. System code was intentionally updated and the manager refreshed its pinned child-runtime snapshot. Former child RPC attachments disconnected; managed worktrees and retained conversations were preserved.
-Reconnect/check pass:
-- Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`; account for open review gates and warnings before taking lifecycle actions.
-- Apply the inbox rule without shortcuts: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` for structured options or \`await_user_feedback\` for free-form feedback, and leave the cursor open until response.
-- Revive only detached retained conversations that should continue. Keep open-review owners attached for CI or review feedback.
-- Resume published-review routing safely: require additive descendant commits only; never amend, rebase, or rewrite published branch history because exact-SHA publication never force-pushes.
-- Use \`pardes_status(view="cleanup")\` only for explicit resolved-artifact guidance.`,
+  reloaded: `Pardes manager plugin reloaded. The plugin version changed and retained workers disconnected from this runtime; their managed worktrees and retained conversations remain preserved. The manager conversation already retains its context.
+Reload continuation:
+- Inspect retained workers with \`pardes_status(view="agents", agentFilter="all")\`.
+- For each retained session that should continue, inspect \`agent_status({ agentId })\`, then reconnect it with \`agent_revive({ agentId, message })\` and a current briefing.
+- Continue from retained conversation context after the appropriate sessions are reconnected.`,
   restored: `Pardes manager restored. Durable state was restored, but prior process-scoped child RPC attachment is not assumed to have survived. Reconnect and reinspect before continuing.
 Reconnect/check pass:
 - Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`; account for open review gates and warnings before taking lifecycle actions.
@@ -231,11 +229,17 @@ describe('Pardes manager lifecycle guidance', () => {
 
     for (const reason of reasons) {
       const guidance = requiredValue(renderManagerGuidance(fixtureState(), reason));
-      expect(guidance.startsWith(`${expectedAuthoredGuidance[reason]}\nState:`), reason).toBe(true);
-      expect(guidance).toContain(AUTONOMOUS_INBOX_PATH);
-      expect(guidance).toContain(USER_JUDGMENT_INBOX_PATH);
-      expect(guidance).toContain(USER_JUDGMENT_HANDOFF_PATH);
-      expect(guidance).toContain('additive descendant commits only');
+      if (reason === 'reloaded') {
+        expect(guidance).toBe(expectedAuthoredGuidance.reloaded);
+      } else {
+        expect(guidance.startsWith(`${expectedAuthoredGuidance[reason]}\nState:`), reason).toBe(
+          true,
+        );
+        expect(guidance).toContain(AUTONOMOUS_INBOX_PATH);
+        expect(guidance).toContain(USER_JUDGMENT_INBOX_PATH);
+        expect(guidance).toContain(USER_JUDGMENT_HANDOFF_PATH);
+        expect(guidance).toContain('additive descendant commits only');
+      }
       expect(guidance).not.toContain('…');
     }
   });
@@ -256,23 +260,35 @@ describe('Pardes manager lifecycle guidance', () => {
     expect(compacted).toContain(PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE);
   });
 
-  test('keeps restored and reloaded variants concise and specific to reconnecting', () => {
+  test('keeps restoration informative while making reload a narrow retained-session continuation', () => {
     const restored = requiredValue(renderManagerGuidance(fixtureState(), 'restored'));
     const reloaded = requiredValue(renderManagerGuidance(fixtureState(), 'reloaded'));
 
     expect(restored).toContain('Durable state was restored');
     expect(restored).toContain('prior process-scoped child RPC attachment is not assumed');
-    expect(reloaded).toContain('System code was intentionally updated');
-    expect(reloaded).toContain('refreshed its pinned child-runtime snapshot');
-    expect(reloaded).toContain('Former child RPC attachments disconnected');
-    for (const guidance of [restored, reloaded]) {
-      expect(guidance).toContain('Reconnect/check pass:');
-      expect(guidance).toContain(
-        'Revive only detached retained conversations that should continue',
-      );
-      expect(guidance).not.toContain('Operating model:');
-      expect(guidance).not.toContain('First pass:');
-      expect(guidance).not.toContain('Situational reset:');
+    expect(restored).toContain('Reconnect/check pass:');
+    expect(restored).toContain('Revive only detached retained conversations that should continue');
+
+    expect(reloaded).toBe(expectedAuthoredGuidance.reloaded);
+    expect(reloaded).toContain('The plugin version changed');
+    expect(reloaded).toContain('retained workers disconnected from this runtime');
+    expect(reloaded).toContain('The manager conversation already retains its context');
+    expect(reloaded).toContain('pardes_status(view="agents", agentFilter="all")');
+    expect(reloaded).toContain('agent_status({ agentId })');
+    expect(reloaded).toContain('agent_revive({ agentId, message })');
+    for (const forbidden of [
+      'State:',
+      'Attention:',
+      'Operating model:',
+      'Reconnect/check pass:',
+      'pardes_status(view="inbox")',
+      'inbox',
+      'pull_request_create',
+      'publication',
+      'verification',
+      'additive descendant',
+    ]) {
+      expect(reloaded.toLowerCase()).not.toContain(forbidden.toLowerCase());
     }
     expect(managerGuidanceReasonForSessionStart('reload')).toBe('reloaded');
     for (const reason of ['startup', 'new', 'resume', 'fork'] as const) {

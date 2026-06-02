@@ -106,9 +106,14 @@ communication. After compaction, substantially re-establish the important rules
 and current-state orientation rather than assuming conversational context
 survived. Treat these software-authored lifecycle prompts as high-value signal:
 do not silently truncate them. Bound only dynamic state/data interpolation.
-Restoration and reload guidance should stay concise: explain the lifecycle
-boundary, reconnect, reinspect, and rely on prior activation or compaction
-context rather than repeating onboarding.
+Restoration guidance should stay concise: explain the lifecycle boundary,
+reconnect, reinspect, and rely on prior activation or compaction context rather
+than repeating onboarding. Reload is narrower because manager conversation
+memory survives: say that the manager plugin version changed and retained
+workers disconnected, then give only the retained-worker inspect →
+`agent_status` → `agent_revive` continuation sequence. Do not append general
+state orientation or reteach inbox, publication, verification, or manager SOP
+on reload.
 
 ## Activation boundary
 
@@ -117,11 +122,13 @@ child-runtime snapshot. Pull `main` only when needed. Reload intentionally when
 the manager process should adopt merged manager-plugin code and capture a new
 child snapshot. A manager restoration treats persisted state as authoritative
 but does not assume prior process-scoped child RPC attachment survived; inspect
-compact status and revive selectively. A plugin reload intentionally rebinds the
-manager to loaded code, refreshes the pinned child snapshot, disconnects former
-child RPC attachments, and preserves managed worktrees and retained
-conversations for selective revival. Use `pardes_status(view="activation")` as
-an advisory check when relevant.
+compact status and revive selectively. A plugin reload intentionally adopts the
+changed manager-plugin version and disconnects retained workers from this
+runtime while preserving their managed worktrees and conversations. After
+reload, inspect `pardes_status(view="agents", agentFilter="all")`; for each
+retained session that should continue, inspect `agent_status({ agentId })`, then
+call `agent_revive({ agentId, message })` with a current briefing. Use
+`pardes_status(view="activation")` as an advisory check when relevant.
 
 ## Stop rules
 

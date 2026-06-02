@@ -6,8 +6,9 @@ import {
   USER_JUDGMENT_INBOX_PATH,
 } from '../../manager/index.ts';
 import {
-  boundedRows,
+  CONTROL_PLANE_MAX_LINE_LENGTH,
   CONTROL_PLANE_MAX_ROWS,
+  CONTROL_PLANE_MAX_TEXT_LENGTH,
   compactText,
   elapsed,
   plural,
@@ -15,6 +16,7 @@ import {
 } from './core.ts';
 
 const INBOX_REPORT_PREVIEW_LENGTH = 96;
+const SAFE_INBOX_METADATA_PATTERN = /^[a-zA-Z0-9._:-]+$/;
 export const INBOX_EVENT_DETAIL_SUMMARY_MAX_CHARS = 900;
 export const INBOX_EVENT_DETAIL_RENDER_MAX_CHARS = 2_000 + 6 * INBOX_EVENT_DETAIL_SUMMARY_MAX_CHARS;
 export const INBOX_EVENT_CHILD_TRUST_LABEL =
@@ -86,21 +88,58 @@ export function inboxDeliveryLine(
     : `delivery: cursor ${summaryAttentionToken(delivery.deliveredCursor, 'redacted-event')} · delivered age:${delivery.deliveredCursorAgeMs === undefined ? 'unknown' : elapsed(delivery.deliveredCursorAgeMs)} · queued suffix:${delivery.queuedSuffixCount} · awaiting-user:${delivery.awaitingUser ? 'yes' : 'no'} · wake ${summaryAttentionToken(delivery.wakeToken ?? '', 'redacted-wake')}`;
 }
 
+function inboxIndexRowCount(inbox: ReadonlyArray<ManagerEvent>): number {
+  return inbox.reduce((count, event) => count + (event.reportId === undefined ? 1 : 2), 0);
+}
+
+function firstInboxIndexRows(inbox: ReadonlyArray<ManagerEvent>, limit: number): string[] {
+  const rows: string[] = [];
+  for (const event of inbox) {
+    for (const line of inboxIndexEventLines(event)) {
+      if (rows.length === limit) return rows;
+      rows.push(compactText(line, CONTROL_PLANE_MAX_LINE_LENGTH));
+    }
+  }
+  return rows;
+}
+
+function inboxIndexOmissionLine(omittedCount: number): string {
+  return `… +${omittedCount} more inbox index ${omittedCount === 1 ? 'row' : 'rows'} omitted; inspect a known eventId for detail`;
+}
+
+/** Keep authored judgment guidance intact; select and summarize bounded dynamic rows upstream. */
 export function inboxLines(
   state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
   maxRows?: number,
 ): string {
-  return boundedRows(
-    [
-      `inbox: ${plural(state.inbox.length, 'pending event')} · read and judge one: inbox_get({ eventId })`,
-      inboxDeliveryLine(state),
-      `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
-      `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
-      `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
-      ...state.inbox.flatMap(inboxIndexEventLines),
-    ],
-    maxRows ?? CONTROL_PLANE_MAX_ROWS,
+  const authoredLines = [
+    `inbox: ${plural(state.inbox.length, 'pending event')} · read and judge one: inbox_get({ eventId })`,
+    inboxDeliveryLine(state),
+    `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
+    `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
+    `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
+  ];
+  const requestedRows = Math.max(
+    1,
+    Math.min(CONTROL_PLANE_MAX_ROWS, Math.floor(maxRows ?? CONTROL_PLANE_MAX_ROWS)),
   );
+  const totalIndexRows = inboxIndexRowCount(state.inbox);
+  const availableIndexRows = Math.max(0, requestedRows - authoredLines.length);
+  const selectedLimit =
+    totalIndexRows > availableIndexRows ? Math.max(0, availableIndexRows - 1) : availableIndexRows;
+  const selectedRows = firstInboxIndexRows(state.inbox, selectedLimit);
+  let omittedCount = totalIndexRows - selectedRows.length;
+  const render = () =>
+    [
+      ...authoredLines,
+      ...selectedRows,
+      ...(omittedCount === 0 ? [] : [inboxIndexOmissionLine(omittedCount)]),
+    ].join('\n');
+  while (render().length > CONTROL_PLANE_MAX_TEXT_LENGTH && selectedRows.length > 0) {
+    selectedRows.pop();
+    omittedCount += 1;
+  }
+  return render();
 }
 
 export type InboxEventTrust =
@@ -150,7 +189,9 @@ function inboxEventTrustLabel(
 }
 
 function boundedInboxMetadata(value: string): string {
-  return compactText(value, 120);
+  return value.length <= 120 && SAFE_INBOX_METADATA_PATTERN.test(value)
+    ? value
+    : '<redacted-invalid-metadata>';
 }
 
 export function inboxEventDetailMetadata(event: ManagerEvent): InboxEventDetailMetadata {
@@ -175,7 +216,7 @@ export function inboxEventDetailMetadata(event: ManagerEvent): InboxEventDetailM
     ...(event.verificationId === undefined
       ? {}
       : { verificationId: boundedInboxMetadata(event.verificationId) }),
-    ...(event.reportId === undefined ? {} : { reportId: event.reportId }),
+    ...(event.reportId === undefined ? {} : { reportId: boundedInboxMetadata(event.reportId) }),
     ...(event.reportPreviewTruncated === undefined
       ? {}
       : { reportPreviewTruncated: event.reportPreviewTruncated }),
@@ -218,7 +259,5 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
     `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
     `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
   ].join('\n');
-  return text.length <= INBOX_EVENT_DETAIL_RENDER_MAX_CHARS
-    ? text
-    : `${text.slice(0, INBOX_EVENT_DETAIL_RENDER_MAX_CHARS - 1)}…`;
+  return text;
 }

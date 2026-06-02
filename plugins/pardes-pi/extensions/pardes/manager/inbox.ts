@@ -68,11 +68,9 @@ function compactText(text: string, limit: number): string {
     : `${normalized.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-function boundedContent(lines: ReadonlyArray<string>): string {
-  const content = lines.join('\n');
-  return content.length <= MANAGER_INBOX_WAKE_MAX_CHARS
-    ? content
-    : `${content.slice(0, MANAGER_INBOX_WAKE_MAX_CHARS - 1)}…`;
+/** Upstream row selection and field previews bound dynamic data; keep authored wake guidance intact. */
+function projectedWakeContent(lines: ReadonlyArray<string>): string {
+  return lines.join('\n');
 }
 
 /** Stable and bounded even if a forward-compatible persisted event id is unexpectedly large. */
@@ -216,7 +214,7 @@ export function renderInboxWakeMessage(release: InboxWakeRelease) {
             : []),
         ];
   return {
-    content: boundedContent([
+    content: projectedWakeContent([
       compactText(
         `[Pardes wake ${wake.token}] ${wake.pendingCount} pending through cursor ${cursor}`,
         HEADER_MAX_CHARS,

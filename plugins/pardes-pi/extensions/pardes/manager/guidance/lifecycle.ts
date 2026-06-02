@@ -62,8 +62,11 @@ Situational reset:
 - Continue from current durable state; do not poll workers, repeat already-handled work, or widen detail retrieval without a concrete decision need.
 `.trim(),
     reloaded: `
-Pardes plugin reloaded. System code was intentionally updated and the manager refreshed its pinned child-runtime snapshot. Former child RPC attachments disconnected; managed worktrees and retained conversations were preserved.
-${RECONNECT_CHECK_PASS}
+Pardes manager plugin reloaded. The plugin version changed and retained workers disconnected from this runtime; their managed worktrees and retained conversations remain preserved. The manager conversation already retains its context.
+Reload continuation:
+- Inspect retained workers with \`pardes_status(view="agents", agentFilter="all")\`.
+- For each retained session that should continue, inspect \`agent_status({ agentId })\`, then reconnect it with \`agent_revive({ agentId, message })\` and a current briefing.
+- Continue from retained conversation context after the appropriate sessions are reconnected.
 `.trim(),
     restored: `
 Pardes manager restored. Durable state was restored, but prior process-scoped child RPC attachment is not assumed to have survived. Reconnect and reinspect before continuing.
@@ -80,11 +83,12 @@ export const MANAGER_COMPACTION_COORDINATING_GUIDANCE = guidanceLines(
   CORE_COORDINATING_OPERATING_MODEL,
 );
 
-/** Authored guidance is emitted intact. Only appended dynamic count projection values are bounded. */
+/** Authored guidance is emitted intact. Reload is intentionally specific and carries no state orientation. */
 export function renderLifecycleGuidance(
   projection: ManagerGuidanceProjection,
   reason: ManagerGuidanceReason,
 ): string {
+  if (reason === 'reloaded') return MANAGER_LIFECYCLE_AUTHORED_GUIDANCE.reloaded;
   const snapshotLines =
     reason === 'compacted'
       ? operationalSnapshotLines(projection)

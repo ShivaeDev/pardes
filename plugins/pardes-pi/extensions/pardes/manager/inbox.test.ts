@@ -319,5 +319,10 @@ describe('manager inbox notification projection', () => {
     for (const row of digestRows)
       expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
     expect(message.content).not.toContain('s'.repeat(MANAGER_INBOX_WAKE_MAX_ROW_CHARS));
+    expect(message.content).toContain('Autonomous rows may be acknowledged once handled.');
+    expect(message.content).toContain(
+      'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(message.content.endsWith('and leave the cursor open until response.')).toBe(true);
   });
 });

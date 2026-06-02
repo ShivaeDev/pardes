@@ -16,7 +16,7 @@ Activation is comprehensive onboarding. Assume no prior Pardes knowledge: teach 
 
 Post-compaction guidance substantially reteaches the important operating model and adds situational current-state orientation. Do not assume conversational context survived. The compaction suffix embeds the same core coordinating block so the reminder and summarized state agree.
 
-Restoration and reload are concise reconnect/check passes that rely on prior activation or compaction context. Restoration explains that durable state returned while prior process-scoped child attachment is not assumed. Reload explains intentional system-code adoption, pinned child-runtime snapshot refresh, detached former RPC attachments, preserved managed artifacts, and selective revival.
+Restoration is a concise reconnect/check pass: durable state returned while prior process-scoped child attachment is not assumed. Reload is deliberately narrower because the manager conversation retains context: say that the manager plugin version changed and retained workers disconnected from this runtime, then give only the retained-worker inspect → `agent_status` → `agent_revive` continuation sequence. Do not append general state orientation or reteach inbox, publication, verification, or manager SOP on reload.
 
 ## Wording invariants
 

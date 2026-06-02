@@ -1103,6 +1103,19 @@ describe('Pardes model-visible tools', () => {
     expect(pending.content[0]?.text.split('\n').length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_ROWS);
     expect(pending.content[0]?.text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
     expect(pending.content[0]?.text).not.toContain(longSummary);
+
+    const tinyInbox = await status.execute(
+      'call-3',
+      { maxRows: 1, view: 'inbox' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(tinyInbox.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
+    expect(tinyInbox.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
+    expect(tinyInbox.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
+    expect(tinyInbox.content[0]?.text).toContain('… +11 more inbox index rows omitted');
+    expect(tinyInbox.content[0]?.text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
   });
 
   test('filters compact workstream surfaces so active work and planned backlog avoid completed history', async () => {
@@ -2171,6 +2184,7 @@ describe('Pardes model-visible tools', () => {
       'event-hostile': {
         createdAt,
         id: 'event-hostile',
+        reportId: '\u0000'.repeat(5_000),
         summary: '\u0000'.repeat(5_000),
         type: 'forward_compatible_event',
       },
@@ -2344,8 +2358,21 @@ describe('Pardes model-visible tools', () => {
     expect(hostile.content[0]?.text.length).toBeLessThanOrEqual(
       INBOX_EVENT_DETAIL_RENDER_MAX_CHARS,
     );
+    expect(hostile.content[0]?.text).toContain(
+      'durable child artifact: report_get({ reportId: "<redacted-invalid-metadata>" })',
+    );
+    expect(hostile.content[0]?.text).toContain(
+      'path autonomous: Autonomous rows may be acknowledged once handled.',
+    );
+    expect(hostile.content[0]?.text).toContain(
+      'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(hostile.content[0]?.text).toContain(
+      'judgment handoff: Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+    );
     expect(hostile.details).toMatchObject({
       eventId: 'event-hostile',
+      reportId: '<redacted-invalid-metadata>',
       returnedSummaryChars: 900,
       summaryChars: 5_000,
       summaryTruncated: true,

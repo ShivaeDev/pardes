@@ -27,7 +27,7 @@ export function managerGuidanceReasonForSessionStart(
   return reason === 'reload' ? 'reloaded' : 'restored';
 }
 
-/** Render authored lifecycle guidance intact, then append a bounded dynamic count projection. */
+/** Render authored lifecycle guidance intact; append bounded count orientation except on specific reload. */
 export function renderManagerGuidance(
   state: ManagerState | undefined,
   reason: ManagerGuidanceReason,

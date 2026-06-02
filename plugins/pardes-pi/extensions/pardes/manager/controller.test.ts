@@ -2952,7 +2952,7 @@ describe('manager controller', () => {
     expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
       'agent_report_completed: [child summary]',
     );
-    expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
+    expect(JSON.stringify(fixture.messages[0]?.message)).not.toContain(
       'Fast fixture completed before spawn returned.',
     );
   });
@@ -3112,7 +3112,7 @@ describe('manager controller', () => {
       staleCursor: false,
     });
     expect(controller.snapshot()?.inbox).toHaveLength(1);
-    expect(controller.snapshot()?.inbox[0]?.summary).toContain(
+    expect(controller.snapshot()?.inbox[0]?.details).toContain(
       'existing cursor still cover this later attention',
     );
     expect(fixture.messages).toHaveLength(1);
@@ -4087,11 +4087,15 @@ describe('manager controller', () => {
     await Effect.runPromise(
       workers.emit({
         agentId: agent.id,
+        context: `lossless restore context ${'x'.repeat(5_000)}`,
         question: 'Present me after restoration.',
         type: 'question',
       }),
     );
     expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    const persistedQuestionDetails = controller.snapshot()?.inbox[0]?.details;
+    expect(persistedQuestionDetails).toContain('lossless restore context');
+    expect(persistedQuestionDetails).toContain('x'.repeat(5_000));
     await Effect.runPromise(controller.shutdown(fixture.ctx));
 
     fixture.setManagerIdle(true);
@@ -4101,6 +4105,7 @@ describe('manager controller', () => {
     await eventually(() => fixture.messages.length === 1);
     const cursor = restored.snapshot()?.inboxWake?.cursor;
     expect(cursor).toBe(restored.snapshot()?.inbox[0]?.id);
+    expect(restored.snapshot()?.inbox[0]?.details).toBe(persistedQuestionDetails);
     expect(await Effect.runPromise(restored.beginInboxHandoff(fixture.ctx))).toMatchObject({
       cursor,
     });
@@ -6279,9 +6284,7 @@ describe('manager controller', () => {
       '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
     );
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
       details: { cursor: mergeAttention?.id, pendingCount: 1, type: 'manager_inbox_wake' },
     });
 
@@ -6375,7 +6378,12 @@ describe('manager controller', () => {
     const blockedMerge = requiredValue(controller.snapshot()?.inbox[1]);
     expect(
       await Effect.runPromise(controller.getInboxEvent({ eventId: blockedMerge.id }, fixture.ctx)),
-    ).toMatchObject({ id: blockedMerge.id, presentationBlocked: true, type: 'merged' });
+    ).toMatchObject({
+      id: blockedMerge.id,
+      presentationBlocked: true,
+      presentationBlockedReason: 'merge_retirement_refinement',
+      type: 'merged',
+    });
     await Effect.runPromise(
       workers.emit({
         agentId: unrelated.agent.id,
@@ -6419,9 +6427,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
       details: { cursor: suffix.id, pendingCount: 2 },
     });
     expect(
@@ -6485,9 +6491,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
       details: { pendingCount: 2 },
     });
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
@@ -6546,9 +6550,7 @@ describe('manager controller', () => {
       '#42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
     );
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
-      content: expect.stringContaining(
-        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
-      ),
+      content: expect.stringContaining('- merged: [GitHub metadata] inspect inbox_get({ eventId:'),
     });
     expect(managerInboxWakeups(fixture.messages).at(-1)?.message).toMatchObject({
       content: expect.stringContaining('- agent_git_audit_dirty: [Pardes]'),
@@ -7209,6 +7211,45 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
+  test('deduplicates equivalent pending conflict attention until acknowledgement rearms a later transition', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const pullRequestId = published.pullRequest.id;
+
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
+    );
+    const conflict = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'conflict'),
+    );
+    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
+    );
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: conflict.id }));
+    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
+    );
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('surfaces bounded remote-head divergence once until matching watcher metadata clears its durable warning', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -7239,6 +7280,20 @@ describe('manager controller', () => {
 
     await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.headDivergedAt).toBeUndefined();
+    expect(
+      controller.snapshot()?.inbox.filter(({ type }) => type === 'pull_request_head_diverged'),
+    ).toHaveLength(1);
+
+    // Matching lifecycle metadata may clear the current marker, but an equivalent
+    // still-pending diagnosis remains canonical until acknowledged.
+    await Effect.runPromise(watcher.diverge(pullRequestId));
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.headDivergedAt).toBeDefined();
+    expect(
+      controller.snapshot()?.inbox.filter(({ type }) => type === 'pull_request_head_diverged'),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: attention[0]?.id }));
+    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    await Effect.runPromise(watcher.diverge(pullRequestId));
     expect(
       controller.snapshot()?.inbox.filter(({ type }) => type === 'pull_request_head_diverged'),
     ).toHaveLength(1);
@@ -7503,7 +7558,7 @@ describe('manager controller', () => {
     );
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
-      'github_rate_metadata_unavailable: [GitHub metadata] GitHub.com watcher rate metadata is unavailable or invalid;',
+      'github_rate_metadata_unavailable: [GitHub metadata] inspect inbox_get({ eventId:',
     );
     expect(JSON.stringify(fixture.messages[0]?.message).length).toBeLessThan(1_200);
 
@@ -9175,7 +9230,9 @@ describe('manager controller', () => {
       managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
     ).toHaveLength(1);
     expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
-    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain('do not poll');
+    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain(
+      'verification_terminal_report_missing: [Pardes] inspect inbox_get({ eventId:',
+    );
 
     await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
     await Effect.runPromise(

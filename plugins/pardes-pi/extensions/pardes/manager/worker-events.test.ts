@@ -17,6 +17,7 @@ import {
   type HandoffAuditOutcome,
   handoffAuditSuffix,
   hasPendingAgentAttention,
+  hasPendingCanonicalAttention,
   isDuplicateWorkerAttention,
   type ReportArtifactPersistence,
   reportPersistenceSuffix,
@@ -401,7 +402,8 @@ describe('worker-event summary policy', () => {
         event: { agentId: 'agent-one', question: '  Choose\npath? ', type: 'question' },
         expected: {
           actionable: true,
-          summary: 'agent-one asks: Choose path?',
+          details: '{"question":"  Choose\\npath? "}',
+          summary: 'agent-one asks a blocking question; inspect the durable inbox detail.',
           type: 'agent_question',
         },
       },
@@ -423,7 +425,8 @@ describe('worker-event summary policy', () => {
         event: { agentId: 'agent-one', message: ' invalid\njson ', type: 'protocol_error' },
         expected: {
           actionable: true,
-          summary: 'agent-one emitted invalid RPC JSON: invalid json',
+          details: ' invalid\njson ',
+          summary: 'agent-one emitted invalid RPC JSON; inspect the durable inbox diagnostic.',
           type: 'agent_protocol_error',
         },
       },
@@ -487,6 +490,8 @@ describe('worker-event summary policy', () => {
     );
     expect(progress).toEqual({
       actionable: true,
+      details:
+        'report summary(JSON string): "Routine progress."\nreport artifact persistence diagnostic(JSON string): "report store unavailable"',
       summary:
         'agent-one: Routine progress. Report artifact persistence failed: report store unavailable.',
       type: 'agent_report_persist_failed',
@@ -504,6 +509,8 @@ describe('worker-event summary policy', () => {
     );
     expect(completed).toEqual({
       actionable: true,
+      details:
+        'report summary(JSON string): "Done."\nreport artifact persistence diagnostic(JSON string): "report store unavailable"\nmanaged-worktree Git audit diagnostic(JSON string): "inspection unavailable"',
       summary:
         'agent-one: Done. Report artifact persistence failed: report store unavailable. Git audit failed: inspection unavailable.',
       type: 'agent_git_audit_failed',
@@ -525,6 +532,29 @@ describe('manager event dedupe policy', () => {
       hasPendingAgentAttention(inbox, { agentId: 'agent-two', type: 'agent_git_audit_failed' }),
     ).toBe(false);
     expect(hasPendingAgentAttention(inbox, { type: 'manager_notice' })).toBe(true);
+  });
+
+  test('matches only equivalent canonical pending attention so changed outcomes rearm without duplicate noise', () => {
+    const candidate: ManagerEvent = {
+      agentId: 'agent-one',
+      createdAt,
+      details: 'full durable diagnosis',
+      id: 'event-candidate',
+      pullRequestId: 'pr-one',
+      summary: 'Bounded diagnosis.',
+      type: 'pull_request_auto_sync_attention',
+      workstreamId: 'ws-one',
+    };
+    const prior = { ...candidate, id: 'event-prior' };
+
+    expect(hasPendingCanonicalAttention([prior], candidate)).toBe(true);
+    expect(
+      hasPendingCanonicalAttention([{ ...prior, details: 'changed diagnosis' }], candidate),
+    ).toBe(false);
+    expect(hasPendingCanonicalAttention([{ ...prior, pullRequestId: 'pr-two' }], candidate)).toBe(
+      false,
+    );
+    expect(hasPendingCanonicalAttention([], candidate)).toBe(false);
   });
 
   test('deduplicates repeatable pending diagnostics by type plus agent without collapsing terminal reports', () => {

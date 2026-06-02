@@ -278,9 +278,13 @@ export type PullRequestRecord = typeof PullRequestRecordSchema.Type;
 export const ManagerEventSchema = Schema.Struct({
   agentId: Schema.optionalKey(NonEmptyString),
   createdAt: NonEmptyString,
+  /** Optional lossless non-report prose. Compact rows expose only a bounded structural pointer. */
+  details: Schema.optionalKey(Schema.String),
   id: NonEmptyString,
   /** Presentation cursors stop before this row until its bounded software outcome is durable. */
   presentationBlocked: Schema.optionalKey(Schema.Boolean),
+  /** Bounded software-owned explanation for a fail-closed presentation barrier. */
+  presentationBlockedReason: Schema.optionalKey(NonEmptyString.check(Schema.isMaxLength(240))),
   pullRequestId: Schema.optionalKey(NonEmptyString),
   reportId: Schema.optionalKey(ReportIdSchema),
   reportPreviewTruncated: Schema.optionalKey(Schema.Boolean),

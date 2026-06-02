@@ -61,6 +61,11 @@ export interface InboxAttentionProjection {
   readonly coveredCount: number;
   readonly queuedSuffixCount: number;
   readonly awaitingUser: boolean;
+  /** Exact cursor that may be acknowledged proactively without crossing a fail-closed barrier. */
+  readonly readyPrefixCursor?: string;
+  readonly readyPrefixCount: number;
+  readonly presentationBlockedEventId?: string;
+  readonly presentationBlockedReason?: string;
 }
 
 function compactText(text: string, limit: number): string {
@@ -133,8 +138,24 @@ export function projectInboxAttention(
   handoff?: InboxHandoff,
   nowMs = Date.now(),
 ): InboxAttentionProjection {
+  const firstBlockedIndex = inbox.findIndex((event) => event.presentationBlocked === true);
+  const readyPrefixCount = firstBlockedIndex === -1 ? inbox.length : firstBlockedIndex;
+  const readyPrefixCursor = inbox[readyPrefixCount - 1]?.id;
+  const presentationBlocked = firstBlockedIndex === -1 ? undefined : inbox[firstBlockedIndex];
+  const readiness = {
+    readyPrefixCount,
+    ...(readyPrefixCursor === undefined ? {} : { readyPrefixCursor }),
+    ...(presentationBlocked === undefined
+      ? {}
+      : {
+          presentationBlockedEventId: presentationBlocked.id,
+          presentationBlockedReason:
+            presentationBlocked.presentationBlockedReason ?? 'software_refinement_pending',
+        }),
+  };
   const retainedWake = retainCurrentInboxWake(inbox, wake);
-  if (!retainedWake) return { awaitingUser: false, coveredCount: 0, queuedSuffixCount: 0 };
+  if (!retainedWake)
+    return { awaitingUser: false, coveredCount: 0, queuedSuffixCount: 0, ...readiness };
   const cursorIndex = inbox.findIndex((event) => event.id === retainedWake.cursor);
   const deliveredCursorAgeMs = inboxWakeAgeMs(retainedWake, nowMs);
   return {
@@ -144,6 +165,7 @@ export function projectInboxAttention(
     awaitingUser: retainCurrentInboxHandoff(inbox, retainedWake, handoff) !== undefined,
     coveredCount: cursorIndex + 1,
     queuedSuffixCount: Math.max(0, inbox.length - cursorIndex - 1),
+    ...readiness,
   };
 }
 
@@ -164,21 +186,24 @@ function childDigestLabel(event: ManagerEvent, kind: 'summary' | 'question'): st
   return event.verificationId === undefined ? `child ${kind}` : `advisory verifier ${kind}`;
 }
 
+function drillDownPointer(event: ManagerEvent): string {
+  return `inspect inbox_get({ eventId:${event.id} })`;
+}
+
 function digestSummary(event: ManagerEvent): string {
   if (CHILD_SUMMARY_EVENT_TYPES.has(event.type))
-    return `[${childDigestLabel(event, 'summary')}] ${event.summary}`;
+    return `[${childDigestLabel(event, 'summary')}] ${drillDownPointer(event)}`;
   if (event.type === 'agent_question')
-    return `[${childDigestLabel(event, 'question')}] ${event.summary}`;
-  if (GITHUB_METADATA_EVENT_TYPES.has(event.type)) return `[GitHub metadata] ${event.summary}`;
+    return `[${childDigestLabel(event, 'question')}] ${drillDownPointer(event)}`;
+  if (GITHUB_METADATA_EVENT_TYPES.has(event.type))
+    return `[GitHub metadata] ${drillDownPointer(event)}`;
   if (GITHUB_EXTERNAL_FEEDBACK_EVENT_TYPES.has(event.type))
-    return event.summary.startsWith('[external GitHub feedback]')
-      ? event.summary
-      : `[external GitHub feedback] ${event.summary}`;
-  if (PARDES_SUMMARY_EVENT_TYPES.has(event.type)) return `[Pardes] ${event.summary}`;
+    return `[external GitHub feedback] ${drillDownPointer(event)}`;
+  if (PARDES_SUMMARY_EVENT_TYPES.has(event.type)) return `[Pardes] ${drillDownPointer(event)}`;
   const diagnosticLabel = OMITTED_DIAGNOSTIC_EVENT_LABELS.get(event.type);
   return diagnosticLabel === undefined
-    ? '[summary omitted] inspect full inbox row'
-    : `[Pardes] ${diagnosticLabel}; diagnostics omitted`;
+    ? `[summary omitted] ${drillDownPointer(event)}`
+    : `[Pardes] ${diagnosticLabel}; ${drillDownPointer(event)}`;
 }
 
 function digestRow(event: ManagerEvent): string {

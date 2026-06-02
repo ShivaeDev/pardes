@@ -97,6 +97,8 @@ describe('manager inbox notification projection', () => {
       awaitingUser: false,
       coveredCount: 0,
       queuedSuffixCount: 0,
+      readyPrefixCount: 6,
+      readyPrefixCursor: 'event-6',
     });
     expect(withInbox(projected, inbox)).toEqual({ ...state(inbox), inbox: [...inbox] });
   });
@@ -127,6 +129,8 @@ describe('manager inbox notification projection', () => {
       deliveredCursor: 'event-2',
       deliveredCursorAgeMs: 2_000,
       queuedSuffixCount: 1,
+      readyPrefixCount: 3,
+      readyPrefixCursor: 'event-late',
       wakeToken: wake.token,
     });
     expect(
@@ -140,6 +144,8 @@ describe('manager inbox notification projection', () => {
       awaitingUser: false,
       coveredCount: 0,
       queuedSuffixCount: 0,
+      readyPrefixCount: 3,
+      readyPrefixCursor: 'event-late',
     });
   });
 
@@ -156,7 +162,7 @@ describe('manager inbox notification projection', () => {
     expect(message.content).toBe(
       [
         `[Pardes wake ${message.details.wakeToken}] 1 pending through cursor event-1`,
-        '- agent_report_completed: [child summary] agent-1: Implemented the bounded manager inbox wake.',
+        '- agent_report_completed: [child summary] inspect inbox_get({ eventId:event-1 })',
         'Inspect `pardes_status(view="inbox")` for bounded rows; use `inbox_get({ eventId })` only for a known row; trust current inbox if stale.',
         'Autonomous rows may be acknowledged once handled.',
         'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
@@ -184,16 +190,16 @@ describe('manager inbox notification projection', () => {
     ]);
 
     expect(message.content).toContain(
-      '- conflict: [GitHub metadata] #68 for agent-1 has merge conflicts.',
+      '- conflict: [GitHub metadata] inspect inbox_get({ eventId:event-1 })',
     );
     expect(message.content).toContain(
-      '- agent_question: [child question] agent-2 asks: May I update the fixture?',
+      '- agent_question: [child question] inspect inbox_get({ eventId:event-2 })',
     );
     expect(message.content).toContain(
-      '- agent_protocol_error: [Pardes] child RPC protocol error; diagnostics omitted',
+      '- agent_protocol_error: [Pardes] child RPC protocol error; inspect inbox_get({ eventId:event-3 })',
     );
     expect(message.content).toContain(
-      '- future_external_feedback: [summary omitted] inspect full inbox row',
+      '- future_external_feedback: [summary omitted] inspect inbox_get({ eventId:event-4 })',
     );
     expect(message.content).not.toContain('raw diagnostic');
     expect(message.content).not.toContain('raw GitHub comment body');
@@ -212,7 +218,7 @@ describe('manager inbox notification projection', () => {
     ]);
 
     expect(message.content).toContain(
-      '- verification_terminal_report_missing: [Pardes] verifier-1: terminal report missing; follow up; do not poll. Retained …',
+      '- verification_terminal_report_missing: [Pardes] inspect inbox_get({ eventId:event-verifier-idle })',
     );
   });
 
@@ -237,10 +243,10 @@ describe('manager inbox notification projection', () => {
     ]);
 
     expect(message.content).toContain(
-      '- agent_report_completed: [advisory verifier summary] verifier-1: Consolidated advisory report.',
+      '- agent_report_completed: [advisory verifier summary] inspect inbox_get({ eventId:event-report })',
     );
     expect(message.content).toContain(
-      '- agent_question: [advisory verifier question] verifier-1 asks: Is the omitted fixture available?',
+      '- agent_question: [advisory verifier question] inspect inbox_get({ eventId:event-question })',
     );
     expect(message.content).not.toContain('[worker');
   });
@@ -251,10 +257,10 @@ describe('manager inbox notification projection', () => {
     const row = requiredValue(message.content.split('\n')[1]);
 
     expect(row).toContain(
-      'discussion_feedback: [external GitHub feedback] #42 observed issue comment by @alice:',
+      'discussion_feedback: [external GitHub feedback] inspect inbox_get({ eventId:event-discussion })',
     );
     expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
-    expect(row.endsWith('…')).toBe(true);
+    expect(row).not.toContain('@alice');
   });
 
   test('keeps a routine merge retirement outcome self-contained in one bounded external-metadata row', () => {
@@ -267,9 +273,7 @@ describe('manager inbox notification projection', () => {
     ]);
     const row = requiredValue(message.content.split('\n')[1]);
 
-    expect(row).toContain(
-      '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
-    );
+    expect(row).toContain('- merged: [GitHub metadata] inspect inbox_get({ eventId:event-merge })');
     expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
   });
 
@@ -279,9 +283,10 @@ describe('manager inbox notification projection', () => {
     ]);
     const row = requiredValue(message.content.split('\n')[1]);
 
-    expect(row.length).toBe(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
+    expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
     expect(row).not.toContain('\n');
-    expect(row.endsWith('…')).toBe(true);
+    expect(row).not.toContain('x'.repeat(20));
+    expect(row).toContain('inspect inbox_get({ eventId:event-1 })');
   });
 
   test('mints a cursor only through the ready prefix before a presentation-blocked merge row', () => {
@@ -290,6 +295,7 @@ describe('manager inbox notification projection', () => {
       {
         ...event('event-merge', 'merged', 'Merge refinement is pending.'),
         presentationBlocked: true,
+        presentationBlockedReason: 'merge_retirement_refinement',
       },
       event('event-suffix', 'agent_question', 'A suffix row held behind merge refinement.'),
     ];
@@ -297,7 +303,9 @@ describe('manager inbox notification projection', () => {
     const message = renderInboxWakeMessage({ inbox, wake });
 
     expect(wake).toMatchObject({ cursor: 'event-ready', pendingCount: 1 });
-    expect(message.content).toContain('- agent_question: [child question] A ready prefix row.');
+    expect(message.content).toContain(
+      '- agent_question: [child question] inspect inbox_get({ eventId:event-ready })',
+    );
     expect(message.content).toContain(
       '- queued suffix: +2 durable events await the next cursor release.',
     );
@@ -305,6 +313,12 @@ describe('manager inbox notification projection', () => {
     expect(message.content).not.toContain('A suffix row held behind merge refinement.');
     expect(message.details).toMatchObject({ digestCount: 1, queuedSuffixCount: 2 });
     expect(makeInboxWake('manager-notification', inbox.slice(1), createdAt)).toBeUndefined();
+    expect(projectInboxAttention(inbox, undefined)).toMatchObject({
+      presentationBlockedEventId: 'event-merge',
+      presentationBlockedReason: 'merge_retirement_refinement',
+      readyPrefixCount: 1,
+      readyPrefixCursor: 'event-ready',
+    });
   });
 
   test('leaves overflow as an explicit queued suffix instead of minting a cursor across hidden rows', () => {

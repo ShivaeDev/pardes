@@ -23,6 +23,9 @@ export const MANAGER_INPUT_ID_PATTERN = '^[a-zA-Z0-9._-]+$';
 export const MANAGER_INPUT_BASELINE_BRANCH_MAX_LENGTH = REMOTE_BASELINE_BRANCH_MAX_LENGTH;
 export const MANAGER_INPUT_BASELINE_BRANCH_PATTERN = REMOTE_BASELINE_BRANCH_PATTERN;
 export const MANAGER_INPUT_PULL_REQUEST_BRANCH_PATTERN = PULL_REQUEST_BRANCH_PATTERN;
+export const INBOX_EVENT_EXCERPT_DEFAULT_MAX_CHARS = 4_000;
+export const INBOX_EVENT_EXCERPT_MAX_CHARS = 12_000;
+export const INBOX_EVENT_EXCERPT_MAX_OFFSET = 128 * 1_024 * 1_024;
 
 const NonEmptyStringSchema = Schema.String.check(Schema.isMinLength(1));
 const ShortTextSchema = NonEmptyStringSchema.check(
@@ -62,6 +65,20 @@ export type WorkstreamIdInput = typeof WorkstreamIdInputSchema.Type;
 
 export const InboxGetInputSchema = Schema.Struct({
   eventId: ManagerInputIdSchema,
+  maxChars: Schema.optionalKey(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThan(0),
+      Schema.isLessThanOrEqualTo(INBOX_EVENT_EXCERPT_MAX_CHARS),
+    ),
+  ),
+  offset: Schema.optionalKey(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(INBOX_EVENT_EXCERPT_MAX_OFFSET),
+    ),
+  ),
 });
 export type InboxGetInput = typeof InboxGetInputSchema.Type;
 

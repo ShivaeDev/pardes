@@ -15,6 +15,7 @@ import type { StateStoreShape, StoreError } from '../storage/index.ts';
 import type { AgentRecord, ManagerEvent, ManagerState, PullRequestRecord } from './domain.ts';
 import {
   AgentNotFoundError,
+  formatPardesError,
   InvalidManagedStateError,
   PullRequestPublicationValidationError,
   WorkstreamNotFoundError,
@@ -32,7 +33,7 @@ import {
   failedHandoffAudit,
   type HandoffAuditOutcome,
   handoffAuditSuffix,
-  hasPendingAgentAttention,
+  hasPendingCanonicalAttention,
   successfulHandoffAudit,
 } from './worker-events.ts';
 
@@ -350,20 +351,24 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     agent: AgentRecord,
     summary: string,
     pullRequest?: PullRequestRecord,
+    details = summary,
   ) {
     const timestamp = yield* nowIso;
     const association = pullRequest
       ? pullRequestEventAssociation(pullRequest)
       : { agentId: agent.id, workstreamId: agent.workstreamId };
-    const event = makeEvent(
-      'pull_request_auto_sync_attention',
-      boundedEventSummary([summary]),
-      timestamp,
-      association,
-    );
+    const event = {
+      ...makeEvent(
+        'pull_request_auto_sync_attention',
+        boundedEventSummary([summary]),
+        timestamp,
+        association,
+      ),
+      details,
+    };
     const projection = yield* namespace.store.mutate<AutoSyncAttentionProjection, never>(
       (state) => {
-        const alreadyPending = hasPendingAgentAttention(state.inbox, event);
+        const alreadyPending = hasPendingCanonicalAttention(state.inbox, event);
         return Effect.succeed([
           { enqueued: !alreadyPending },
           alreadyPending ? state : { ...state, inbox: [...state.inbox, event] },
@@ -658,6 +663,7 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
           handoffAuditSuffix(audit),
         ]),
         pullRequest,
+        audit.status === 'failed' ? audit.failureDetails : handoffAuditSuffix(audit),
       );
       return;
     }
@@ -701,13 +707,15 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       })
       .pipe(Effect.exit);
     if (Exit.isFailure(syncResult)) {
+      const failure = Cause.squash(syncResult.cause);
       yield* enqueueAutoSyncAttention(
         agent,
         boundedEventSummary([
           `Could not auto-sync ${pullRequestLabel(pullRequest)} for ${agent.id}; review gate and managed worktree were preserved.`,
-          boundedFailureSummary(Cause.squash(syncResult.cause)),
+          boundedFailureSummary(failure),
         ]),
         pullRequest,
+        formatPardesError(failure),
       );
       return;
     }

@@ -20,6 +20,7 @@ import type {
   PullRequestObservation,
   PullRequestRecord,
 } from './domain.ts';
+import { formatPardesError } from './errors.ts';
 import { withInbox } from './inbox.ts';
 import {
   type PullRequestPublicationNamespace,
@@ -33,6 +34,7 @@ import {
   type HandoffAuditOutcome,
   handoffAuditSuffix,
   hasPendingAgentAttention,
+  hasPendingCanonicalAttention,
   truncateModelFacingText,
 } from './worker-events.ts';
 
@@ -435,7 +437,11 @@ function withMergedRetirementSummary(
   let changed = false;
   const inbox = state.inbox.map((event) => {
     if (event.type !== 'merged' || event.pullRequestId !== pullRequest.id) return event;
-    const { presentationBlocked: _presentationBlocked, ...readyEvent } = event;
+    const {
+      presentationBlocked: _presentationBlocked,
+      presentationBlockedReason: _presentationBlockedReason,
+      ...readyEvent
+    } = event;
     if (event.presentationBlocked !== true && event.summary === summary) return event;
     changed = true;
     return { ...readyEvent, summary };
@@ -602,16 +608,15 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         `Could not auto-stop idle ${agent.id} after merge.`,
         handoffAuditSuffix(audit),
       ]);
-      yield* persistAutoStopAudit(
-        agent.id,
-        audit,
-        makeEvent(
+      yield* persistAutoStopAudit(agent.id, audit, {
+        ...makeEvent(
           'agent_git_audit_failed',
           summary,
           audit.gitAudit.checkedAt,
           pullRequestEventAssociation(pullRequest),
         ),
-      );
+        details: audit.failureDetails,
+      });
       return {
         compact: 'idle-owner:preserved(audit)',
         detail: `Idle owner ${agent.id} was preserved because its managed-worktree Git audit failed.`,
@@ -640,20 +645,20 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     const stoppedResult = yield* callbacks.stopIdleWorker(agent.id).pipe(Effect.exit);
     if (Exit.isFailure(stoppedResult)) {
       const timestamp = yield* nowIso;
+      const failure = Cause.squash(stoppedResult.cause);
       const summary = boundedEventSummary([
         `Could not auto-stop idle ${agent.id} after merge; worker and worktree were preserved.`,
-        boundedFailureSummary(Cause.squash(stoppedResult.cause)),
+        boundedFailureSummary(failure),
       ]);
-      yield* persistAutoStopAudit(
-        agent.id,
-        audit,
-        makeEvent(
+      yield* persistAutoStopAudit(agent.id, audit, {
+        ...makeEvent(
           'agent_auto_stop_failed',
           summary,
           timestamp,
           pullRequestEventAssociation(pullRequest),
         ),
-      );
+        details: formatPardesError(failure),
+      });
       return {
         compact: 'idle-owner:preserved(stop)',
         detail: `Idle owner ${agent.id} was preserved because guarded auto-stop failed.`,
@@ -946,7 +951,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           : { discussionPaginationGaps: nextDiscussionPaginationGaps }),
         updatedAt: timestamp,
       };
-      const attention = [
+      const candidateAttention = [
         ...nextTransitions.map((transition) => ({
           ...makeEvent(
             transition,
@@ -954,7 +959,12 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
             timestamp,
             pullRequestEventAssociation(nextPullRequest),
           ),
-          ...(transition === 'merged' ? { presentationBlocked: true } : {}),
+          ...(transition === 'merged'
+            ? {
+                presentationBlocked: true,
+                presentationBlockedReason: 'merge_retirement_refinement',
+              }
+            : {}),
         })),
         ...(newlyDetectedPaginationGap
           ? [
@@ -977,6 +987,9 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
               ),
             ]),
       ];
+      const attention = candidateAttention.filter(
+        (candidate) => !hasPendingCanonicalAttention(state.inbox, candidate),
+      );
       return Effect.succeed([
         attention,
         {
@@ -1149,7 +1162,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       timestamp,
       pullRequestEventAssociation(known),
     );
-    const changed = yield* namespace.store.mutate((state) => {
+    const outcome = yield* namespace.store.mutate<
+      { readonly changed: boolean; readonly enqueued: boolean },
+      never
+    >((state) => {
       const pullRequest = state.pullRequests[event.pullRequestId];
       if (
         !pullRequest ||
@@ -1157,12 +1173,13 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         pullRequest.status !== 'open' ||
         pullRequest.headDivergedAt !== undefined
       )
-        return Effect.succeed([false, state] as const);
+        return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
+      const enqueued = !hasPendingCanonicalAttention(state.inbox, attention);
       return Effect.succeed([
-        true,
+        { changed: true, enqueued },
         {
           ...state,
-          inbox: [...state.inbox, attention],
+          inbox: enqueued ? [...state.inbox, attention] : state.inbox,
           pullRequests: {
             ...state.pullRequests,
             [pullRequest.id]: { ...pullRequest, headDivergedAt: timestamp, updatedAt: timestamp },
@@ -1170,10 +1187,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         },
       ] as const);
     });
-    if (!changed) return;
-    yield* callbacks.appendEventSafely(attention);
+    if (!outcome.changed) return;
+    if (outcome.enqueued) yield* callbacks.appendEventSafely(attention);
     yield* callbacks.refresh();
-    yield* callbacks.releaseInboxWake();
+    if (outcome.enqueued) yield* callbacks.releaseInboxWake();
   });
 
   const retryMergedRetirementForWorkstreamUnlocked = Effect.fnUntraced(function* (

@@ -20,7 +20,11 @@ export type ReportArtifactPersistence =
       readonly reportId: string;
       readonly reference?: AgentReportReference;
     }
-  | { readonly status: 'failed'; readonly failureSummary: string };
+  | {
+      readonly status: 'failed';
+      readonly failureSummary: string;
+      readonly failureDetails?: string;
+    };
 
 export type HandoffAuditOutcome =
   | {
@@ -31,12 +35,15 @@ export type HandoffAuditOutcome =
   | {
       readonly status: 'failed';
       readonly gitAudit: Extract<AgentGitAudit, { readonly status: 'failed' }>;
+      readonly failureDetails: string;
     };
 
 export interface WorkerEventSummary {
   readonly type: string;
   readonly summary: string;
   readonly actionable: boolean;
+  /** Lossless non-report prose retrieved only through explicit inbox_get pagination. */
+  readonly details?: string;
   readonly reportPreviewTruncated?: boolean;
 }
 
@@ -115,6 +122,7 @@ export function failedHandoffAudit(
   error: unknown,
 ): HandoffAuditOutcome {
   return {
+    failureDetails: formatPardesError(error),
     gitAudit: {
       checkedAt,
       failureSummary: boundedFailureSummary(error),
@@ -172,11 +180,25 @@ export function workerEventSummary(
         : reportPersistence?.status === 'failed'
           ? 'agent_report_persist_failed'
           : `agent_report_${event.status}`;
+    const details = [
+      ...(reportPersistence?.status === 'failed'
+        ? [
+            `report summary(JSON string): ${JSON.stringify(event.summary)}`,
+            `report artifact persistence diagnostic(JSON string): ${JSON.stringify(reportPersistence.failureDetails ?? reportPersistence.failureSummary)}`,
+          ]
+        : []),
+      ...(audit?.status === 'failed'
+        ? [
+            `managed-worktree Git audit diagnostic(JSON string): ${JSON.stringify(audit.failureDetails)}`,
+          ]
+        : []),
+    ].join('\n');
     return {
       actionable:
         event.status !== 'progress' ||
         reportPersistence?.status === 'failed' ||
         audit?.status === 'failed',
+      ...(details.length === 0 ? {} : { details }),
       summary: boundedEventSummary([
         `${event.agentId}: ${truncateModelFacingText(event.summary)}`,
         reportPersistenceSuffix(reportPersistence),
@@ -191,7 +213,11 @@ export function workerEventSummary(
   if (event.type === 'question')
     return {
       actionable: true,
-      summary: `${event.agentId} asks: ${truncateModelFacingText(event.question)}`,
+      details: JSON.stringify({
+        question: event.question,
+        ...(event.context === undefined ? {} : { context: event.context }),
+      }),
+      summary: `${event.agentId} asks a blocking question; inspect the durable inbox detail.`,
       type: 'agent_question',
     };
   if (event.type === 'unexpected_exit')
@@ -203,7 +229,8 @@ export function workerEventSummary(
   if (event.type === 'protocol_error')
     return {
       actionable: true,
-      summary: `${event.agentId} emitted invalid RPC JSON: ${truncateModelFacingText(event.message)}`,
+      details: event.message,
+      summary: `${event.agentId} emitted invalid RPC JSON; inspect the durable inbox diagnostic.`,
       type: 'agent_protocol_error',
     };
   if (event.type === 'status' && event.status === 'idle') {
@@ -235,6 +262,23 @@ export function hasPendingAgentAttention(
 ): boolean {
   return inbox.some(
     (event) => event.type === candidate.type && event.agentId === candidate.agentId,
+  );
+}
+
+/** Suppress only an equivalent pending row; acknowledgement or a changed canonical outcome rearms it. */
+export function hasPendingCanonicalAttention(
+  inbox: ReadonlyArray<ManagerEvent>,
+  candidate: ManagerEvent,
+): boolean {
+  return inbox.some(
+    (event) =>
+      event.type === candidate.type &&
+      event.agentId === candidate.agentId &&
+      event.pullRequestId === candidate.pullRequestId &&
+      event.verificationId === candidate.verificationId &&
+      event.workstreamId === candidate.workstreamId &&
+      event.summary === candidate.summary &&
+      event.details === candidate.details,
   );
 }
 

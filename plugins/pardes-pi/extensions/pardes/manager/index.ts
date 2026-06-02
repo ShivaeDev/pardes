@@ -166,6 +166,9 @@ export {
 } from './inbox.ts';
 export {
   type AgentSendReportInput,
+  INBOX_EVENT_EXCERPT_DEFAULT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   type InboxAcknowledgeInput,
   type InboxGetInput,
   MANAGER_INPUT_BASELINE_BRANCH_MAX_LENGTH,

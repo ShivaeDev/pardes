@@ -80,6 +80,26 @@ describe('filesystem state store', () => {
     expect(JSON.parse(await readFile(reportPath, 'utf8'))).toEqual(report);
   });
 
+  test('restores lossless inbox prose and bounded presentation-barrier reasons through schema-v1 storage', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    const details = `question context ${'x'.repeat(5_000)} tail`;
+    const event: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      details,
+      id: 'event-lossless-inbox',
+      presentationBlocked: true,
+      presentationBlockedReason: 'merge_retirement_refinement',
+      summary: 'Structural bounded summary.',
+      type: 'agent_question',
+    };
+    const state = { ...initialState(), inbox: [event] };
+
+    await Effect.runPromise(store.initialize(state));
+
+    expect(await Effect.runPromise(store.load())).toEqual(state);
+  });
+
   test('preserves a legitimate multi-megabyte worker-authored report artifact', async () => {
     const directory = await temporaryDirectory();
     const store = await Effect.runPromise(makeFileSystemStateStore(directory));

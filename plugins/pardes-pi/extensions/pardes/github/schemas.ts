@@ -109,22 +109,40 @@ export function isOpaquePublishedReviewBranch(value: string): boolean {
   return OpaquePublishedReviewBranchPattern.test(value);
 }
 
-export function isManagedPublishedReviewBranch(value: string): boolean {
+export function isHumanPublishedReviewBranch(value: string): boolean {
   return (
-    isOpaquePublishedReviewBranch(value) ||
-    ReadablePublishedReviewBranchPattern.test(value) ||
-    NestedReadablePublishedReviewBranchPattern.test(value) ||
     HumanPublishedReviewBranchPattern.test(value) ||
     FlatFallbackPublishedReviewBranchPattern.test(value)
   );
 }
 
-export const ReservePublishedReviewBranchInputSchema = Schema.Struct({
+export function isManagedPublishedReviewBranch(value: string): boolean {
+  return (
+    isOpaquePublishedReviewBranch(value) ||
+    ReadablePublishedReviewBranchPattern.test(value) ||
+    NestedReadablePublishedReviewBranchPattern.test(value) ||
+    isHumanPublishedReviewBranch(value)
+  );
+}
+
+export const PublishedReviewBranchCandidatesInputSchema = Schema.Struct({
   cwd: NonEmptyStringSchema,
   disambiguator: NonEmptyStringSchema,
   fallbackDisambiguator: NonEmptyStringSchema,
-  headSha: FullCommitShaSchema,
   workstreamTitle: NonEmptyStringSchema,
+});
+
+export const ReservePublishedReviewBranchInputSchema = Schema.Struct({
+  cwd: NonEmptyStringSchema,
+  headBranch: HumanPublishedReviewBranchSchema,
+  headSha: FullCommitShaSchema,
+  ownershipId: NonEmptyStringSchema,
+});
+
+export const ReleasePublishedReviewBranchClaimInputSchema = Schema.Struct({
+  cwd: NonEmptyStringSchema,
+  headSha: FullCommitShaSchema,
+  ownershipId: NonEmptyStringSchema,
 });
 
 export const PublishPullRequestInputSchema = Schema.Struct({
@@ -134,7 +152,6 @@ export const PublishPullRequestInputSchema = Schema.Struct({
   headBranch: PersistedPublishedReviewBranchSchema,
   headSha: FullCommitShaSchema,
   legacyExistingPullRequestNumber: Schema.optionalKey(PositiveIntegerSchema),
-  managedHeadBranchReservation: Schema.optionalKey(Schema.Boolean),
   openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
 });

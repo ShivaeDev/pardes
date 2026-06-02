@@ -11,8 +11,11 @@ import {
   GitHubPublicationMetadataSchema,
   GitHubPushedHeadMetadataSchema,
   GitHubSyncExistingPullRequestSchema,
+  isHumanPublishedReviewBranch,
   isManagedPublishedReviewBranch,
+  PublishedReviewBranchCandidatesInputSchema,
   PublishPullRequestInputSchema,
+  ReleasePublishedReviewBranchClaimInputSchema,
   ReservePublishedReviewBranchInputSchema,
   SyncExistingPullRequestInputSchema,
 } from './schemas.ts';
@@ -40,17 +43,29 @@ export interface PublishPullRequestInput {
   readonly openInBrowser?: boolean;
   /** Required update-only proof when the caller cannot prove a durable manager-owned reservation. */
   readonly legacyExistingPullRequestNumber?: number;
-  /** Capability proof that this exact managed head was durably reserved before create-capable publication. */
-  readonly managedHeadBranchReservation?: boolean;
+}
+
+export interface PublishedReviewBranchCandidatesInput {
+  readonly cwd: string;
+  readonly disambiguator: string;
+  readonly fallbackDisambiguator: string;
+  readonly workstreamTitle: string;
 }
 
 export interface ReservePublishedReviewBranchInput {
   readonly cwd: string;
-  readonly disambiguator: string;
-  readonly fallbackDisambiguator: string;
+  readonly headBranch: string;
   readonly headSha: string;
-  readonly workstreamTitle: string;
+  readonly ownershipId: string;
 }
+
+export interface ReleasePublishedReviewBranchClaimInput {
+  readonly cwd: string;
+  readonly headSha: string;
+  readonly ownershipId: string;
+}
+
+export type ReservePublishedReviewBranchResult = 'collision' | 'reserved';
 
 export interface SyncExistingPullRequestInput {
   readonly cwd: string;
@@ -80,9 +95,15 @@ export interface GitHubPublicationShape {
   readonly publish: (
     input: PublishPullRequestInput,
   ) => Effect.Effect<PublishedPullRequest, GitHubPublicationError>;
+  readonly publishedReviewBranchCandidates: (
+    input: PublishedReviewBranchCandidatesInput,
+  ) => Effect.Effect<ReadonlyArray<string>, GitHubPublicationError>;
+  readonly releasePublishedReviewBranchClaim: (
+    input: ReleasePublishedReviewBranchClaimInput,
+  ) => Effect.Effect<void, GitHubPublicationError>;
   readonly reservePublishedReviewBranch: (
     input: ReservePublishedReviewBranchInput,
-  ) => Effect.Effect<string, GitHubPublicationError>;
+  ) => Effect.Effect<ReservePublishedReviewBranchResult, GitHubPublicationError>;
   readonly syncExisting: (
     input: SyncExistingPullRequestInput,
   ) => Effect.Effect<SyncExistingPullRequestResult, GitHubSyncExistingError>;
@@ -158,19 +179,35 @@ export function makeGitHubPublicationService(
     return login ?? (yield* fallbackActor(cwd));
   });
 
-  const remoteBranchExists = Effect.fnUntraced(function* (cwd: string, branch: string) {
+  const remoteHeads = Effect.fnUntraced(function* (cwd: string, branches: ReadonlyArray<string>) {
     const listed = yield* command(cwd, 'git', [
       'ls-remote',
       '--heads',
       'origin',
-      `refs/heads/${branch}`,
+      ...branches.flatMap((branch) => [`refs/heads/${branch}`, `refs/heads/${branch}/*`]),
     ]);
-    return listed.stdout.trim().length > 0;
+    const heads = new Map<string, string>();
+    for (const line of listed.stdout.trim().split(/\r?\n/)) {
+      if (!line) continue;
+      const [sha, ref, ...unexpected] = line.split(/\s+/);
+      if (!sha || !ref || unexpected.length > 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
+        return yield* responseError('decode advertised remote branch heads', { line });
+      }
+      heads.set(ref.replace(/^refs\/heads\//, ''), sha);
+    }
+    return heads;
   });
 
-  const reservePublishedReviewBranch: GitHubPublicationShape['reservePublishedReviewBranch'] =
-    Effect.fnUntraced(function* (rawInput: ReservePublishedReviewBranchInput) {
-      const input = yield* Schema.decodeUnknownEffect(ReservePublishedReviewBranchInputSchema)(
+  const remoteBranchHead = Effect.fnUntraced(function* (cwd: string, branch: string) {
+    return (yield* remoteHeads(cwd, [branch])).get(branch);
+  });
+
+  const reservationClaimBranch = (ownershipId: string) =>
+    `pardes-reservation-${publishedBranchSlug(ownershipId, 'owner', 96)}`;
+
+  const publishedReviewBranchCandidates: GitHubPublicationShape['publishedReviewBranchCandidates'] =
+    Effect.fnUntraced(function* (rawInput: PublishedReviewBranchCandidatesInput) {
+      const input = yield* Schema.decodeUnknownEffect(PublishedReviewBranchCandidatesInputSchema)(
         rawInput,
       ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
       const actor = yield* githubActor(input.cwd);
@@ -190,34 +227,79 @@ export function makeGitHubPublicationService(
         PUBLISHED_BRANCH_DISAMBIGUATOR_MAX_LENGTH,
       );
       const namespaceRoot = `${actor}/pardes`;
-      const namespaceRootBlocked = yield* remoteBranchExists(input.cwd, namespaceRoot);
+      const namespaceHeads = yield* remoteHeads(input.cwd, [actor, namespaceRoot]);
+      const namespaceRootBlocked = namespaceHeads.has(actor) || namespaceHeads.has(namespaceRoot);
       const preferred = namespaceRootBlocked
         ? `${actor}-pardes-${title}`
         : `${namespaceRoot}/${title}`;
-      const candidates = [
+      return [
         preferred,
         `${preferred}-${disambiguator}`,
         `${preferred}-${disambiguator}-${fallbackDisambiguator}`,
       ];
-      for (const branch of candidates) {
-        if (yield* remoteBranchExists(input.cwd, branch)) continue;
-        const creation = yield* github
-          .run(input.cwd, [
-            'api',
-            'repos/{owner}/{repo}/git/refs',
-            '--method',
-            'POST',
-            '--field',
-            `ref=refs/heads/${branch}`,
-            '--field',
-            `sha=${input.headSha}`,
-          ])
-          .pipe(Effect.exit);
-        if (creation._tag === 'Success') return branch;
-        if (yield* remoteBranchExists(input.cwd, branch)) continue;
-        return yield* Effect.failCause(creation.cause);
-      }
-      return yield* responseError('reserve unique published review branch', { candidates });
+    });
+
+  const reservePublishedReviewBranch: GitHubPublicationShape['reservePublishedReviewBranch'] =
+    Effect.fnUntraced(function* (rawInput: ReservePublishedReviewBranchInput) {
+      const input = yield* Schema.decodeUnknownEffect(ReservePublishedReviewBranchInputSchema)(
+        rawInput,
+      ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
+      const claimBranch = reservationClaimBranch(input.ownershipId);
+      const before = yield* remoteHeads(input.cwd, [input.headBranch, claimBranch]);
+      const head = before.get(input.headBranch);
+      const claim = before.get(claimBranch);
+      if (claim === input.headSha && head === input.headSha) return 'reserved';
+      if (claim !== undefined)
+        return yield* responseError('verify published review branch ownership claim', {
+          claim,
+          claimBranch,
+          expected: input.headSha,
+          head,
+        });
+      if (before.size > 0) return 'collision';
+      const reservation = yield* command(input.cwd, 'git', [
+        'push',
+        '--atomic',
+        `--force-with-lease=refs/heads/${input.headBranch}:`,
+        `--force-with-lease=refs/heads/${claimBranch}:`,
+        'origin',
+        `${input.headSha}:refs/heads/${input.headBranch}`,
+        `${input.headSha}:refs/heads/${claimBranch}`,
+      ]).pipe(Effect.exit);
+      const after = yield* remoteHeads(input.cwd, [input.headBranch, claimBranch]);
+      const reservedHead = after.get(input.headBranch);
+      const reservedClaim = after.get(claimBranch);
+      if (reservedHead === input.headSha && reservedClaim === input.headSha) return 'reserved';
+      if (reservedClaim === undefined && after.size > 0) return 'collision';
+      if (reservation._tag === 'Failure') return yield* Effect.failCause(reservation.cause);
+      return yield* responseError('verify reserved published review branch', {
+        claimBranch,
+        expected: input.headSha,
+        reservedClaim,
+        reservedHead,
+      });
+    });
+
+  const releasePublishedReviewBranchClaim: GitHubPublicationShape['releasePublishedReviewBranchClaim'] =
+    Effect.fnUntraced(function* (rawInput: ReleasePublishedReviewBranchClaimInput) {
+      const input = yield* Schema.decodeUnknownEffect(ReleasePublishedReviewBranchClaimInputSchema)(
+        rawInput,
+      ).pipe(Effect.mapError((cause) => new GitHubPublicationInputError({ cause })));
+      const claimBranch = reservationClaimBranch(input.ownershipId);
+      const claim = yield* remoteBranchHead(input.cwd, claimBranch);
+      if (claim === undefined) return;
+      if (claim !== input.headSha)
+        return yield* responseError('verify released published review branch ownership claim', {
+          claim,
+          claimBranch,
+          expected: input.headSha,
+        });
+      yield* command(input.cwd, 'git', [
+        'push',
+        `--force-with-lease=refs/heads/${claimBranch}:${input.headSha}`,
+        'origin',
+        `:refs/heads/${claimBranch}`,
+      ]);
     });
 
   const syncExisting: GitHubPublicationShape['syncExisting'] = Effect.fnUntraced(function* (
@@ -289,8 +371,17 @@ export function makeGitHubPublicationService(
       Effect.mapError((cause) => new GitHubPublicationInputError({ cause })),
     );
     const managedHeadBranch =
-      input.managedHeadBranchReservation === true &&
+      input.legacyExistingPullRequestNumber === undefined &&
       isManagedPublishedReviewBranch(input.headBranch);
+    if (
+      isHumanPublishedReviewBranch(input.headBranch) &&
+      input.legacyExistingPullRequestNumber === undefined &&
+      (yield* remoteBranchHead(input.cwd, input.headBranch)) === undefined
+    ) {
+      return yield* new GitHubPublicationInputError({
+        cause: 'human-owned published review branch requires an existing remote reservation',
+      });
+    }
     let existing: { readonly number: number } | undefined;
     if (!managedHeadBranch) {
       if (input.legacyExistingPullRequestNumber === undefined) {
@@ -422,5 +513,11 @@ export function makeGitHubPublicationService(
     };
   });
 
-  return GitHubPublication.of({ publish, reservePublishedReviewBranch, syncExisting });
+  return GitHubPublication.of({
+    publish,
+    publishedReviewBranchCandidates,
+    releasePublishedReviewBranchClaim,
+    reservePublishedReviewBranch,
+    syncExisting,
+  });
 }

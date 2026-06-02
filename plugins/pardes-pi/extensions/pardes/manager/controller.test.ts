@@ -30,6 +30,7 @@ import {
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   type PublishedPullRequest,
+  type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
   type PullRequestDiscussionSnapshot,
   type ReservePublishedReviewBranchInput,
@@ -498,10 +499,12 @@ function stubGithub(
     | ((publicationIndex: number) => Partial<PublishedPullRequest>) = {},
 ) {
   const publications: PublishPullRequestInput[] = [];
+  const candidateRequests: PublishedReviewBranchCandidatesInput[] = [];
   const reservations: ReservePublishedReviewBranchInput[] = [];
   const syncs: SyncExistingPullRequestInput[] = [];
   let duringPublish: (() => Effect.Effect<void, unknown>) | undefined;
   let duringSync: (() => Effect.Effect<void, unknown>) | undefined;
+  let reserveResults: Array<'collision' | 'reserved'> = [];
   let syncResult: SyncExistingPullRequestResult = { status: 'synced' };
   let syncFailure: GitHubCommandError | undefined;
   const github: GitHubPublicationShape = {
@@ -526,13 +529,20 @@ function stubGithub(
           ...currentOverrides,
         };
       }),
-    reservePublishedReviewBranch: (input) =>
+    publishedReviewBranchCandidates: (input) =>
       Effect.sync(() => {
-        reservations.push(input);
-        return `fixture-user/pardes/${input.workstreamTitle
+        candidateRequests.push(input);
+        const preferred = `fixture-user/pardes/${input.workstreamTitle
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-+|-+$/g, '')}`;
+        return [preferred, `${preferred}-worker`, `${preferred}-worker-manager`];
+      }),
+    releasePublishedReviewBranchClaim: () => Effect.void,
+    reservePublishedReviewBranch: (input) =>
+      Effect.sync(() => {
+        reservations.push(input);
+        return reserveResults.shift() ?? ('reserved' as const);
       }),
     syncExisting: (input) =>
       Effect.gen(function* () {
@@ -543,6 +553,7 @@ function stubGithub(
       }),
   };
   return {
+    candidateRequests,
     github,
     publications,
     reservations,
@@ -551,6 +562,9 @@ function stubGithub(
     },
     setDuringSync: (effect: () => Effect.Effect<void, unknown>) => {
       duringSync = effect;
+    },
+    setReserveResults: (results: Array<'collision' | 'reserved'>) => {
+      reserveResults = results;
     },
     setSyncFailure: (failure: GitHubCommandError) => {
       syncFailure = failure;
@@ -1160,6 +1174,14 @@ describe('manager controller', () => {
         Effect.sync(() => {
           calls.push('github.publish');
         }).pipe(Effect.flatMap(() => baseGithub.github.publish(input))),
+      publishedReviewBranchCandidates: (input) =>
+        Effect.sync(() => {
+          calls.push('github.publishedReviewBranchCandidates');
+        }).pipe(Effect.flatMap(() => baseGithub.github.publishedReviewBranchCandidates(input))),
+      releasePublishedReviewBranchClaim: (input) =>
+        Effect.sync(() => {
+          calls.push('github.releasePublishedReviewBranchClaim');
+        }).pipe(Effect.flatMap(() => baseGithub.github.releasePublishedReviewBranchClaim(input))),
       reservePublishedReviewBranch: (input) =>
         Effect.sync(() => {
           calls.push('github.reservePublishedReviewBranch');
@@ -6372,7 +6394,6 @@ describe('manager controller', () => {
       cwd: requiredValue(agent.worktree).path,
       headBranch: publishedHeadBranch,
       headSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
-      managedHeadBranchReservation: true,
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
@@ -6415,7 +6436,107 @@ describe('manager controller', () => {
       ),
     );
     expect(github.publications[1]?.headBranch).toBe(publishedHeadBranch);
+    expect(github.candidateRequests).toHaveLength(1);
     expect(github.reservations).toHaveLength(1);
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('durably clears a collided remote candidate before reserving its readable fallback', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    github.setReserveResults(['collision', 'reserved']);
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+
+    expect(github.reservations.map(({ headBranch }) => headBranch)).toEqual([
+      'fixture-user/pardes/watched-pr',
+      'fixture-user/pardes/watched-pr-worker',
+    ]);
+    expect(published.pullRequest.headBranch).toBe('fixture-user/pardes/watched-pr-worker');
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBe(
+      'fixture-user/pardes/watched-pr-worker',
+    );
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+  });
+
+  test('recovers a durably pending exact-SHA reservation before publishing its first gate', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'Pending claim',
+    );
+    writeFileSync(
+      join(requiredValue(agent.worktree).path, 'pending.txt'),
+      'pending claim fixture\n',
+    );
+    git(requiredValue(agent.worktree).path, 'add', 'pending.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'pending claim fixture');
+    const claimSha = git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD');
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      agents: Record<
+        string,
+        {
+          publishedReviewBranch?: string;
+          publishedReviewBranchClaimSha?: string;
+          publishedReviewBranchPending?: boolean;
+        }
+      >;
+    };
+    const persistedAgent = requiredValue(persisted.agents[agent.id]);
+    persistedAgent.publishedReviewBranch = 'fixture-user/pardes/pending-claim';
+    persistedAgent.publishedReviewBranchClaimSha = claimSha;
+    persistedAgent.publishedReviewBranchPending = true;
+    writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+    await Effect.runPromise(controller.refresh(fixture.ctx));
+
+    await Effect.runPromise(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Recover the durable claim.',
+          title: 'Recover pending claim',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+
+    expect(github.candidateRequests).toHaveLength(0);
+    expect(github.reservations).toEqual([
+      {
+        cwd: requiredValue(agent.worktree).path,
+        headBranch: 'fixture-user/pardes/pending-claim',
+        headSha: claimSha,
+        ownershipId: `${requiredValue(controller.snapshot()).managerId}-${agent.id}`,
+      },
+    ]);
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
   });
 
   test('rejects base retarget while an owned review gate remains open before reaching GitHub publication', async () => {

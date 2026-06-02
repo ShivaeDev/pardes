@@ -75,7 +75,9 @@ describe('managed worktree service', () => {
       service.create({ agentId: 'agent-1', branchPointSha, managerId: 'manager-1', repo }),
     );
 
-    expect(lease.path).toBe(join(primary, '.worktrees', 'pardes', 'manager-1', 'agent-1'));
+    expect(lease.path).toBe(
+      join(primary, '.worktrees', 'pardes', 'manager-1', 'agent-1', 'agent-1'),
+    );
     expect(git(lease.path, 'rev-parse', 'HEAD')).toBe(branchPointSha);
     expect(git(lease.path, 'branch', '--show-current')).toBe('pardes-test/pardes/agent-1');
     expect(git(primary, 'status', '--porcelain', '--untracked-files=all')).toBe('');
@@ -139,10 +141,19 @@ describe('managed worktree service', () => {
     );
 
     expect(first.branch).toBe('pardes-test/pardes/resume-release');
-    expect(first.path).toBe(join(primary, '.worktrees', 'pardes', 'manager-one', 'resume-release'));
+    expect(first.path).toBe(
+      join(primary, '.worktrees', 'pardes', 'manager-one', 'agent-11111111', 'resume-release'),
+    );
     expect(second.branch).toBe('pardes-test/pardes/resume-release-22222222');
     expect(second.path).toBe(
-      join(primary, '.worktrees', 'pardes', 'manager-two', 'resume-release-22222222'),
+      join(
+        primary,
+        '.worktrees',
+        'pardes',
+        'manager-two',
+        'agent-22222222',
+        'resume-release-22222222',
+      ),
     );
   });
 
@@ -150,7 +161,7 @@ describe('managed worktree service', () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
-    git(primary, 'branch', 'pardes-test/pardes');
+    git(primary, 'branch', 'pardes-test');
     const service = makeManagedWorktreeService();
 
     const lease = await Effect.runPromise(
@@ -165,8 +176,35 @@ describe('managed worktree service', () => {
 
     expect(lease.branch).toBe('pardes-test-pardes-readable-worktree');
     expect(lease.path).toBe(
-      join(primary, '.worktrees', 'pardes', 'manager-root-blocked', 'readable-worktree'),
+      join(
+        primary,
+        '.worktrees',
+        'pardes',
+        'manager-root-blocked',
+        'agent-root-blocked',
+        'readable-worktree',
+      ),
     );
+  });
+
+  test('adds a short local disambiguator when a readable candidate has descendants', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    git(primary, 'branch', 'pardes-test/pardes/readable-worktree/descendant');
+    const service = makeManagedWorktreeService();
+
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-12345678',
+        branchPointSha,
+        managerId: 'manager-descendant',
+        name: 'Readable Worktree',
+        repo,
+      }),
+    );
+
+    expect(lease.branch).toBe('pardes-test/pardes/readable-worktree-12345678');
   });
 
   test('returns an immutable audited head snapshot when later commits advance the worker branch', async () => {
@@ -511,6 +549,38 @@ describe('managed worktree service', () => {
       );
       expect(failure._tag).toBe('InvalidManagedLeaseError');
     }
+  });
+
+  test('rejects cross-agent forgery of another readable lease before audit or cleanup', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const source = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-source',
+        branchPointSha,
+        managerId: 'manager-1',
+        name: 'Readable Ownership',
+        repo,
+      }),
+    );
+    const forged = { ...source, agentId: 'agent-borrower' };
+    const borrower = owner(repo, 'manager-1', 'agent-borrower');
+
+    const inspectionFailure = await Effect.runPromise(
+      service.inspect(borrower, forged).pipe(Effect.flip),
+    );
+    const cleanupFailure = await Effect.runPromise(
+      service.inspectForCleanup(borrower, forged).pipe(Effect.flip),
+    );
+    for (const failure of [inspectionFailure, cleanupFailure]) {
+      expect(failure).toMatchObject({
+        _tag: 'InvalidManagedLeaseError',
+        reason: 'worktree path and branch do not match their managed namespace',
+      });
+    }
+    expect(existsSync(source.path)).toBe(true);
   });
 
   test('rejects a redirected managed ancestor before creating an outside worktree', async () => {

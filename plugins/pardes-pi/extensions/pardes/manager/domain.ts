@@ -94,6 +94,10 @@ export const AgentRecordSchema = Schema.Struct({
   model: NonEmptyString,
   /** Stable manager-owned remote branch reservation; the manager-scoped worktree branch remains local. */
   publishedReviewBranch: Schema.optionalKey(ManagedPublishedReviewBranchSchema),
+  /** Exact SHA for a transient remote ownership anchor retained until reservation finalization cleanup. */
+  publishedReviewBranchClaimSha: Schema.optionalKey(FullCommitShaSchema),
+  /** Durable two-phase marker: the candidate is owned locally but its create-only remote claim is unsettled. */
+  publishedReviewBranchPending: Schema.optionalKey(Schema.Boolean),
   role: Schema.Literals(['explorer', 'worker', 'verifier']),
   sessionDir: NonEmptyString,
   sessionFile: Schema.optionalKey(NonEmptyString),

@@ -192,6 +192,15 @@ function leasePath(repo: RepoState, managerId: string, directoryName: string): s
   return join(repo.primaryCheckout, '.worktrees', 'pardes', managerId, directoryName);
 }
 
+function readableLeasePath(
+  repo: RepoState,
+  managerId: string,
+  agentId: string,
+  directoryName: string,
+): string {
+  return join(repo.primaryCheckout, '.worktrees', 'pardes', managerId, agentId, directoryName);
+}
+
 function detachedReviewCheckoutPath(
   repo: RepoState,
   managerId: string,
@@ -272,7 +281,7 @@ const validateManagedWorktreeLeaseIdentity = Effect.fnUntraced(function* (
   const readable =
     isSafeManagedSegment(directoryName) &&
     directoryName !== DETACHED_REVIEW_CHECKOUTS_DIRECTORY &&
-    lease.path === leasePath(owner.repo, owner.managerId, directoryName) &&
+    lease.path === readableLeasePath(owner.repo, owner.managerId, owner.agentId, directoryName) &&
     ((READABLE_LOCAL_BRANCH.test(lease.branch) &&
       lease.branch.endsWith(`/pardes/${directoryName}`)) ||
       (FLAT_FALLBACK_LOCAL_BRANCH.test(lease.branch) &&
@@ -393,11 +402,16 @@ const ensureManagedWorktreeParent = Effect.fnUntraced(function* (
     return yield* invalid('path', 'managed worktree target must not be a symbolic link');
 });
 
-const ensureWritingWorktreeParent = (repo: RepoState, managerId: string, directoryName: string) =>
+const ensureWritingWorktreeParent = (
+  repo: RepoState,
+  managerId: string,
+  agentId: string,
+  directoryName: string,
+) =>
   ensureManagedWorktreeParent(
     repo,
-    ['.worktrees', 'pardes', managerId],
-    leasePath(repo, managerId, directoryName),
+    ['.worktrees', 'pardes', managerId, agentId],
+    readableLeasePath(repo, managerId, agentId, directoryName),
   );
 
 const ensureDetachedReviewCheckoutParent = (
@@ -617,14 +631,16 @@ export function makeManagedWorktreeService(
         Effect.gen(function* () {
           yield* ensureManagedRootExcluded(input.repo);
           const namespaceRoot = `${actor}/pardes`;
+          const actorRef = `refs/heads/${actor}`;
           const namespaceRootRef = `refs/heads/${namespaceRoot}`;
-          const namespaceRootBlocked = (yield* git(input.repo.primaryCheckout, [
+          const namespaceRefs = (yield* git(input.repo.primaryCheckout, [
             'for-each-ref',
             '--format=%(refname)',
+            actorRef,
             namespaceRootRef,
-          ])).stdout
-            .split(/\r?\n/)
-            .includes(namespaceRootRef);
+          ])).stdout.split(/\r?\n/);
+          const namespaceRootBlocked =
+            namespaceRefs.includes(actorRef) || namespaceRefs.includes(namespaceRootRef);
           for (const directoryName of readableWorktreeCandidates(
             input.name ?? input.agentId,
             input.agentId,
@@ -637,19 +653,27 @@ export function makeManagedWorktreeService(
               Effect.mapError(() => invalid('branch', 'must be a valid Git branch name')),
             );
             const ref = `refs/heads/${branch}`;
-            const present = (yield* git(input.repo.primaryCheckout, [
+            const conflictingRef = (yield* git(input.repo.primaryCheckout, [
               'for-each-ref',
               '--format=%(refname)',
               ref,
-            ])).stdout
-              .split(/\r?\n/)
-              .includes(ref);
-            const path = leasePath(input.repo, input.managerId, directoryName);
+            ])).stdout.trim();
+            const path = readableLeasePath(
+              input.repo,
+              input.managerId,
+              input.agentId,
+              directoryName,
+            );
             const target = yield* lstatIfExists('inspect managed worktree target', path);
             if (target?.isSymbolicLink())
               return yield* invalid('path', 'managed worktree target must not be a symbolic link');
-            if (present || target) continue;
-            yield* ensureWritingWorktreeParent(input.repo, input.managerId, directoryName);
+            if (conflictingRef || target) continue;
+            yield* ensureWritingWorktreeParent(
+              input.repo,
+              input.managerId,
+              input.agentId,
+              directoryName,
+            );
             yield* git(input.repo.primaryCheckout, [
               'worktree',
               'add',

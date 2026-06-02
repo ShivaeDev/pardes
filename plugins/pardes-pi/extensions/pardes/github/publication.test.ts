@@ -800,6 +800,23 @@ describe('GitHub publication boundary', () => {
     });
   });
 
+  test('rejects a same-repository final publication URL whose path number disagrees with metadata', async () => {
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ url: 'https://github.com/acme/project/pull/43' }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'view pull request',
+    });
+  });
+
   test('rejects oversized final publication URLs instead of projecting them', async () => {
     const oversizedUrl = `https://github.com/${'a'.repeat(2_048)}`;
     const fixture = scriptedRunner([

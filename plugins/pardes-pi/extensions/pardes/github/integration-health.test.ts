@@ -18,7 +18,7 @@ const RATE_LIMIT = {
   cost: 1,
   limit: 5_000,
   remaining: 4_999,
-  resetAt: '2026-06-01T01:00:00Z',
+  resetAt: '2099-01-15T08:00:00Z',
 };
 
 function defaultBranchResult(sha = MAIN_SHA) {
@@ -218,7 +218,7 @@ describe('GitHub integration-health inspection', () => {
           limit: 5_000,
           pressure: 'ready',
           remaining: 4_999,
-          resetAt: '2026-06-01T01:00:00Z',
+          resetAt: '2099-01-15T08:00:00Z',
           source: 'graphql',
         },
         observation: 'bounded_hosted_rate_budget',

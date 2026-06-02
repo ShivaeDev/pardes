@@ -27,15 +27,19 @@ const RATE_LIMIT = {
   resetAt: '2026-06-01T01:00:00Z',
 };
 
-function rateLimitFallbackResult(remaining = 5_000): ProcessResult {
+function rateLimitFallbackBudgetsResult(graphqlRemaining: number, restRemaining: number) {
   return result(
     JSON.stringify({
       resources: {
-        core: { limit: 5_000, remaining, reset: 1_800_000_000 },
-        graphql: { limit: 5_000, remaining, reset: 1_800_000_000 },
+        core: { limit: 5_000, remaining: restRemaining, reset: 1_800_000_000 },
+        graphql: { limit: 5_000, remaining: graphqlRemaining, reset: 1_800_000_000 },
       },
     }),
   );
+}
+
+function rateLimitFallbackResult(remaining = 5_000): ProcessResult {
+  return rateLimitFallbackBudgetsResult(remaining, remaining);
 }
 
 function makeGitHubWatcherService(
@@ -682,6 +686,33 @@ describe('GitHub watcher service', () => {
     ]);
   });
 
+  test('preserves the watcher reserve floor across the pre-discussion CLI estimate boundary', async () => {
+    for (const remaining of [111, 112, 113, 114, 115]) {
+      const fixture = scriptedRunner([rateLimitFallbackBudgetsResult(remaining, 5_000)]);
+      const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
+      const service = makeGitHubWatcherServiceProduction({
+        hostedMetadata,
+        runner: fixture.runner,
+      });
+      const received = callbacks([pullRequest()]);
+
+      await Effect.runPromise(service.poll(received.callbacks));
+
+      expect(received.observations).toEqual([]);
+      expect(received.failures).toEqual([]);
+      expect(received.throttleDiagnostics).toEqual([
+        { status: 'proactive_throttle', tier: 'paused' },
+      ]);
+      expect(fixture.invocations).toEqual([
+        {
+          args: ['api', 'rate_limit', '--hostname', 'github.com'],
+          command: 'gh',
+          cwd: '/tmp/project',
+        },
+      ]);
+    }
+  });
+
   test('rechecks the bounded budget between review gates and defers later gates after a low GraphQL observation', async () => {
     const fixture = scriptedRunner([
       rateLimitFallbackResult(),
@@ -1065,6 +1096,18 @@ describe('GitHub watcher service', () => {
     }
     expect(malformedGraphql.invocations).toHaveLength(2);
     expect(malformedInline.invocations).toHaveLength(3);
+  });
+
+  test('rejects a persisted association whose URL path number disagrees before invoking gh', async () => {
+    const fixture = scriptedRunner([]);
+    const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
+    const received = callbacks([pullRequest({ url: 'https://github.com/acme/project/pull/43' })]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.observations).toEqual([]);
+    expect(received.failures[0]?.error._tag).toBe('GitHubWatcherInputError');
+    expect(fixture.invocations).toEqual([]);
   });
 
   test('rejects an unsafe legacy association URL before invoking gh', async () => {

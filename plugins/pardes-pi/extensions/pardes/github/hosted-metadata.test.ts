@@ -357,6 +357,33 @@ describe('GitHub hosted metadata adapter', () => {
     expect(health.rest).toMatchObject({ remaining: 2_999, source: 'rest_fallback' });
   });
 
+  test('projects expired fallback metadata as unavailable in detailed snapshots', async () => {
+    let now = 1_700_000_000_000;
+    const fixture = scriptedRunner([fallbackResult()]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: fixture.runner,
+      unsafeNowMillis: () => now,
+    });
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+
+    now += GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS;
+
+    expect(adapter.compactStatusUnsafe()).toEqual({ throttle: 'unavailable' });
+    expect(await Effect.runPromise(adapter.snapshot())).toEqual({
+      credentialContext: 'github_com_controller_lifetime',
+      fallback: 'unavailable',
+      graphql: { availability: 'unavailable' },
+      observation: 'bounded_hosted_rate_budget',
+      rest: { availability: 'unavailable' },
+      watcherPolling: {
+        reason: 'rate_metadata_unavailable',
+        status: 'deferred',
+        tier: 'unavailable',
+      },
+    });
+  });
+
   test('defers fail-closed when expired fallback metadata cannot be refreshed', async () => {
     let now = 1_700_000_000_000;
     let invocations = 0;
@@ -469,6 +496,111 @@ describe('GitHub hosted metadata adapter', () => {
 
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 4_994, source: 'local_estimate' },
+    });
+  });
+
+  test('retains opaque GraphQL spend that completes after reset rollover', async () => {
+    let now = 1_700_000_000_000;
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const fixture = scriptedRunner([
+      fallbackResult(4_000, 3_000, 1_700_000_001, 1_700_000_001),
+      fallbackResult(5_000, 5_000, 1_700_003_600, 1_700_003_600),
+    ]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: fixture.runner,
+    });
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    const opaque = Effect.runFork(
+      adapter.accountOpaqueRequest(
+        'graphql',
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 3_995, source: 'local_estimate' },
+    });
+
+    now += 2_000;
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 4_995, source: 'local_estimate' },
+    });
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    await Effect.runPromise(Fiber.join(opaque));
+
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 4_995, source: 'local_estimate' },
+    });
+  });
+
+  test('retains opaque REST spend that completes after reset rollover', async () => {
+    let now = 1_700_000_000_000;
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const fixture = scriptedRunner([
+      fallbackResult(3_000, 4_000, 1_700_000_001, 1_700_000_001),
+      fallbackResult(5_000, 5_000, 1_700_003_600, 1_700_003_600),
+    ]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: fixture.runner,
+    });
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    const opaque = Effect.runFork(
+      adapter.accountOpaqueRequest(
+        'rest',
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      rest: { remaining: 3_999, source: 'local_estimate' },
+    });
+
+    now += 2_000;
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      rest: { remaining: 4_999, source: 'local_estimate' },
+    });
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    await Effect.runPromise(Fiber.join(opaque));
+
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      rest: { remaining: 4_999, source: 'local_estimate' },
+    });
+  });
+
+  test('retains launched and finalized GraphQL debt through rollover until later reconciliation', async () => {
+    let now = 1_700_000_000_000;
+    const fixture = scriptedRunner([
+      fallbackResult(4_000, 3_000, 1_700_000_001, 1_700_000_001),
+      fallbackResult(5_000, 5_000, 1_700_003_600, 1_700_003_600),
+      fallbackResult(5_000, 5_000, 1_700_003_600, 1_700_003_600),
+    ]);
+    const adapter = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner: fixture.runner,
+    });
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    const reservation = await Effect.runPromise(adapter.reserveGraphQLRequest());
+    await Effect.runPromise(adapter.launchGraphQLRequest(reservation.id));
+
+    now += 2_000;
+    await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 4_995, source: 'local_estimate' },
+    });
+    await Effect.runPromise(adapter.finalizeGraphQLRequest(reservation.id));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 4_995, source: 'local_estimate' },
+    });
+
+    await Effect.runPromise(adapter.recoverRequestCapacity('/tmp/project'));
+    expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
+      graphql: { remaining: 5_000, source: 'rest_fallback' },
     });
   });
 

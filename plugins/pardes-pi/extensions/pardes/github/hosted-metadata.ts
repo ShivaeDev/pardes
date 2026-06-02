@@ -299,11 +299,15 @@ function maximumSequence(left: number | undefined, right: number | undefined): n
   return Math.max(left, right);
 }
 
+/** Live identities may span reset rollover; only completed anonymous window debt expires eagerly. */
 function pruneDebt(
   debt: ReadonlyArray<InternalDebtBucket>,
   nowMillis: number,
 ): ReadonlyArray<InternalDebtBucket> {
-  return debt.filter(({ resetAt }) => resetAt === undefined || Date.parse(resetAt) > nowMillis);
+  return debt.filter(
+    ({ reservationId, resetAt }) =>
+      reservationId !== undefined || resetAt === undefined || Date.parse(resetAt) > nowMillis,
+  );
 }
 
 function pruneLedger(debt: InternalDebtLedger, nowMillis: number): InternalDebtLedger {
@@ -467,6 +471,19 @@ function observeBudget(
   return effective === undefined
     ? { availability: 'unavailable' }
     : { availability: 'available', ...effective };
+}
+
+function snapshotBudget(
+  observed: InternalObservedBudget | undefined,
+  debt: ReadonlyArray<InternalDebtBucket>,
+  nowMillis: number,
+  fallbackAvailable: boolean,
+): GitHubRateLimitBudgetObservation {
+  return observed === undefined ||
+    Date.parse(observed.resetAt) <= nowMillis ||
+    (observed.source === 'rest_fallback' && !fallbackAvailable)
+    ? { availability: 'unavailable' }
+    : observeBudget(observed, debt);
 }
 
 function graphqlBudget(value: GitHubGraphQLRateLimit): InternalObservedBudget {
@@ -829,17 +846,24 @@ export function makeGitHubHostedMetadataAdapter(
   const completeUnobservedRequest = (reservationId: string) =>
     Ref.update(state, (value) => completeRequest(value, reservationId, false));
 
-  const retainCompletedOpaqueDebt = (reservationId: string) =>
-    Ref.update(state, (value) => ({
-      ...value,
-      debt: updateReservation(value.debt, reservationId, (bucket) => ({
-        amount: bucket.amount,
-        ...(bucket.resetAt === undefined ? {} : { resetAt: bucket.resetAt }),
-        ...(bucket.completedSequence === undefined
-          ? {}
-          : { completedSequence: bucket.completedSequence }),
-      })),
-    }));
+  // Successful opaque work loses its identity only after rebinding crossing spend to the current
+  // observed reset window. Without a current window it remains anonymous unknown-window debt.
+  const retainCompletedOpaqueDebt = (resource: GitHubRateLimitResource, reservationId: string) =>
+    Effect.flatMap(nowMillis, (now) =>
+      Ref.update(state, (value) => {
+        const resetAt = debtResetAt(value[resource], now);
+        return {
+          ...value,
+          debt: updateReservation(value.debt, reservationId, (bucket) => ({
+            amount: bucket.amount,
+            ...(resetAt === undefined ? {} : { resetAt }),
+            ...(bucket.completedSequence === undefined
+              ? {}
+              : { completedSequence: bucket.completedSequence }),
+          })),
+        };
+      }),
+    );
 
   const cancelUnlaunchedGraphQLReservation: GitHubHostedMetadataShape['cancelUnlaunchedGraphQLReservation'] =
     (reservationId) =>
@@ -874,7 +898,7 @@ export function makeGitHubHostedMetadataAdapter(
         const value = yield* restore(request).pipe(
           Effect.ensuring(completeUnobservedRequest(reservation.id)),
         );
-        yield* retainCompletedOpaqueDebt(reservation.id);
+        yield* retainCompletedOpaqueDebt(resource, reservation.id);
         return value;
       }),
     );
@@ -927,6 +951,10 @@ export function makeGitHubHostedMetadataAdapter(
         Number.MAX_SAFE_INTEGER,
         count * GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST,
       );
+      const graphqlCycleCost = saturatedAdd(
+        graphqlCost,
+        Math.min(Number.MAX_SAFE_INTEGER, count * GITHUB_CLI_GRAPHQL_ESTIMATED_COST),
+      );
       const restCost = Math.min(
         Number.MAX_SAFE_INTEGER,
         count * GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
@@ -959,7 +987,8 @@ export function makeGitHubHostedMetadataAdapter(
           const interval = watcherIntervalMillis(tier);
           const nextAdmission = pruned.nextWatcherAdmissionAtMillis;
           const insufficient =
-            graphql.remaining <= saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, graphqlCost) ||
+            graphql.remaining <=
+              saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, graphqlCycleCost) ||
             rest.remaining <= saturatedAdd(GITHUB_WATCHER_RATE_LIMIT_RESERVE, restCost);
           const newlyPaused = tier === 'paused' && pruned.watcherPolling.tier !== 'paused';
           if (
@@ -1039,16 +1068,21 @@ export function makeGitHubHostedMetadataAdapter(
       Ref.modify(state, (value): readonly [GitHubRateLimitHealth, HostedMetadataState] => {
         const debt = pruneLedger(value.debt, now);
         const pruned = { ...value, debt };
+        const projected =
+          pruned.fallback === 'available' && !fallbackUsable(pruned, now, fallbackMaxAgeMillis)
+            ? metadataUnavailable(pruned)
+            : pruned;
+        const fallbackAvailable = projected.fallback === 'available';
         return [
           {
             credentialContext: GITHUB_HOSTED_METADATA_CREDENTIAL_CONTEXT,
-            fallback: pruned.fallback,
-            graphql: observeBudget(pruned.graphql, debt.graphql),
+            fallback: projected.fallback,
+            graphql: snapshotBudget(projected.graphql, debt.graphql, now, fallbackAvailable),
             observation: 'bounded_hosted_rate_budget',
-            rest: observeBudget(pruned.rest, debt.rest),
-            watcherPolling: projectWatcherPolling(pruned.watcherPolling),
+            rest: snapshotBudget(projected.rest, debt.rest, now, fallbackAvailable),
+            watcherPolling: projectWatcherPolling(projected.watcherPolling),
           },
-          pruned,
+          projected,
         ];
       }),
     );

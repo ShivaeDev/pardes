@@ -102,6 +102,23 @@ export const PullRequestUrlSchema = NonEmptyStringSchema.check(
   Schema.isPattern(/^https?:\/\/[^\s]+$/),
 );
 
+function pullRequestUrlNumber(value: string): number | undefined {
+  if (!URL.canParse(value)) return undefined;
+  const parts = new URL(value).pathname.split('/').filter(Boolean);
+  const rawNumber = parts.length === 4 && parts[2] === 'pull' ? parts[3] : undefined;
+  if (rawNumber === undefined || !/^[1-9]\d*$/.test(rawNumber)) return undefined;
+  const number = Number(rawNumber);
+  return Number.isSafeInteger(number) ? number : undefined;
+}
+
+function pullRequestUrlNumberAgrees(value: { readonly number?: number; readonly url: string }) {
+  return value.number === undefined || pullRequestUrlNumber(value.url) === value.number;
+}
+
+const PullRequestUrlNumberAgrees = Schema.makeFilter(pullRequestUrlNumberAgrees, {
+  description: 'pull-request URL number agrees with decoded number',
+});
+
 const FullCommitShaSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40,64}$/));
 const OpaquePublishedReviewBranchPattern = new RegExp(OPAQUE_PUBLISHED_REVIEW_BRANCH_PATTERN);
 export const OpaquePublishedReviewBranchSchema = PullRequestBranchSchema.check(
@@ -161,7 +178,7 @@ export const GitHubPublicationMetadataSchema = Schema.Struct({
   number: PositiveIntegerSchema,
   state: GitHubPullRequestStateSchema,
   url: PullRequestUrlSchema,
-});
+}).check(PullRequestUrlNumberAgrees);
 
 export const GitHubPushedHeadMetadataSchema = Schema.Struct({
   headRefName: PullRequestBranchSchema,
@@ -174,7 +191,7 @@ export const PullRequestAssociationSchema = Schema.Struct({
   lastPushedHeadSha: Schema.optionalKey(FullCommitShaSchema),
   number: Schema.optionalKey(PositiveIntegerSchema),
   url: PullRequestUrlSchema,
-});
+}).check(PullRequestUrlNumberAgrees);
 
 /** Opt-in integration-health association. Persisted review branches remain argv-safe metadata. */
 export const GitHubIntegrationHealthAssociationSchema = Schema.Struct({
@@ -183,7 +200,7 @@ export const GitHubIntegrationHealthAssociationSchema = Schema.Struct({
   lastPushedHeadSha: Schema.optionalKey(FullCommitShaSchema),
   number: Schema.optionalKey(PositiveIntegerSchema),
   url: PullRequestUrlSchema,
-});
+}).check(PullRequestUrlNumberAgrees);
 
 export const GitHubAdvertisedDefaultBranchGraphQLSchema = Schema.Struct({
   data: Schema.Struct({

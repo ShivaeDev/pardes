@@ -20,11 +20,13 @@ const inheritedGitProtocolEnvironment = {
   fromUser: process.env.GIT_PROTOCOL_FROM_USER,
 };
 
-beforeEach(() => {
+function normalizeControlledLocalRemoteProtocolEnvironment(): void {
   // These tests intentionally use controlled local file remotes through production Git transport.
   delete process.env.GIT_ALLOW_PROTOCOL;
   delete process.env.GIT_PROTOCOL_FROM_USER;
-});
+}
+
+beforeEach(normalizeControlledLocalRemoteProtocolEnvironment);
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0))
@@ -68,6 +70,22 @@ function advance(repo: string, name: string): string {
 }
 
 describe('remote baseline resolution', () => {
+  test('normalizes inherited protocol restrictions for controlled local remote fixtures', async () => {
+    process.env.GIT_ALLOW_PROTOCOL = 'https';
+    process.env.GIT_PROTOCOL_FROM_USER = '0';
+    normalizeControlledLocalRemoteProtocolEnvironment();
+    const fixture = remoteRepository();
+    const sha = git(fixture.primary, 'rev-parse', 'HEAD');
+
+    expect(
+      await Effect.runPromise(resolveRemoteBaseline(await repoState(fixture.primary))),
+    ).toEqual({
+      branch: 'main',
+      remote: 'origin',
+      sha,
+    });
+  });
+
   test("uses origin's configured non-main default branch and supports one validated explicit override", async () => {
     const fixture = remoteRepository('master');
     const repo = await repoState(fixture.primary);

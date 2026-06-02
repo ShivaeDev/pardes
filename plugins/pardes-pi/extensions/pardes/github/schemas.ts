@@ -1,12 +1,26 @@
 import { Schema } from 'effect';
+import { GitHubWatcherFailureDiagnosticSchema } from './watcher-diagnostics.ts';
 
 export const PULL_REQUEST_TITLE_MAX_LENGTH = 256;
 export const PULL_REQUEST_BODY_MAX_LENGTH = 10_000;
 export const PULL_REQUEST_BRANCH_MAX_LENGTH = 255;
 export const PULL_REQUEST_BRANCH_PATTERN = '^[a-zA-Z0-9][a-zA-Z0-9._/-]*$';
-export const OPAQUE_PUBLISHED_REVIEW_BRANCH_PREFIX = 'pardes/review/';
+export const PUBLISHED_REVIEW_BRANCH_PREFIX = 'pardes/review/';
+export const READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX = `${PUBLISHED_REVIEW_BRANCH_PREFIX}readable-`;
+/** Retained source-compatible alias for the namespace used by schema-v1 opaque reservations. */
+export const OPAQUE_PUBLISHED_REVIEW_BRANCH_PREFIX = PUBLISHED_REVIEW_BRANCH_PREFIX;
+/** Schema-v1 reservations used an opaque UUID after the shared review namespace. */
 export const OPAQUE_PUBLISHED_REVIEW_BRANCH_PATTERN =
   '^pardes/review/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+export const READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN =
+  '^pardes/review/readable-[a-z0-9]+(?:-[a-z0-9]+)*-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+/** Accepted so durable reservations written before readable refs became flat remain reusable. */
+export const NESTED_READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN =
+  '^pardes/review/readable/[a-z0-9]+(?:-[a-z0-9]+)*/[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+export const HUMAN_PUBLISHED_REVIEW_BRANCH_PATTERN =
+  '^[a-z0-9]+(?:-[a-z0-9]+)*/pardes/[a-z0-9]+(?:-[a-z0-9]+)*$';
+export const FLAT_FALLBACK_PUBLISHED_REVIEW_BRANCH_PATTERN =
+  '^[a-z0-9]+(?:-[a-z0-9]+)*-pardes-[a-z0-9]+(?:-[a-z0-9]+)*$';
 export const PULL_REQUEST_URL_MAX_LENGTH = 2_048;
 export const MAX_GITHUB_STATUS_CHECKS = 200;
 export const MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE = 100;
@@ -55,15 +69,39 @@ export const PullRequestUrlSchema = NonEmptyStringSchema.check(
 
 const FullCommitShaSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{40,64}$/));
 const OpaquePublishedReviewBranchPattern = new RegExp(OPAQUE_PUBLISHED_REVIEW_BRANCH_PATTERN);
+const ReadablePublishedReviewBranchPattern = new RegExp(READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN);
+const NestedReadablePublishedReviewBranchPattern = new RegExp(
+  NESTED_READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN,
+);
+const HumanPublishedReviewBranchPattern = new RegExp(HUMAN_PUBLISHED_REVIEW_BRANCH_PATTERN);
+const FlatFallbackPublishedReviewBranchPattern = new RegExp(
+  FLAT_FALLBACK_PUBLISHED_REVIEW_BRANCH_PATTERN,
+);
 export const OpaquePublishedReviewBranchSchema = PullRequestBranchSchema.check(
   Schema.isPattern(OpaquePublishedReviewBranchPattern),
 );
-/** Accepted only for conservative compatibility with review gates published before opaque branches. */
+export const ReadablePublishedReviewBranchSchema = Schema.Union([
+  PullRequestBranchSchema.check(Schema.isPattern(ReadablePublishedReviewBranchPattern)),
+  PullRequestBranchSchema.check(Schema.isPattern(NestedReadablePublishedReviewBranchPattern)),
+]);
+export const HumanPublishedReviewBranchSchema = Schema.Union([
+  PullRequestBranchSchema.check(Schema.isPattern(HumanPublishedReviewBranchPattern)),
+  PullRequestBranchSchema.check(Schema.isPattern(FlatFallbackPublishedReviewBranchPattern)),
+]);
+/** Human-owned refs, prior readable reservations, and schema-v1 opaque reservations are manager-owned. */
+export const ManagedPublishedReviewBranchSchema = Schema.Union([
+  HumanPublishedReviewBranchSchema,
+  ReadablePublishedReviewBranchSchema,
+  OpaquePublishedReviewBranchSchema,
+]);
+/** Accepted only for conservative compatibility with review gates published before managed publication refs. */
 const LegacyPublishedReviewBranchSchema = PullRequestBranchSchema.check(
-  Schema.isPattern(/^pardes\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/),
+  Schema.isPattern(
+    /^pardes\/(?![a-zA-Z0-9._-]*\.\.)(?![a-zA-Z0-9._-]*\.lock\/)[a-zA-Z0-9_-](?:[a-zA-Z0-9._-]*[a-zA-Z0-9_-])?\/(?![a-zA-Z0-9._-]*\.\.)(?![a-zA-Z0-9._-]*\.lock$)[a-zA-Z0-9_-](?:[a-zA-Z0-9._-]*[a-zA-Z0-9_-])?$/,
+  ),
 );
 export const PersistedPublishedReviewBranchSchema = Schema.Union([
-  OpaquePublishedReviewBranchSchema,
+  ManagedPublishedReviewBranchSchema,
   LegacyPublishedReviewBranchSchema,
 ]);
 const GitHubPullRequestStateSchema = Schema.Literals(['OPEN', 'CLOSED', 'MERGED']);
@@ -72,12 +110,55 @@ export function isOpaquePublishedReviewBranch(value: string): boolean {
   return OpaquePublishedReviewBranchPattern.test(value);
 }
 
+export function isHumanPublishedReviewBranch(value: string): boolean {
+  return (
+    HumanPublishedReviewBranchPattern.test(value) ||
+    FlatFallbackPublishedReviewBranchPattern.test(value)
+  );
+}
+
+export function isManagedPublishedReviewBranch(value: string): boolean {
+  return (
+    isOpaquePublishedReviewBranch(value) ||
+    ReadablePublishedReviewBranchPattern.test(value) ||
+    NestedReadablePublishedReviewBranchPattern.test(value) ||
+    isHumanPublishedReviewBranch(value)
+  );
+}
+
+export const PublishedReviewBranchCandidatesInputSchema = Schema.Struct({
+  cwd: NonEmptyStringSchema,
+  disambiguator: NonEmptyStringSchema,
+  fallbackDisambiguator: NonEmptyStringSchema,
+  workstreamTitle: NonEmptyStringSchema,
+});
+
+export const ReservePublishedReviewBranchInputSchema = Schema.Struct({
+  cwd: NonEmptyStringSchema,
+  headBranch: HumanPublishedReviewBranchSchema,
+  headSha: FullCommitShaSchema,
+  ownershipId: NonEmptyStringSchema,
+});
+
+export const ReleasePublishedReviewBranchClaimInputSchema = Schema.Struct({
+  cwd: NonEmptyStringSchema,
+  headBranch: HumanPublishedReviewBranchSchema,
+  headSha: FullCommitShaSchema,
+  ownershipId: NonEmptyStringSchema,
+});
+
+export const HumanPublishedReviewBranchReservationSchema = Schema.Struct({
+  claimSha: FullCommitShaSchema,
+  ownershipId: NonEmptyStringSchema,
+});
+
 export const PublishPullRequestInputSchema = Schema.Struct({
   baseBranch: PullRequestBranchSchema,
   body: PullRequestBodySchema,
   cwd: NonEmptyStringSchema,
   headBranch: PersistedPublishedReviewBranchSchema,
   headSha: FullCommitShaSchema,
+  humanHeadBranchReservation: Schema.optionalKey(HumanPublishedReviewBranchReservationSchema),
   legacyExistingPullRequestNumber: Schema.optionalKey(PositiveIntegerSchema),
   openInBrowser: Schema.optionalKey(Schema.Boolean),
   title: PullRequestTitleSchema,
@@ -134,6 +215,7 @@ export const GitHubIntegrationHealthAssociationSchema = Schema.Struct({
   lastPushedHeadSha: Schema.optionalKey(FullCommitShaSchema),
   number: Schema.optionalKey(PositiveIntegerSchema),
   url: PullRequestUrlSchema,
+  watcherFailure: Schema.optionalKey(GitHubWatcherFailureDiagnosticSchema),
 });
 
 export const GitHubAdvertisedDefaultBranchGraphQLSchema = Schema.Struct({

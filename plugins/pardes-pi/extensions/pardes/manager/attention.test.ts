@@ -130,6 +130,12 @@ describe('manager attention predicates', () => {
   test('recognizes each pull-request warning metadata source', () => {
     const warnings = [
       pullRequest('open', { watcherFailedAt: createdAt }),
+      pullRequest('open', {
+        watcherFailure: {
+          kind: 'command_failed',
+          summary: 'GitHub CLI command failed; check gh connectivity.',
+        },
+      }),
       pullRequest('open', { headDivergedAt: createdAt }),
       pullRequest('open', { discussionPaginationGaps: ['issue_comment'] }),
       pullRequest('open', { observation: observation({ ci: 'failing' }) }),

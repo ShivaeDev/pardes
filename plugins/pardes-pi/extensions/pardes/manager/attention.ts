@@ -23,6 +23,7 @@ export function hasAgentWarning(agent: AgentRecord, effectiveStatus: WorkerStatu
 export function hasPullRequestWarningMetadata(pullRequest: PullRequestRecord): boolean {
   return Boolean(
     pullRequest.watcherFailedAt ||
+      pullRequest.watcherFailure ||
       pullRequest.headDivergedAt ||
       pullRequest.discussionPaginationGaps?.length ||
       pullRequest.observation?.ci === 'failing' ||

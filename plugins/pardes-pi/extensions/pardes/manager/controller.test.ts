@@ -27,13 +27,17 @@ import {
   type GitHubPublicationShape,
   type GitHubWatcherCallbacks,
   type GitHubWatcherShape,
+  isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   type PublishedPullRequest,
+  type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
   type PullRequestDiscussionSnapshot,
+  type ReservePublishedReviewBranchInput,
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
+import { makeFileSystemStateStore } from '../storage/index.ts';
 import { requiredValue } from '../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
@@ -435,28 +439,33 @@ function manualGithubWatcher() {
           })
         : Effect.die('GitHub watcher fixture has no active audited association');
     },
-    fail: (pullRequestId: string, cwd: string) =>
+    fail: (pullRequestId: string, cwd: string, cause: unknown = 'fixture outage') =>
       callbacks
         ? callbacks.onFailure({
             pullRequestId,
             ...generation(pullRequestId),
             error: new GitHubCommandError({
               args: ['pr', 'view'],
-              cause: 'fixture outage',
+              cause,
               command: 'gh',
               cwd,
             }),
           })
         : Effect.die('GitHub watcher fixture is not active'),
-    failCaptured: (pullRequestId: string, capturedHeadSha: string, cwd: string) =>
+    failCaptured: (
+      pullRequestId: string,
+      capturedHeadSha: string,
+      cwd: string,
+      error = new GitHubCommandError({
+        args: ['pr', 'view'],
+        cause: 'fixture delayed outage',
+        command: 'gh',
+        cwd,
+      }),
+    ) =>
       callbacks
         ? callbacks.onFailure({
-            error: new GitHubCommandError({
-              args: ['pr', 'view'],
-              cause: 'fixture delayed outage',
-              command: 'gh',
-              cwd,
-            }),
+            error,
             expectedHeadSha: capturedHeadSha,
             pullRequestId,
           })
@@ -525,9 +534,13 @@ function stubGithub(
     | ((publicationIndex: number) => Partial<PublishedPullRequest>) = {},
 ) {
   const publications: PublishPullRequestInput[] = [];
+  const candidateRequests: PublishedReviewBranchCandidatesInput[] = [];
+  const reservations: ReservePublishedReviewBranchInput[] = [];
   const syncs: SyncExistingPullRequestInput[] = [];
   let duringPublish: (() => Effect.Effect<void, unknown>) | undefined;
   let duringSync: (() => Effect.Effect<void, unknown>) | undefined;
+  let candidateResults: Array<ReadonlyArray<string>> = [];
+  let reserveResults: Array<'collision' | 'hierarchy_collision' | 'reserved'> = [];
   let syncResult: SyncExistingPullRequestResult = { status: 'synced' };
   let syncFailure: GitHubCommandError | undefined;
   const github: GitHubPublicationShape = {
@@ -552,6 +565,27 @@ function stubGithub(
           ...currentOverrides,
         };
       }),
+    publishedReviewBranchCandidates: (input) =>
+      Effect.sync(() => {
+        candidateRequests.push(input);
+        const preferred = `fixture-user/pardes/${input.workstreamTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')}`;
+        return (
+          candidateResults.shift() ?? [
+            preferred,
+            `${preferred}-worker`,
+            `${preferred}-worker-manager`,
+          ]
+        );
+      }),
+    releasePublishedReviewBranchClaim: () => Effect.void,
+    reservePublishedReviewBranch: (input) =>
+      Effect.sync(() => {
+        reservations.push(input);
+        return reserveResults.shift() ?? ('reserved' as const);
+      }),
     syncExisting: (input) =>
       Effect.gen(function* () {
         syncs.push(input);
@@ -561,13 +595,21 @@ function stubGithub(
       }),
   };
   return {
+    candidateRequests,
     github,
     publications,
+    reservations,
+    setCandidateResults: (results: ReadonlyArray<ReadonlyArray<string>>) => {
+      candidateResults = [...results];
+    },
     setDuringPublish: (effect: () => Effect.Effect<void, unknown>) => {
       duringPublish = effect;
     },
     setDuringSync: (effect: () => Effect.Effect<void, unknown>) => {
       duringSync = effect;
+    },
+    setReserveResults: (results: Array<'collision' | 'hierarchy_collision' | 'reserved'>) => {
+      reserveResults = results;
     },
     setSyncFailure: (failure: GitHubCommandError) => {
       syncFailure = failure;
@@ -1177,6 +1219,18 @@ describe('manager controller', () => {
         Effect.sync(() => {
           calls.push('github.publish');
         }).pipe(Effect.flatMap(() => baseGithub.github.publish(input))),
+      publishedReviewBranchCandidates: (input) =>
+        Effect.sync(() => {
+          calls.push('github.publishedReviewBranchCandidates');
+        }).pipe(Effect.flatMap(() => baseGithub.github.publishedReviewBranchCandidates(input))),
+      releasePublishedReviewBranchClaim: (input) =>
+        Effect.sync(() => {
+          calls.push('github.releasePublishedReviewBranchClaim');
+        }).pipe(Effect.flatMap(() => baseGithub.github.releasePublishedReviewBranchClaim(input))),
+      reservePublishedReviewBranch: (input) =>
+        Effect.sync(() => {
+          calls.push('github.reservePublishedReviewBranch');
+        }).pipe(Effect.flatMap(() => baseGithub.github.reservePublishedReviewBranch(input))),
       syncExisting: (input) =>
         Effect.sync(() => {
           calls.push('github.syncExisting');
@@ -6401,7 +6455,7 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
-  test('keeps watcher failures separate from CI failures and deduplicated until a complete successful poll', async () => {
+  test('falls back to bounded rate warning without ownership, deduplicates pending diagnoses, and rearms after acknowledgement', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -6418,34 +6472,167 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.activate(fixture.ctx));
     const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
     const pullRequestId = published.pullRequest.id;
+    const stateDir = activationStateDir(fixture.entries);
 
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    await Effect.runPromise(
-      watcher.observeLifecycle(pullRequestId, observedPullRequest({ ci: 'failing' })),
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
+    const rateRevision = controller.snapshot()?.revision;
+    const durableStore = await Effect.runPromise(makeFileSystemStateStore(stateDir));
+    const durableRateState = await Effect.runPromise(durableStore.load());
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
+    const repeatedDurableRateState = await Effect.runPromise(durableStore.load());
+    expect(controller.snapshot()?.revision).toBe(rateRevision);
+    expect(repeatedDurableRateState.revision).toBe(durableRateState.revision);
+    expect(repeatedDurableRateState).toEqual(durableRateState);
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
+      kind: 'rate_limit_likely',
+      summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
+    });
+    const rateWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
     );
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeDefined();
+    expect(rateWarning.summary).toContain(
+      'watcher failed [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later.',
+    );
     expect(
-      controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
+      readFileSync(join(stateDir, 'events.jsonl'), 'utf8').match(/"type":"watcher_failed"/g),
     ).toHaveLength(1);
-    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
-    expect(fixture.messages).toHaveLength(1);
 
-    await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest({ ci: 'failing' })));
-    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeUndefined();
-    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: rateWarning.id }));
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    const authWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
+    );
+    const authRevision = controller.snapshot()?.revision;
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    expect(controller.snapshot()?.revision).toBe(authRevision);
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: authWarning.id }));
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    const rearmedAuthWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
+    );
+    expect(rearmedAuthWarning.id).not.toBe(authWarning.id);
+    expect(rearmedAuthWarning.summary).toBe(authWarning.summary);
+
+    await Effect.runPromise(
+      controller.acknowledgeInbox(fixture.ctx, { cursor: rearmedAuthWarning.id }),
+    );
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
     await Effect.runPromise(watcher.fail(pullRequestId, repo));
-
+    const commandRevision = controller.snapshot()?.revision;
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+    expect(controller.snapshot()?.revision).toBe(commandRevision);
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
+      kind: 'command_failed',
+      summary: 'GitHub CLI command failed; check gh connectivity.',
+    });
     expect(
       controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
     ).toHaveLength(2);
-    expect(fixture.messages).toHaveLength(1);
-    const eventLog = readFileSync(
-      join(activationStateDir(fixture.entries), 'events.jsonl'),
-      'utf8',
+    expect(
+      readFileSync(join(stateDir, 'events.jsonl'), 'utf8').match(/"type":"watcher_failed"/g),
+    ).toHaveLength(5);
+
+    await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest()));
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeUndefined();
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toBeUndefined();
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('rearms a continuing watcher failure from authoritative acknowledgement before cached inbox refresh', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const pullRequestId = published.pullRequest.id;
+    const stateDir = activationStateDir(fixture.entries);
+    const durableStore = await Effect.runPromise(makeFileSystemStateStore(stateDir));
+
+    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+    const firstWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
     );
-    expect(eventLog.match(/"type":"watcher_failed"/g)).toHaveLength(2);
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+
+    // Model the narrow post-acknowledgement window: durable acknowledgement has
+    // committed, but the controller namespace still retains its prior inbox row.
+    await Effect.runPromise(
+      durableStore.mutate((state) => {
+        const { inboxHandoff: _inboxHandoff, inboxWake: _inboxWake, ...withoutDelivery } = state;
+        return Effect.succeed([undefined, { ...withoutDelivery, inbox: [] }] as const);
+      }),
+    );
+    expect((await Effect.runPromise(durableStore.load())).inbox).toEqual([]);
+    expect(controller.snapshot()?.inbox).toContainEqual(firstWarning);
+
+    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+
+    const durable = await Effect.runPromise(durableStore.load());
+    const rearmedWarnings = durable.inbox.filter(({ type }) => type === 'watcher_failed');
+    expect(rearmedWarnings).toHaveLength(1);
+    expect(rearmedWarnings[0]?.id).not.toBe(firstWarning.id);
+    expect(rearmedWarnings[0]?.summary).toBe(firstWarning.summary);
+    expect(durable.inboxWake?.cursor).toBe(rearmedWarnings[0]?.id);
+    expect(controller.snapshot()?.inbox).toEqual(rearmedWarnings);
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(2);
+    expect(managerEvents(stateDir).filter(({ type }) => type === 'watcher_failed')).toHaveLength(2);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('lets injected rate-budget ownership consume rate-limit symptoms quietly', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const consumed: Array<{ readonly pullRequestId: string; readonly expectedHeadSha?: string }> =
+      [];
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubRateLimitSymptomOwnership: {
+        consume: (symptom) =>
+          Effect.sync(() => {
+            consumed.push(symptom);
+            return true;
+          }),
+      },
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const initialRevision = controller.snapshot()?.revision;
+
+    await Effect.runPromise(watcher.fail(published.pullRequest.id, repo, { statusCode: 429 }));
+
+    expect(consumed).toEqual([
+      {
+        expectedHeadSha: published.pullRequest.lastPushedHeadSha,
+        pullRequestId: published.pullRequest.id,
+      },
+    ]);
+    expect(controller.snapshot()?.revision).toBe(initialRevision);
+    expect(controller.snapshot()?.pullRequests[published.pullRequest.id]).not.toHaveProperty(
+      'watcherFailure',
+    );
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed')).toEqual(
+      [],
+    );
+    expect(fixture.messages).toEqual([]);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
@@ -6571,7 +6758,9 @@ describe('manager controller', () => {
 
     expect(github.publications).toHaveLength(1);
     const publishedHeadBranch = github.publications[0]?.headBranch;
-    expect(isOpaquePublishedReviewBranch(publishedHeadBranch)).toBe(true);
+    expect(isManagedPublishedReviewBranch(publishedHeadBranch)).toBe(true);
+    expect(isOpaquePublishedReviewBranch(publishedHeadBranch)).toBe(false);
+    expect(publishedHeadBranch).toBe('fixture-user/pardes/publish-pr');
     expect(publishedHeadBranch).not.toBe(requiredValue(agent.worktree).branch);
     expect(publishedHeadBranch).not.toContain(requiredValue(agent.worktree).managerId);
     expect(publishedHeadBranch).not.toContain(agent.id);
@@ -6581,6 +6770,10 @@ describe('manager controller', () => {
       cwd: requiredValue(agent.worktree).path,
       headBranch: publishedHeadBranch,
       headSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
+      humanHeadBranchReservation: {
+        claimSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
+        ownershipId: `${requiredValue(controller.snapshot()).managerId}-${agent.id}`,
+      },
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
@@ -6623,6 +6816,183 @@ describe('manager controller', () => {
       ),
     );
     expect(github.publications[1]?.headBranch).toBe(publishedHeadBranch);
+    expect(github.candidateRequests).toHaveLength(1);
+    expect(github.reservations).toHaveLength(1);
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('durably clears a collided remote candidate before reserving its readable fallback', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    github.setReserveResults(['collision', 'reserved']);
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+
+    expect(github.reservations.map(({ headBranch }) => headBranch)).toEqual([
+      'fixture-user/pardes/watched-pr',
+      'fixture-user/pardes/watched-pr-worker',
+    ]);
+    expect(published.pullRequest.headBranch).toBe('fixture-user/pardes/watched-pr-worker');
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBe(
+      'fixture-user/pardes/watched-pr-worker',
+    );
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+  });
+
+  test('replans to a flat readable candidate when an actor-root leaf races reservation', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    github.setCandidateResults([
+      ['fixture-user/pardes/watched-pr'],
+      ['fixture-user-pardes-watched-pr'],
+    ]);
+    github.setReserveResults(['hierarchy_collision', 'reserved']);
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+
+    expect(github.candidateRequests).toHaveLength(2);
+    expect(github.reservations.map(({ headBranch }) => headBranch)).toEqual([
+      'fixture-user/pardes/watched-pr',
+      'fixture-user-pardes-watched-pr',
+    ]);
+    expect(published.pullRequest.headBranch).toBe('fixture-user-pardes-watched-pr');
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBe(
+      'fixture-user-pardes-watched-pr',
+    );
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+  });
+
+  test('recovers a durably pending exact-SHA reservation before publishing its first gate', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'Pending claim',
+    );
+    writeFileSync(
+      join(requiredValue(agent.worktree).path, 'pending.txt'),
+      'pending claim fixture\n',
+    );
+    git(requiredValue(agent.worktree).path, 'add', 'pending.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'pending claim fixture');
+    const claimSha = git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD');
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      agents: Record<
+        string,
+        {
+          publishedReviewBranch?: string;
+          publishedReviewBranchClaimSha?: string;
+          publishedReviewBranchPending?: boolean;
+        }
+      >;
+    };
+    const persistedAgent = requiredValue(persisted.agents[agent.id]);
+    persistedAgent.publishedReviewBranch = 'fixture-user/pardes/pending-claim';
+    persistedAgent.publishedReviewBranchClaimSha = claimSha;
+    persistedAgent.publishedReviewBranchPending = true;
+    writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+    await Effect.runPromise(controller.refresh(fixture.ctx));
+
+    await Effect.runPromise(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Recover the durable claim.',
+          title: 'Recover pending claim',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+
+    expect(github.candidateRequests).toHaveLength(0);
+    expect(github.reservations).toEqual([
+      {
+        cwd: requiredValue(agent.worktree).path,
+        headBranch: 'fixture-user/pardes/pending-claim',
+        headSha: claimSha,
+        ownershipId: `${requiredValue(controller.snapshot()).managerId}-${agent.id}`,
+      },
+    ]);
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('rejects base retarget while an owned review gate remains open before reaching GitHub publication', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent, published } = await publishManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+    );
+
+    const failure = await Effect.runPromise(
+      controller
+        .createPullRequest(
+          {
+            agentId: agent.id,
+            baseBranch: 'release',
+            body: 'Do not create a second review gate.',
+            title: 'Reject base retarget',
+            workstreamId: workstream.id,
+          },
+          fixture.ctx,
+        )
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'PullRequestPublicationValidationError',
+      reason: `persisted open review gate #42 targets base main; close it before publishing to release`,
+    });
+    expect(github.publications).toHaveLength(1);
+    expect(controller.snapshot()?.pullRequests).toEqual({
+      [published.pullRequest.id]: published.pullRequest,
+    });
   });
 
   test('passes the exact persisted gate number for update-only legacy publication compatibility', async () => {
@@ -6986,7 +7356,14 @@ describe('manager controller', () => {
         },
       ),
     );
-    await Effect.runPromise(watcher.failCaptured(pullRequestId, capturedHeadSha, repo));
+    const hostileStaleError = new Proxy({} as GitHubCommandError, {
+      get: () => {
+        throw new Error('stale watcher error must not be inspected');
+      },
+    });
+    await Effect.runPromise(
+      watcher.failCaptured(pullRequestId, capturedHeadSha, repo, hostileStaleError),
+    );
 
     expect(controller.snapshot()?.pullRequests[pullRequestId]).not.toHaveProperty('observation');
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.discussionCursor).toEqual({});

@@ -724,7 +724,7 @@ function stubWorkers(
             startedAt: Date.now(),
             stats: undefined,
             status: 'running',
-            stderr: '',
+            stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
             task: input.task,
             thinkingLevel: input.thinkingLevel,
             ...(input.lifecycleGeneration === undefined
@@ -1908,7 +1908,9 @@ describe('manager controller', () => {
     expect(compacted).toEqual({
       aborted: true,
       agentId: agent.id,
-      failureSummary: `${rawChildFailure.slice(0, 239)}…`,
+      failureSummary: expect.stringContaining(
+        '[omitted reason=manager_event_text_limit originalChars=2559 shownChars=146 omittedChars=2413]',
+      ),
       outcome: 'manual',
       status: 'idle',
       tokensBefore: 321,
@@ -4898,8 +4900,11 @@ describe('manager controller', () => {
       hasMore: true,
       nextOffset: 21,
       offset: 0,
+      omittedChars: 19,
+      originalChars: 40,
       reportId,
       returnedChars: 21,
+      shownChars: 21,
       sourceAgentId: agent.id,
       sourceRole: 'worker',
       status: 'completed',
@@ -4915,7 +4920,7 @@ describe('manager controller', () => {
       `source reportId: ${reportId} · sourceAgent: ${agent.id} · sourceRole: worker · status: completed`,
     );
     expect(workers.sends[0]?.message).toContain(
-      'excerpt field: details · offset: 0 · returnedChars: 21 · totalChars: 40 · truncated: true',
+      'excerpt field: details · offset: 0 · originalChars: 40 · shownChars: 21 · omittedChars: 19 · hasMoreAfterExcerpt: true',
     );
     expect(workers.sends[0]?.message).toContain(
       'continuation: ask the manager for another bounded excerpt with field details and offset 21; children cannot retrieve durable reports directly',
@@ -9024,7 +9029,10 @@ describe('manager controller', () => {
       controller.verificationStatus({ verificationId: verification.id }, fixture.ctx),
     );
     expect(currentVerificationAttempt(stale).evidenceStatus).toBe('stale');
-    expect(currentVerificationAttempt(stale).staleReason).toContain('source head changed');
+    expect(currentVerificationAttempt(stale)).toMatchObject({
+      staleReason: expect.stringContaining('[source_head_changed]'),
+      staleReasonCode: 'source_head_changed',
+    });
     expect(stale).not.toHaveProperty('evidenceStatus');
     expect(stale).not.toHaveProperty('staleReason');
     expect(

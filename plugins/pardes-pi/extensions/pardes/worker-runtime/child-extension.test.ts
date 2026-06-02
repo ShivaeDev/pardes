@@ -119,6 +119,7 @@ describe('verifier evidence output bounds', () => {
     const bounded = boundedVerifierPathRows(`${first}\n${second}\nz\n`);
 
     expect(bounded).toEqual({
+      omissionReason: 'changed_path_preview_limit',
       omitted: 2,
       output: first,
       shown: 1,
@@ -131,7 +132,12 @@ describe('verifier evidence output bounds', () => {
   test('makes bounded Git diagnostic omission explicit and keeps terminal controls inert', () => {
     const diagnostic = boundedGitDiagnostic(`fatal:\u001b[31m ${'x'.repeat(1_100)}`, 'fallback');
 
-    expect(diagnostic).toMatchObject({ shownChars: 1_000, source: 'stderr', truncated: true });
+    expect(diagnostic).toMatchObject({
+      omissionReason: 'git_diagnostic_preview_limit',
+      shownChars: 1_000,
+      source: 'stderr',
+      truncated: true,
+    });
     expect(diagnostic.omittedChars).toBeGreaterThan(0);
     expect(diagnostic.preview).toHaveLength(diagnostic.shownChars);
     expect(diagnostic.preview).not.toContain('\u001b');

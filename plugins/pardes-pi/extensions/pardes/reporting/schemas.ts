@@ -6,6 +6,7 @@ export const REPORT_EXCERPT_DEFAULT_MAX_CHARS = 4_000;
 export const REPORT_EXCERPT_MAX_CHARS = 12_000;
 export const REPORT_EXCERPT_MAX_OFFSET = 128 * 1_024 * 1_024;
 export const REPORT_REFERENCE_SUMMARY_MAX_CHARS = 240;
+export const REPORT_SUMMARY_PREVIEW_OMISSION_REASON = 'report_summary_preview_limit' as const;
 /** Optional manager-authored handoff context stays subordinate to one bounded report excerpt. */
 export const REPORT_HANDOFF_NOTE_MAX_CHARS = 1_000;
 /** Concise durable summaries remain useful for retrieval without becoming bulk-log sinks. */
@@ -51,11 +52,21 @@ export const AgentReportWriteSchema = Schema.Struct({
   summary: BoundedReportSummary,
 });
 
+export const ReportTextCountsSchema = Schema.Struct({
+  omittedChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  originalChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  shownChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+export type ReportTextCounts = typeof ReportTextCountsSchema.Type;
+
 /** Bounded durable pointer embedded in an agent projection; never contains report details. */
 export const AgentReportReferenceSchema = Schema.Struct({
   createdAt: BoundedMetadataString,
   reportId: ReportIdSchema,
   status: AgentReportStatusSchema,
+  summaryChars: Schema.optionalKey(ReportTextCountsSchema),
+  summaryOmissionReason: Schema.optionalKey(Schema.Literal(REPORT_SUMMARY_PREVIEW_OMISSION_REASON)),
+  /** Compatibility flag for snapshots written before explicit omission counts. */
   summaryTruncated: Schema.Boolean,
 });
 export type AgentReportReference = typeof AgentReportReferenceSchema.Type;
@@ -99,8 +110,12 @@ export interface ReportExcerpt {
   readonly status: AgentReportStatus;
   readonly field: ReportExcerptField;
   readonly offset: number;
+  /** Compatibility aliases retained for existing callers. */
   readonly returnedChars: number;
   readonly totalChars: number;
+  readonly originalChars: number;
+  readonly shownChars: number;
+  readonly omittedChars: number;
   readonly hasMore: boolean;
   readonly excerpt: string;
 }

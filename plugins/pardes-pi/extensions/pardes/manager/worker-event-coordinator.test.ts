@@ -261,7 +261,7 @@ describe('incoming worker-event coordinator', () => {
       type: 'agent_report_persist_failed',
     });
     expect(namespace.state.inbox[0]?.summary).toContain(
-      'Durable child report details field exceeds its configured write cap.',
+      'Durable child report details field rejected [report_field_write_limit]: originalChars=4194305, shownChars=0, omittedChars=4194305, maxChars=4194304.',
     );
     expect(namespace.state.inbox[0]?.summary.length).toBeLessThanOrEqual(900);
     expect(namespace.state.inbox[0]).not.toHaveProperty('reportId');
@@ -455,7 +455,7 @@ describe('incoming worker-event coordinator', () => {
       startedAt: 1,
       stats: undefined,
       status: 'idle',
-      stderr: '',
+      stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
       task: 'Review.',
       thinkingLevel: 'low',
     };
@@ -648,7 +648,7 @@ describe('incoming worker-event coordinator', () => {
       startedAt: 1,
       stats: undefined,
       status: 'running',
-      stderr: '',
+      stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
       task: 'Review.',
       thinkingLevel: 'low',
     } satisfies WorkerRuntimeSnapshot;

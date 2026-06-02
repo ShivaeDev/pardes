@@ -56,6 +56,8 @@ describe('durable reporting use case', () => {
       createdAt,
       reportId: persisted.reportId,
       status: 'completed',
+      summaryChars: { omittedChars: 404, originalChars: 644, shownChars: 240 },
+      summaryOmissionReason: 'report_summary_preview_limit',
       summaryTruncated: true,
     });
     expect(persisted.reference).not.toHaveProperty('summaryPreview');
@@ -153,8 +155,11 @@ describe('durable reporting use case', () => {
       field: 'details',
       hasMore: true,
       offset: 5,
+      omittedChars: 14,
+      originalChars: 22,
       reportId: persisted.reportId,
       returnedChars: 8,
+      shownChars: 8,
       status: 'completed',
       totalChars: 22,
     });
@@ -168,8 +173,11 @@ describe('durable reporting use case', () => {
       field: 'details',
       hasMore: true,
       offset: 5,
+      omittedChars: 14,
+      originalChars: 22,
       reportId: persisted.reportId,
       returnedChars: 8,
+      shownChars: 8,
       status: 'completed',
       totalChars: 22,
     });
@@ -240,7 +248,7 @@ describe('durable reporting use case', () => {
       `source reportId: ${persisted.reportId} · sourceAgent: verifier-one · sourceRole: verifier · status: completed`,
     );
     expect(text).toContain(
-      'excerpt field: details · offset: 0 · returnedChars: 12 · totalChars: 45 · truncated: true',
+      'excerpt field: details · offset: 0 · originalChars: 45 · shownChars: 12 · omittedChars: 33 · hasMoreAfterExcerpt: true',
     );
     expect(text).toContain(
       'continuation: ask the manager for another bounded excerpt with field details and offset 12; children cannot retrieve durable reports directly',

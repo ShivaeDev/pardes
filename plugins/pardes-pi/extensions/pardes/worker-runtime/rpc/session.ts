@@ -1,4 +1,11 @@
 import { Effect, Exit, Option, Scope } from 'effect';
+import {
+  appendWorkerStderrTail,
+  emptyWorkerStderrTail,
+  type WorkerProtocolDiagnostic,
+  type WorkerStderrTail,
+  workerProtocolDiagnostic,
+} from '../diagnostics.ts';
 import type { WorkerProcessError, WorkerRpcError } from '../errors.ts';
 import {
   spawnWorkerProcess,
@@ -11,8 +18,12 @@ import { makeWorkerRpcRequestCorrelator } from './requests.ts';
 
 export interface WorkerRpcSessionCallbacks {
   readonly onValue: (event: unknown) => void;
-  readonly onProtocolError: (message: string) => void;
-  readonly onExit: (exitCode: number | null, signal: NodeJS.Signals | null, stderr: string) => void;
+  readonly onProtocolError: (diagnostic: WorkerProtocolDiagnostic) => void;
+  readonly onExit: (
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+    stderr: WorkerStderrTail,
+  ) => void;
 }
 
 export interface WorkerRpcSession {
@@ -21,7 +32,7 @@ export interface WorkerRpcSession {
     rpcCommand: Record<string, unknown>,
   ) => Effect.Effect<WorkerRpcResponse, WorkerRpcError>;
   readonly start: (callbacks: WorkerRpcSessionCallbacks) => void;
-  readonly stderr: () => string;
+  readonly stderr: () => WorkerStderrTail;
   readonly forkInScope: <A, E>(effect: Effect.Effect<A, E>) => Effect.Effect<void>;
   readonly close: Effect.Effect<void>;
 }
@@ -54,7 +65,7 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
       requestTimeoutMs: options.requestTimeoutMs,
       stdin: child.stdin,
     });
-    let stderr = '';
+    let stderr = emptyWorkerStderrTail();
     let started = false;
 
     const start = (callbacks: WorkerRpcSessionCallbacks) => {
@@ -66,7 +77,12 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
           const envelope = WorkerRpcWire.decodeEnvelope(event);
           if (Option.isSome(envelope) && envelope.value.type === 'response') {
             if (rpcRequests.handleResponse(event) === 'invalid_uncorrelated_response') {
-              callbacks.onProtocolError('Invalid response RPC message');
+              callbacks.onProtocolError(
+                workerProtocolDiagnostic(
+                  'invalid_response',
+                  'RPC response could not be correlated or decoded; response content was discarded.',
+                ),
+              );
             }
             return;
           }
@@ -74,10 +90,16 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
         },
       });
       child.stderr.on('data', (chunk: Buffer | string) => {
-        stderr = `${stderr}${String(chunk)}`.slice(-4_000);
+        stderr = appendWorkerStderrTail(stderr, String(chunk));
       });
       child.on('error', (cause) => {
-        callbacks.onProtocolError(`Child process error: ${cause.message}`);
+        callbacks.onProtocolError(
+          workerProtocolDiagnostic(
+            'runtime_process_error',
+            'Retained child process emitted an error; arbitrary process text was omitted.',
+            cause.message.length,
+          ),
+        );
       });
       child.on('exit', (exitCode, signal) => {
         rpcRequests.failPending(

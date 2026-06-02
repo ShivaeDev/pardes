@@ -289,7 +289,15 @@ export function formatPardesError(error: unknown): string {
       return 'Could not persist durable child report artifact.';
     if (tagged._tag === 'ReportWriteLimitExceededError') {
       if ('field' in tagged && (tagged.field === 'summary' || tagged.field === 'details')) {
-        return `Durable child report ${tagged.field} field exceeds its configured write cap.`;
+        const originalChars =
+          'originalChars' in tagged && typeof tagged.originalChars === 'number'
+            ? tagged.originalChars
+            : undefined;
+        const maxChars =
+          'maxChars' in tagged && typeof tagged.maxChars === 'number' ? tagged.maxChars : undefined;
+        return originalChars === undefined || maxChars === undefined
+          ? `Durable child report ${tagged.field} field exceeds its configured write cap.`
+          : `Durable child report ${tagged.field} field rejected [report_field_write_limit]: originalChars=${originalChars}, shownChars=0, omittedChars=${originalChars}, maxChars=${maxChars}.`;
       }
       return 'Durable child report exceeds its configured write cap.';
     }

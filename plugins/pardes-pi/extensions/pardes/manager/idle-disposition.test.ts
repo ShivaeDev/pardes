@@ -73,7 +73,7 @@ function runtime(status: WorkerRuntimeSnapshot['status']): WorkerRuntimeSnapshot
     startedAt: 1,
     stats: undefined,
     status,
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: 'completed_unpublished helper_material publication ready follow_up_parked',
     thinkingLevel: 'high',
   };

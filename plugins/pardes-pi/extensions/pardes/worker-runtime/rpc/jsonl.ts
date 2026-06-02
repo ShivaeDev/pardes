@@ -1,5 +1,6 @@
 import type { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
+import { type WorkerProtocolDiagnostic, workerProtocolDiagnostic } from '../diagnostics.ts';
 
 /**
  * Last-resort transport breaker measured in decoded UTF-16 code units.
@@ -15,7 +16,7 @@ export const MAX_WORKER_RPC_JSONL_LINE_LENGTH = 64 * 1_024 * 1_024;
 
 export interface WorkerRpcJsonlCallbacks {
   readonly onValue: (value: unknown) => void;
-  readonly onProtocolError: (message: string) => void;
+  readonly onProtocolError: (diagnostic: WorkerProtocolDiagnostic) => void;
   readonly maxLineLength?: number;
 }
 
@@ -31,18 +32,33 @@ export function attachWorkerRpcJsonl(
   const decoder = new StringDecoder('utf8');
   const maxLineLength = callbacks.maxLineLength ?? MAX_WORKER_RPC_JSONL_LINE_LENGTH;
   let buffer = '';
+  let discardedOversizedChars = 0;
   let discardingOversizedLine = false;
+
+  const oversizedDiagnostic = (originalChars: number, countAccuracy: 'exact' | 'lower_bound') =>
+    workerProtocolDiagnostic(
+      'line_length_breaker',
+      `RPC JSONL record exceeded the ${maxLineLength}-character transport framing breaker; record content was discarded through its delimiter.`,
+      originalChars,
+      countAccuracy,
+    );
 
   const consume = (line: string) => {
     if (!line) return;
     if (line.length > maxLineLength) {
-      callbacks.onProtocolError('RPC JSONL line exceeded the decoding limit');
+      callbacks.onProtocolError(oversizedDiagnostic(line.length, 'exact'));
       return;
     }
     try {
       callbacks.onValue(JSON.parse(line) as unknown);
     } catch {
-      callbacks.onProtocolError('Invalid JSON RPC line');
+      callbacks.onProtocolError(
+        workerProtocolDiagnostic(
+          'invalid_json',
+          'RPC JSONL record was not valid JSON; record content was discarded.',
+          line.length,
+        ),
+      );
     }
   };
 
@@ -52,10 +68,14 @@ export function attachWorkerRpcJsonl(
       const newline = buffer.indexOf('\n');
       if (discardingOversizedLine) {
         if (newline === -1) {
+          discardedOversizedChars += buffer.length;
           buffer = '';
           return;
         }
+        discardedOversizedChars += newline;
+        callbacks.onProtocolError(oversizedDiagnostic(discardedOversizedChars, 'exact'));
         buffer = buffer.slice(newline + 1);
+        discardedOversizedChars = 0;
         discardingOversizedLine = false;
         continue;
       }
@@ -67,9 +87,9 @@ export function attachWorkerRpcJsonl(
         continue;
       }
       if (buffer.length > maxLineLength) {
+        discardedOversizedChars += buffer.length;
         buffer = '';
         discardingOversizedLine = true;
-        callbacks.onProtocolError('RPC JSONL line exceeded the decoding limit');
       }
       return;
     }
@@ -80,7 +100,13 @@ export function attachWorkerRpcJsonl(
   });
   stdout.on('end', () => {
     push(decoder.end());
-    if (discardingOversizedLine || !buffer) return;
+    if (discardingOversizedLine) {
+      callbacks.onProtocolError(oversizedDiagnostic(discardedOversizedChars, 'lower_bound'));
+      discardedOversizedChars = 0;
+      discardingOversizedLine = false;
+      return;
+    }
+    if (!buffer) return;
     consume(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer);
     buffer = '';
   });

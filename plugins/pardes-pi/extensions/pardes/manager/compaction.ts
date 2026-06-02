@@ -6,6 +6,7 @@ import {
   type SessionBeforeCompactEvent,
 } from '@earendil-works/pi-coding-agent';
 import type { GitHubDiscussionSurface } from '../github/index.ts';
+import type { ReportTextCounts } from '../reporting/index.ts';
 import type { WorkerRuntimeSnapshot } from '../worker-runtime/index.ts';
 import { effectiveAgentStatus, hasAgentWarning, pullRequestNeedsAttention } from './attention.ts';
 import type { ManagerState, PullRequestRecord, WorkstreamStatus } from './domain.ts';
@@ -67,6 +68,8 @@ export interface ManagerCompactionWorkerProjection {
     readonly reportId: string;
     readonly status: string;
     readonly summaryTruncated: boolean;
+    readonly summaryChars?: ReportTextCounts;
+    readonly summaryOmissionReason?: 'report_summary_preview_limit';
   };
 }
 
@@ -160,9 +163,7 @@ export interface ManagerCompactionRegistrationOptions {
 
 function boundInline(text: string, maxChars: number): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length <= maxChars
-    ? normalized
-    : `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+  return omissionAwareDiagnosticText(normalized, maxChars, 'projection_field_limit');
 }
 
 function compareText(left: string, right: string): number {
@@ -250,6 +251,12 @@ function projectWorker(
             reportId: boundInline(latestResult.reportId, MAX_ID_CHARS),
             status: latestResult.status,
             summaryTruncated: latestResult.summaryTruncated,
+            ...(latestResult.summaryChars === undefined
+              ? {}
+              : { summaryChars: latestResult.summaryChars }),
+            ...(latestResult.summaryOmissionReason === undefined
+              ? {}
+              : { summaryOmissionReason: latestResult.summaryOmissionReason }),
           },
         }),
   };
@@ -432,22 +439,51 @@ function safeString(value: unknown): string {
   }
 }
 
-/** Keep fallback output useful while redacting common credential-bearing forms. */
-export function sanitizeManagerCompactionDiagnostic(value: unknown): string {
-  return boundInline(safeString(value), MANAGER_COMPACTION_FALLBACK_REASON_MAX_CHARS)
+function redactManagerCompactionDiagnostic(value: unknown): string {
+  return safeString(value)
     .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, '$1 [redacted]')
     .replace(
       /\b(api[-_ ]?key|authorization|cookie|password|secret|token)\s*[:=]\s*[^\s,;]+/gi,
       '$1=[redacted]',
     )
     .replace(/\b(sk|gh[opusr])[-_][a-zA-Z0-9_-]{8,}\b/g, '$1-[redacted]')
-    .replace(/(https?:\/\/)[^\s/@]+@/gi, '$1[redacted]@');
+    .replace(/(https?:\/\/)[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function omissionAwareDiagnosticText(
+  text: string,
+  maxChars: number,
+  reason: 'diagnostic_field_limit' | 'fallback_output_limit' | 'projection_field_limit',
+): string {
+  if (text.length <= maxChars) return text;
+  let shownChars = Math.max(0, maxChars - 120);
+  let suffix = '';
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    suffix = ` [omitted reason=${reason} originalChars=${text.length} shownChars=${shownChars} omittedChars=${text.length - shownChars}]`;
+    shownChars = Math.max(0, maxChars - suffix.length);
+  }
+  suffix = ` [omitted reason=${reason} originalChars=${text.length} shownChars=${shownChars} omittedChars=${text.length - shownChars}]`;
+  return `${text.slice(0, shownChars)}${suffix}`;
+}
+
+/** Keep fallback output useful while redacting first and accounting for every omitted safe character. */
+export function sanitizeManagerCompactionDiagnostic(
+  value: unknown,
+  maxChars = MANAGER_COMPACTION_FALLBACK_REASON_MAX_CHARS,
+): string {
+  return omissionAwareDiagnosticText(
+    redactManagerCompactionDiagnostic(value),
+    maxChars,
+    'diagnostic_field_limit',
+  );
 }
 
 function modelDiagnosticLabel(model: ManagerModel | undefined): string {
   if (!model) return 'none';
   try {
-    return `${sanitizeManagerCompactionDiagnostic(model.provider)}/${sanitizeManagerCompactionDiagnostic(model.id)}`;
+    return `${sanitizeManagerCompactionDiagnostic(model.provider, 120)}/${sanitizeManagerCompactionDiagnostic(model.id, 120)}`;
   } catch {
     return '<unrenderable selected model>';
   }
@@ -476,9 +512,15 @@ export function renderManagerCompactionFallbackDiagnostic(
     'action: declining custom manager override; Pi built-in default compaction remains owner',
     `reason: ${causeDiagnosticText(cause)}`,
   ].join('\n');
-  return diagnostic.length <= MANAGER_COMPACTION_FALLBACK_MAX_CHARS
-    ? diagnostic
-    : `${diagnostic.slice(0, MANAGER_COMPACTION_FALLBACK_MAX_CHARS - 1)}…`;
+  if (diagnostic.length <= MANAGER_COMPACTION_FALLBACK_MAX_CHARS) return diagnostic;
+  const omittedReason = `[omitted reason=fallback_output_limit originalChars=${diagnostic.length} shownChars=0 omittedChars=${diagnostic.length}]`;
+  return [
+    '[Pardes manager compaction fallback]',
+    `stage: ${stage}`,
+    `selectedModel: ${modelDiagnosticLabel(model)}`,
+    'action: declining custom manager override; Pi built-in default compaction remains owner',
+    `reason: ${omittedReason}`,
+  ].join('\n');
 }
 
 /** UI notification plus stderr logging; neither surface may prevent safe fallback. */

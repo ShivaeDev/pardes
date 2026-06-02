@@ -554,10 +554,17 @@ describe('filesystem state store', () => {
         eventScanMaxBytes: STORAGE_EVENT_SCAN_MAX_BYTES,
         reportScanMaxEntries: STORAGE_REPORT_SCAN_MAX_ENTRIES,
       },
-      events: { eventLines: 0, eventLinesAccuracy: 'exact', kind: 'missing', scannedBytes: 0 },
+      events: {
+        eventLines: 0,
+        eventLinesAccuracy: 'exact',
+        kind: 'missing',
+        omittedBytes: 0,
+        scannedBytes: 0,
+      },
       reports: {
         kind: 'missing',
         metricsAccuracy: 'exact',
+        omittedEntriesLowerBound: 0,
         otherEntries: 0,
         reportBytes: 0,
         reports: 0,
@@ -668,6 +675,8 @@ describe('filesystem state store', () => {
       bytes: Buffer.byteLength(eventSource),
       eventLinesAccuracy: 'lower_bound',
       kind: 'regular_file',
+      omissionReason: 'event_scan_byte_limit',
+      omittedBytes: Buffer.byteLength(eventSource) - STORAGE_EVENT_SCAN_MAX_BYTES,
       scannedBytes: STORAGE_EVENT_SCAN_MAX_BYTES,
     });
     expect(observed.events.eventLines).toBeLessThan(
@@ -676,6 +685,8 @@ describe('filesystem state store', () => {
     expect(observed.reports).toEqual({
       kind: 'directory',
       metricsAccuracy: 'lower_bound',
+      omissionReason: 'direct_entry_scan_limit',
+      omittedEntriesLowerBound: 1,
       otherEntries: 0,
       reportBytes: STORAGE_REPORT_SCAN_MAX_ENTRIES * 3,
       reports: STORAGE_REPORT_SCAN_MAX_ENTRIES,
@@ -696,6 +707,7 @@ describe('filesystem state store', () => {
     expect((await Effect.runPromise(store.inspectStorage())).reports).toEqual({
       kind: 'directory',
       metricsAccuracy: 'exact',
+      omittedEntriesLowerBound: 0,
       otherEntries: 1,
       reportBytes: 3,
       reports: 1,

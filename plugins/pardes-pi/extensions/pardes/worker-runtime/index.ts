@@ -1,4 +1,16 @@
 export { type ChildLaunchProfile, verifierChildProfile } from './child-profile.ts';
+export {
+  appendWorkerStderrTail,
+  emptyWorkerStderrTail,
+  renderWorkerProtocolDiagnostic,
+  WORKER_STDERR_TAIL_MAX_CHARS,
+  type WorkerDiagnosticCountAccuracy,
+  type WorkerProtocolDiagnostic,
+  type WorkerProtocolDiagnosticReason,
+  type WorkerStderrTail,
+  type WorkerTextCounts,
+  workerProtocolDiagnostic,
+} from './diagnostics.ts';
 export { WorkerProcessError, WorkerRpcError } from './errors.ts';
 export {
   type GuardedWorkerSupervisorShape,

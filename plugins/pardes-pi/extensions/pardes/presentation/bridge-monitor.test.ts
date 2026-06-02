@@ -51,7 +51,7 @@ function runtime(status: WorkerStatus = 'running'): WorkerRuntimeSnapshot {
     startedAt: 1_000,
     stats: undefined,
     status,
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: 'Render recent child activity without stealing editor focus.',
     thinkingLevel: 'low',
   };

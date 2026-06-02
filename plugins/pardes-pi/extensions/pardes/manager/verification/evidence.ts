@@ -4,16 +4,17 @@ import {
   type AgentRecord,
   currentVerificationAttempt,
   type VerificationRecord,
+  type VerificationStaleReasonCode,
   type WorktreeLease,
 } from '../domain.ts';
 import { VerificationRequestRejectedError } from '../errors.ts';
 import { managedLeaseOwner, validateRetainedAgentState } from '../namespace.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
-  boundedVerificationReason,
   makeVerificationEvent,
   nowIso,
   reviewCheckoutOwner,
+  verificationStaleReason,
   withStaleCurrentEvidence,
 } from './policy.ts';
 
@@ -60,12 +61,16 @@ export function makeVerificationEvidenceReconciler(
     return { inspected, source, worktree };
   });
 
-  const markStale = Effect.fnUntraced(function* (verification: VerificationRecord, reason: string) {
+  const markStale = Effect.fnUntraced(function* (
+    verification: VerificationRecord,
+    reasonCode: VerificationStaleReasonCode,
+    detail?: string,
+  ) {
     if (currentVerificationAttempt(verification).evidenceStatus === 'stale') return;
     const timestamp = yield* nowIso;
     const event = makeVerificationEvent(
       'verification_evidence_stale',
-      `${verification.id} attempt ${currentVerificationAttempt(verification).attempt} evidence is stale: ${boundedVerificationReason(reason)}`,
+      `${verification.id} attempt ${currentVerificationAttempt(verification).attempt} evidence is stale: ${verificationStaleReason(reasonCode, detail)}`,
       timestamp,
       {
         agentId: verification.sourceAgentId,
@@ -84,7 +89,7 @@ export function makeVerificationEvidenceReconciler(
           inbox: [...state.inbox, event],
           verifications: {
             ...state.verifications,
-            [verification.id]: withStaleCurrentEvidence(current, reason, timestamp),
+            [verification.id]: withStaleCurrentEvidence(current, reasonCode, timestamp, detail),
           },
         },
       ] as const);
@@ -100,22 +105,20 @@ export function makeVerificationEvidenceReconciler(
     if (attempt.evidenceStatus === 'stale') return;
     const sourceResult = yield* inspectSource(verification.sourceAgentId).pipe(Effect.exit);
     if (Exit.isFailure(sourceResult)) {
-      yield* markStale(verification, 'source managed worktree state is no longer verifiable');
+      yield* markStale(verification, 'source_unverifiable');
       return;
     }
     const source = sourceResult.value.inspected;
     if (source.headSha !== attempt.reviewedHeadSha) {
       yield* markStale(
         verification,
-        `source head changed from ${attempt.reviewedHeadSha} to ${source.headSha}`,
+        'source_head_changed',
+        `from ${attempt.reviewedHeadSha} to ${source.headSha}`,
       );
       return;
     }
     if (source.dirty) {
-      yield* markStale(
-        verification,
-        'source managed worktree became dirty after the reviewed head was captured',
-      );
+      yield* markStale(verification, 'source_dirty');
       return;
     }
     const review = yield* worktrees
@@ -125,17 +128,11 @@ export function makeVerificationEvidenceReconciler(
       )
       .pipe(Effect.exit);
     if (Exit.isFailure(review) || review.value.headSha !== attempt.reviewedHeadSha) {
-      yield* markStale(
-        verification,
-        'detached review checkout no longer points at its immutable reviewed head',
-      );
+      yield* markStale(verification, 'review_checkout_head_changed');
       return;
     }
     if (review.value.dirty) {
-      yield* markStale(
-        verification,
-        'detached review checkout became dirty after the reviewed head was captured',
-      );
+      yield* markStale(verification, 'review_checkout_dirty');
     }
   });
 

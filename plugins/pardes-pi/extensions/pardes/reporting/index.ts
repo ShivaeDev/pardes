@@ -24,6 +24,7 @@ export {
   REPORT_ID_PATTERN,
   REPORT_REFERENCE_SUMMARY_MAX_CHARS,
   REPORT_SUMMARY_MAX_CHARS,
+  REPORT_SUMMARY_PREVIEW_OMISSION_REASON,
   type ReportExcerpt,
   type ReportExcerptField,
   ReportExcerptFieldSchema,
@@ -34,6 +35,8 @@ export {
   ReportHandoffNoteSchema,
   type ReportId,
   ReportIdSchema,
+  type ReportTextCounts,
+  ReportTextCountsSchema,
 } from './schemas.ts';
 export {
   decodeReportGetInput,
@@ -52,4 +55,5 @@ export {
   renderReportExcerpt,
   renderReportHandoffMessage,
   reportExcerptMetadata,
+  reportSummaryPreviewCounts,
 } from './service.ts';

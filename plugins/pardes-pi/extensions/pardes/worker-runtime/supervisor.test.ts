@@ -531,9 +531,10 @@ describe('worker supervisor', () => {
 
     await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'malformed-targeted-events')));
     await eventually(() => events.filter((event) => event.type === 'protocol_error').length === 7);
-    const protocolErrors = events.flatMap((event) =>
-      event.type === 'protocol_error' ? [event.message] : [],
+    const protocolDiagnostics = events.flatMap((event) =>
+      event.type === 'protocol_error' && event.diagnostic ? [event.diagnostic] : [],
     );
+    const protocolErrors = protocolDiagnostics.map(({ message }) => message);
     expect(protocolErrors).toEqual([
       'Invalid text_delta RPC event',
       'Invalid tool_execution_start RPC event',
@@ -541,9 +542,17 @@ describe('worker supervisor', () => {
       'Invalid compaction_start RPC event',
       'Invalid report_to_manager Pardes payload',
       'Invalid ask_manager Pardes payload',
-      'Invalid response RPC message',
+      'RPC response could not be correlated or decoded; response content was discarded.',
     ]);
-    expect(protocolErrors.every((message) => message.length <= 240)).toBe(true);
+    expect(protocolDiagnostics.map(({ reason }) => reason)).toEqual([
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_rpc_payload',
+      'invalid_response',
+    ]);
     expect(events.some((event) => event.type === 'report' || event.type === 'question')).toBe(
       false,
     );

@@ -41,7 +41,7 @@ export function verificationStatusLines(
   const attempt = currentVerificationAttempt(verification);
   return boundedRows(
     [
-      `${verification.id} [${attempt.status}] advisory attempt:${attempt.attempt} · retained lineage:${verification.attempts.length} · evidence:${attempt.evidenceStatus}`,
+      `${verification.id} [${attempt.status}] advisory attempt:${attempt.attempt} · retained lineage:${verification.attempts.length} · archived attempts omitted:${verification.archivedAttemptCount ?? 0} · evidence:${attempt.evidenceStatus}`,
       `source:${verification.sourceAgentId} · verifier:${verification.verifierAgentId} · workstream:${verification.workstreamId}`,
       ...(state ? [verificationReviewLoopLine(state, verification)] : []),
       `reviewed immutable head:${attempt.reviewedHeadSha} · baseline:${attempt.sourceBranchPointSha}`,

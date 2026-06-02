@@ -32,6 +32,8 @@ export interface EventStorageObservation extends StorageLeafObservation {
   readonly eventLines: number;
   readonly eventLinesAccuracy: StorageMetricAccuracy;
   readonly scannedBytes: number;
+  readonly omittedBytes: number;
+  readonly omissionReason?: 'event_scan_byte_limit';
 }
 
 export interface ReportStorageObservation extends StorageLeafObservation {
@@ -40,6 +42,8 @@ export interface ReportStorageObservation extends StorageLeafObservation {
   readonly metricsAccuracy: StorageMetricAccuracy;
   readonly scannedEntries: number;
   readonly otherEntries: number;
+  readonly omittedEntriesLowerBound: number;
+  readonly omissionReason?: 'direct_entry_scan_limit';
 }
 
 export interface StorageInspection {
@@ -101,6 +105,7 @@ interface EventLineScan {
   readonly bytes: number;
   readonly eventLines: number;
   readonly accuracy: Exclude<StorageMetricAccuracy, 'unavailable'>;
+  readonly omittedBytes: number;
   readonly scannedBytes: number;
 }
 
@@ -149,7 +154,13 @@ const scanEventLines = Effect.fnUntraced(function* (path: string) {
             ? ('exact' as const)
             : ('lower_bound' as const);
         if (accuracy === 'exact' && stats.size > 0 && lastByte !== 10) eventLines += 1;
-        return { accuracy, bytes: stats.size, eventLines, scannedBytes } satisfies EventLineScan;
+        return {
+          accuracy,
+          bytes: stats.size,
+          eventLines,
+          omittedBytes: Math.max(0, stats.size - scannedBytes),
+          scannedBytes,
+        } satisfies EventLineScan;
       }),
     (handle) =>
       fsPromise('close events inspection', path, () => handle.close()).pipe(Effect.ignore),
@@ -159,15 +170,29 @@ const scanEventLines = Effect.fnUntraced(function* (path: string) {
 const observeEvents = Effect.fnUntraced(function* (path: string) {
   const leaf = yield* observeLeaf(path);
   if (leaf.kind === 'missing')
-    return { ...leaf, eventLines: 0, eventLinesAccuracy: 'exact' as const, scannedBytes: 0 };
+    return {
+      ...leaf,
+      eventLines: 0,
+      eventLinesAccuracy: 'exact' as const,
+      omittedBytes: 0,
+      scannedBytes: 0,
+    };
   if (leaf.kind !== 'regular_file')
-    return { ...leaf, eventLines: 0, eventLinesAccuracy: 'unavailable' as const, scannedBytes: 0 };
+    return {
+      ...leaf,
+      eventLines: 0,
+      eventLinesAccuracy: 'unavailable' as const,
+      omittedBytes: 0,
+      scannedBytes: 0,
+    };
   return yield* scanEventLines(path).pipe(
     Effect.map((scan) => ({
       bytes: scan.bytes,
       eventLines: scan.eventLines,
       eventLinesAccuracy: scan.accuracy,
       kind: 'regular_file' as const,
+      omittedBytes: scan.omittedBytes,
+      ...(scan.omittedBytes === 0 ? {} : { omissionReason: 'event_scan_byte_limit' as const }),
       scannedBytes: scan.scannedBytes,
     })),
     Effect.catch((error) =>
@@ -176,6 +201,7 @@ const observeEvents = Effect.fnUntraced(function* (path: string) {
         eventLines: 0,
         eventLinesAccuracy: 'unavailable' as const,
         issue: observationIssue(error.cause),
+        omittedBytes: 0,
         scannedBytes: 0,
       }),
     ),
@@ -188,6 +214,7 @@ interface ReportDirectoryScan {
   readonly accuracy: Exclude<StorageMetricAccuracy, 'unavailable'>;
   readonly scannedEntries: number;
   readonly otherEntries: number;
+  readonly omittedEntriesLowerBound: number;
 }
 
 const scanReportDirectory = Effect.fnUntraced(function* (path: string) {
@@ -206,6 +233,7 @@ const scanReportDirectory = Effect.fnUntraced(function* (path: string) {
           if (!entry)
             return {
               accuracy: 'exact' as const,
+              omittedEntriesLowerBound: 0,
               otherEntries,
               reportBytes,
               reports,
@@ -229,6 +257,7 @@ const scanReportDirectory = Effect.fnUntraced(function* (path: string) {
         );
         return {
           accuracy: overflow ? ('lower_bound' as const) : ('exact' as const),
+          omittedEntriesLowerBound: overflow ? 1 : 0,
           otherEntries,
           reportBytes,
           reports,
@@ -246,6 +275,7 @@ const observeReports = Effect.fnUntraced(function* (path: string) {
     return {
       ...leaf,
       metricsAccuracy: 'exact' as const,
+      omittedEntriesLowerBound: 0,
       otherEntries: 0,
       reportBytes: 0,
       reports: 0,
@@ -256,6 +286,7 @@ const observeReports = Effect.fnUntraced(function* (path: string) {
     return {
       ...leaf,
       metricsAccuracy: 'unavailable' as const,
+      omittedEntriesLowerBound: 0,
       otherEntries: 0,
       reportBytes: 0,
       reports: 0,
@@ -266,16 +297,21 @@ const observeReports = Effect.fnUntraced(function* (path: string) {
     Effect.map((scan) => ({
       kind: 'directory' as const,
       metricsAccuracy: scan.accuracy,
+      omittedEntriesLowerBound: scan.omittedEntriesLowerBound,
       otherEntries: scan.otherEntries,
       reportBytes: scan.reportBytes,
       reports: scan.reports,
       scannedEntries: scan.scannedEntries,
+      ...(scan.omittedEntriesLowerBound === 0
+        ? {}
+        : { omissionReason: 'direct_entry_scan_limit' as const }),
     })),
     Effect.catch((error) =>
       Effect.succeed({
         ...leaf,
         issue: observationIssue(error.cause),
         metricsAccuracy: 'unavailable' as const,
+        omittedEntriesLowerBound: 0,
         otherEntries: 0,
         reportBytes: 0,
         reports: 0,
@@ -294,6 +330,7 @@ function blockedEvents(blockedReason: StorageBlockedReason): EventStorageObserva
     ...blockedLeaf(blockedReason),
     eventLines: 0,
     eventLinesAccuracy: 'unavailable',
+    omittedBytes: 0,
     scannedBytes: 0,
   };
 }
@@ -302,6 +339,7 @@ function blockedReports(blockedReason: StorageBlockedReason): ReportStorageObser
   return {
     ...blockedLeaf(blockedReason),
     metricsAccuracy: 'unavailable',
+    omittedEntriesLowerBound: 0,
     otherEntries: 0,
     reportBytes: 0,
     reports: 0,
@@ -336,10 +374,17 @@ export const inspectFileSystemStorage = Effect.fnUntraced(function* (
     return inspection(
       root,
       { kind: 'missing' },
-      { eventLines: 0, eventLinesAccuracy: 'exact', kind: 'missing', scannedBytes: 0 },
+      {
+        eventLines: 0,
+        eventLinesAccuracy: 'exact',
+        kind: 'missing',
+        omittedBytes: 0,
+        scannedBytes: 0,
+      },
       {
         kind: 'missing',
         metricsAccuracy: 'exact',
+        omittedEntriesLowerBound: 0,
         otherEntries: 0,
         reportBytes: 0,
         reports: 0,

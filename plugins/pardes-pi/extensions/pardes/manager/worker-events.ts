@@ -1,6 +1,14 @@
 import type { WorktreeInspection } from '../git/index.ts';
-import type { AgentReportReference } from '../reporting/index.ts';
-import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
+import {
+  type AgentReportReference,
+  REPORT_SUMMARY_PREVIEW_OMISSION_REASON,
+  type ReportTextCounts,
+} from '../reporting/index.ts';
+import {
+  renderWorkerProtocolDiagnostic,
+  type WorkerSupervisorEvent,
+  workerProtocolDiagnostic,
+} from '../worker-runtime/index.ts';
 import {
   type AgentGitAudit,
   type AgentGitAuditTrigger,
@@ -38,6 +46,8 @@ export interface WorkerEventSummary {
   readonly summary: string;
   readonly actionable: boolean;
   readonly reportPreviewTruncated?: boolean;
+  readonly reportPreviewChars?: ReportTextCounts;
+  readonly reportPreviewOmissionReason?: typeof REPORT_SUMMARY_PREVIEW_OMISSION_REASON;
 }
 
 export type VerifierIdleDisposition =
@@ -79,11 +89,49 @@ export function isModelFacingTextTruncated(text: string): boolean {
   return normalizeModelFacingText(text).length > MODEL_FACING_EVENT_TEXT_LIMIT;
 }
 
+function omissionAwareBound(text: string, maxChars: number, reason: string): string {
+  if (text.length <= maxChars) return text;
+  let shownChars = Math.max(0, maxChars - 110);
+  let suffix = '';
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    suffix = ` [omitted reason=${reason} originalChars=${text.length} shownChars=${shownChars} omittedChars=${text.length - shownChars}]`;
+    shownChars = Math.max(0, maxChars - suffix.length);
+  }
+  suffix = ` [omitted reason=${reason} originalChars=${text.length} shownChars=${shownChars} omittedChars=${text.length - shownChars}]`;
+  return `${text.slice(0, shownChars)}${suffix}`;
+}
+
 export function truncateModelFacingText(text: string): string {
-  const normalized = normalizeModelFacingText(text);
-  return normalized.length <= MODEL_FACING_EVENT_TEXT_LIMIT
-    ? normalized
-    : `${normalized.slice(0, MODEL_FACING_EVENT_TEXT_LIMIT - 1)}…`;
+  return omissionAwareBound(
+    normalizeModelFacingText(text),
+    MODEL_FACING_EVENT_TEXT_LIMIT,
+    'manager_event_text_limit',
+  );
+}
+
+/** Bound unpersisted child text with explicit omission accounting. */
+export function omissionAwareModelFacingText(
+  text: string,
+  reason: 'manager_event_preview_limit' = 'manager_event_preview_limit',
+): string {
+  return omissionAwareBound(normalizeModelFacingText(text), MODEL_FACING_EVENT_TEXT_LIMIT, reason);
+}
+
+function reportPreviewCounts(summary: string): ReportTextCounts {
+  const originalChars = normalizeModelFacingText(summary).length;
+  const shownChars = Math.min(originalChars, MODEL_FACING_EVENT_TEXT_LIMIT);
+  return { omittedChars: originalChars - shownChars, originalChars, shownChars };
+}
+
+function reportSummaryPreview(
+  summary: string,
+  persistence: ReportArtifactPersistence | undefined,
+): string {
+  const reference = persistence?.status === 'persisted' ? persistence.reference : undefined;
+  const counts = reference?.summaryChars ?? reportPreviewCounts(summary);
+  if (counts.omittedChars === 0) return normalizeModelFacingText(summary);
+  const normalized = normalizeModelFacingText(summary);
+  return `${normalized.slice(0, counts.shownChars)} [omitted reason=${reference?.summaryOmissionReason ?? REPORT_SUMMARY_PREVIEW_OMISSION_REASON} originalChars=${counts.originalChars} shownChars=${counts.shownChars} omittedChars=${counts.omittedChars}; durable report available via associated reportId and paginated report_get]`;
 }
 
 export function boundedFailureSummary(error: unknown): string {
@@ -92,9 +140,7 @@ export function boundedFailureSummary(error: unknown): string {
 
 export function boundedEventSummary(parts: ReadonlyArray<string>): string {
   const summary = normalizeModelFacingText(parts.filter(Boolean).join(' '));
-  return summary.length <= BOUNDED_EVENT_SUMMARY_LIMIT
-    ? summary
-    : `${summary.slice(0, BOUNDED_EVENT_SUMMARY_LIMIT - 1)}…`;
+  return omissionAwareBound(summary, BOUNDED_EVENT_SUMMARY_LIMIT, 'manager_event_summary_limit');
 }
 
 export function successfulHandoffAudit(
@@ -178,20 +224,31 @@ export function workerEventSummary(
         reportPersistence?.status === 'failed' ||
         audit?.status === 'failed',
       summary: boundedEventSummary([
-        `${event.agentId}: ${truncateModelFacingText(event.summary)}`,
+        `${event.agentId}: ${reportSummaryPreview(event.summary, reportPersistence)}`,
         reportPersistenceSuffix(reportPersistence),
         handoffAuditSuffix(audit),
       ]),
       type,
       ...(reportPersistence?.status === 'persisted'
-        ? { reportPreviewTruncated: isModelFacingTextTruncated(event.summary) }
+        ? {
+            reportPreviewChars:
+              reportPersistence.reference?.summaryChars ?? reportPreviewCounts(event.summary),
+            reportPreviewTruncated: isModelFacingTextTruncated(event.summary),
+            ...(isModelFacingTextTruncated(event.summary)
+              ? {
+                  reportPreviewOmissionReason:
+                    reportPersistence.reference?.summaryOmissionReason ??
+                    REPORT_SUMMARY_PREVIEW_OMISSION_REASON,
+                }
+              : {}),
+          }
         : {}),
     };
   }
   if (event.type === 'question')
     return {
       actionable: true,
-      summary: `${event.agentId} asks: ${truncateModelFacingText(event.question)}`,
+      summary: `${event.agentId} asks: ${omissionAwareModelFacingText(event.question)}`,
       type: 'agent_question',
     };
   if (event.type === 'unexpected_exit')
@@ -203,7 +260,13 @@ export function workerEventSummary(
   if (event.type === 'protocol_error')
     return {
       actionable: true,
-      summary: `${event.agentId} emitted invalid RPC JSON: ${truncateModelFacingText(event.message)}`,
+      summary: `${event.agentId} emitted invalid RPC JSON: ${renderWorkerProtocolDiagnostic(
+        event.diagnostic ??
+          workerProtocolDiagnostic(
+            'invalid_rpc_payload',
+            omissionAwareModelFacingText(event.message ?? 'Invalid RPC payload'),
+          ),
+      )}`,
       type: 'agent_protocol_error',
     };
   if (event.type === 'status' && event.status === 'idle') {

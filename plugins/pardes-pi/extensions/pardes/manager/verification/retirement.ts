@@ -1,9 +1,8 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { Cause, Effect, Exit } from 'effect';
+import { Effect, Exit } from 'effect';
 import { currentVerificationTerminalReportStatus } from '../domain.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
-  boundedVerificationReason,
   makeVerificationEvent,
   nowIso,
   projectVerificationReviewLoopDisposition,
@@ -46,7 +45,7 @@ export function makeVerificationRetirement(
       yield* callbacks.appendEventSafely(
         makeVerificationEvent(
           'verification_auto_retire_failed',
-          `${verification.id} could not safely stop idle retained verifier ${verifierAgent.id}; scratch checkout and advisory history were preserved: ${boundedVerificationReason(String(Cause.squash(stoppedResult.cause)))}`,
+          `${verification.id} could not safely stop idle retained verifier ${verifierAgent.id} [runtime_stop_failed]; scratch checkout and advisory history were preserved. Arbitrary runtime diagnostics omitted.`,
           failedAt,
           {
             agentId: verifierAgent.id,

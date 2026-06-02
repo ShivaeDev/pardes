@@ -1,5 +1,6 @@
 import { Context, type Duration, Effect, Layer, Schedule } from 'effect';
 import { AgentAlreadyRunningError, AgentNotFoundError } from '../agent-errors.ts';
+import type { WorkerProtocolDiagnostic } from './diagnostics.ts';
 import { type WorkerProcessError, WorkerRpcError } from './errors.ts';
 import { makeWorkerEventDispatcher } from './events.ts';
 import { ensureWorkerSessionDirectory, type WorkerProcessOptions } from './process.ts';
@@ -20,7 +21,7 @@ import {
   type WorkerSupervisorEvent,
 } from './retained-runtime.ts';
 import {
-  boundedProtocolErrorMessage,
+  rpcPayloadDiagnostic,
   type WorkerRpcResponse,
   type WorkerRpcState,
   WorkerRpcWire,
@@ -123,10 +124,13 @@ export function makeWorkerSupervisor(
     });
   };
 
-  const notifyProtocolError = (runtime: RetainedWorkerRuntime, message: string) => {
+  const notifyProtocolError = (
+    runtime: RetainedWorkerRuntime,
+    diagnostic: WorkerProtocolDiagnostic | string,
+  ) => {
     notify({
       agentId: runtime.input.agentId,
-      message: boundedProtocolErrorMessage(message),
+      diagnostic: typeof diagnostic === 'string' ? rpcPayloadDiagnostic(diagnostic) : diagnostic,
       type: 'protocol_error',
       ...runtimeEventOwnership(runtime),
     });

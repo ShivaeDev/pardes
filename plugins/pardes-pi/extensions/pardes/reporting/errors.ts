@@ -26,6 +26,8 @@ export class ReportWriteLimitExceededError extends Data.TaggedError(
   'ReportWriteLimitExceededError',
 )<{
   readonly field: 'summary' | 'details';
+  readonly originalChars?: number;
+  readonly maxChars?: number;
 }> {}
 
 export class ReportInputValidationError extends Data.TaggedError('ReportInputValidationError')<{

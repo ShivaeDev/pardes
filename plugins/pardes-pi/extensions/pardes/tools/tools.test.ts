@@ -152,7 +152,7 @@ function runtime(overrides: Partial<WorkerRuntimeSnapshot> = {}): WorkerRuntimeS
       totalMessages: 4,
     },
     status: 'running',
-    stderr: 'diagnostic stderr',
+    stderr: { omittedChars: 0, originalChars: 17, shownChars: 17, tail: 'diagnostic stderr' },
     steeringMode: 'all',
     steeringQueueCount: 1,
     task: 'Exercise compact runtime status output.',
@@ -806,11 +806,15 @@ describe('Pardes model-visible tools', () => {
         eventLines: 73,
         eventLinesAccuracy: 'lower_bound',
         kind: 'regular_file',
+        omissionReason: 'event_scan_byte_limit',
+        omittedBytes: STORAGE_EVENT_SCAN_MAX_BYTES,
         scannedBytes: STORAGE_EVENT_SCAN_MAX_BYTES,
       },
       reports: {
         kind: 'directory',
         metricsAccuracy: 'lower_bound',
+        omissionReason: 'direct_entry_scan_limit',
+        omittedEntriesLowerBound: 1,
         otherEntries: 2,
         reportBytes: 4_096,
         reports: 128,
@@ -849,10 +853,10 @@ describe('Pardes model-visible tools', () => {
     expect(text).toContain('storage: read-only bounded inspection · root directory');
     expect(text).toContain('state: regular file · 512 bytes');
     expect(text).toContain(
-      'events: regular file · 131072 bytes · ≥73 event lines · scan limited after 65536 bytes',
+      'events: regular file · 131072 bytes · ≥73 event lines · scan limited [event_scan_byte_limit]: original=131072 shown=65536 omitted=65536 bytes',
     );
     expect(text).toContain(
-      'reports: directory · ≥128 reports · ≥4096 bytes · 2 other direct entries observed · scan limited after 128 direct entries',
+      'reports: directory · ≥128 reports · ≥4096 bytes · 2 other direct entries observed · scan limited [direct_entry_scan_limit]: shown=128 omitted>=1 direct entries',
     );
     expect(text).toContain('no artifact contents returned');
     expect(text.split('\n').length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_ROWS);

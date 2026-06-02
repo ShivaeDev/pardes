@@ -1,7 +1,7 @@
 import { Effect, Exit, Option } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
-import { boundedProtocolErrorMessage, WorkerRpcWire } from './codecs.ts';
+import { rpcPayloadDiagnostic, WorkerRpcWire } from './codecs.ts';
 
 describe('worker RPC wire schema', () => {
   test('keeps tolerant envelope dispatch separate from targeted response decoding', () => {
@@ -82,10 +82,14 @@ describe('worker RPC wire schema', () => {
     ).toBe(true);
   });
 
-  test('bounds protocol error previews', () => {
-    expect(boundedProtocolErrorMessage('short error')).toBe('short error');
-    const bounded = boundedProtocolErrorMessage('x'.repeat(300));
-    expect(bounded).toHaveLength(240);
-    expect(bounded.endsWith('…')).toBe(true);
+  test('codes targeted payload failures without clipping software-authored labels', () => {
+    expect(rpcPayloadDiagnostic('Invalid text_delta RPC event')).toEqual({
+      countAccuracy: 'exact',
+      message: 'Invalid text_delta RPC event',
+      omittedChars: 0,
+      originalChars: 0,
+      reason: 'invalid_rpc_payload',
+      shownChars: 0,
+    });
   });
 });

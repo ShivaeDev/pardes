@@ -92,7 +92,7 @@ function runtime(agentId: string, status: WorkerStatus): WorkerRuntimeSnapshot {
     startedAt: 1,
     stats: undefined,
     status,
-    stderr: '',
+    stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
     task: `Runtime task ${agentId}`,
     thinkingLevel: 'high',
   };
@@ -755,6 +755,19 @@ describe('Pardes coordinating-manager compaction', () => {
       );
       expect(diagnostics[0], fixture.name).not.toContain('private-');
     }
+  });
+
+  test('accounts for redacted fallback diagnostic field omissions without midpoint ellipses', () => {
+    const diagnostic = renderManagerCompactionFallbackDiagnostic(
+      'summarize',
+      new Error(`token=private-long-token ${'x'.repeat(2_000)}`),
+    );
+
+    expect(diagnostic).toContain('token=[redacted]');
+    expect(diagnostic).toContain('omitted reason=diagnostic_field_limit');
+    expect(diagnostic).toMatch(/originalChars=\d+ shownChars=\d+ omittedChars=\d+/);
+    expect(diagnostic).not.toContain('private-long-token');
+    expect(diagnostic.length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
   });
 
   test('keeps fallback safe when the UI diagnostic surface itself throws', () => {

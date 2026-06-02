@@ -19,6 +19,7 @@ import {
   currentVerificationAttempt,
   initialManagerState,
   type ManagerState,
+  VERIFICATION_ATTEMPT_HISTORY_MAX,
   type VerificationRecord,
 } from '../domain.ts';
 import { AgentNotFoundError } from '../errors.ts';
@@ -269,7 +270,7 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
           startedAt: Date.now(),
           stats: undefined,
           status: 'running',
-          stderr: '',
+          stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
           task: input.task,
           thinkingLevel: input.thinkingLevel,
           ...(input.lifecycleGeneration === undefined
@@ -382,7 +383,8 @@ describe('advisory verification lifecycle', () => {
 
     expect(currentVerificationAttempt(stale)).toMatchObject({
       evidenceStatus: 'stale',
-      staleReason: 'detached review checkout became dirty after the reviewed head was captured',
+      staleReason: '[review_checkout_dirty] detached review checkout became dirty',
+      staleReasonCode: 'review_checkout_dirty',
     });
     expect(fixture.namespace.state.inbox).toEqual([
       expect.objectContaining({
@@ -725,6 +727,24 @@ describe('advisory verification lifecycle', () => {
       ).toMatchObject({ evidenceStatus: 'stale', status: 'crashed' });
       expect(existsSync(fixture.sourcePath)).toBe(true);
     }
+  });
+
+  test('counts archived attempts when retained verifier lineage reaches its durable cap', async () => {
+    const fixture = await verificationFixture();
+    let verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+
+    for (let index = 0; index < VERIFICATION_ATTEMPT_HISTORY_MAX + 1; index += 1) {
+      fixture.setVerifierIdle(verification);
+      verification = await Effect.runPromise(fixture.coordinator.refresh(verification.id));
+    }
+
+    expect(currentVerificationAttempt(verification).attempt).toBe(
+      VERIFICATION_ATTEMPT_HISTORY_MAX + 2,
+    );
+    expect(verification.attempts).toHaveLength(VERIFICATION_ATTEMPT_HISTORY_MAX);
+    expect(verification.archivedAttemptCount).toBe(2);
   });
 
   test('serializes concurrent requests and refreshes through one manager-scoped verifier permit', async () => {

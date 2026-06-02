@@ -1,7 +1,6 @@
 import { Schema } from 'effect';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
-
-const MAX_PROTOCOL_ERROR_LENGTH = 240;
+import { type WorkerProtocolDiagnostic, workerProtocolDiagnostic } from '../diagnostics.ts';
 
 export interface WorkerRpcResponse {
   readonly type: 'response';
@@ -197,8 +196,7 @@ export const WorkerRpcWire = {
   decodeToolExecutionStartEvent: Schema.decodeUnknownOption(WorkerToolExecutionStartEventSchema),
 } as const;
 
-export function boundedProtocolErrorMessage(message: string): string {
-  return message.length <= MAX_PROTOCOL_ERROR_LENGTH
-    ? message
-    : `${message.slice(0, MAX_PROTOCOL_ERROR_LENGTH - 1)}…`;
+/** Project one software-authored targeted-codec label without carrying rejected child payload text. */
+export function rpcPayloadDiagnostic(message: string): WorkerProtocolDiagnostic {
+  return workerProtocolDiagnostic('invalid_rpc_payload', message);
 }

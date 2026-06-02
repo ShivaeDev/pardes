@@ -29,7 +29,7 @@ export function validateSerializedReportWrite(
         storeError(
           'validate serialized report size',
           path,
-          `serialized report exceeds ${STORAGE_REPORT_WRITE_MAX_BYTES} bytes`,
+          `serialized report allocation breaker exceeded: reason=serialized_report_write_limit originalBytes=${bytes} shownBytes=0 omittedBytes=${bytes} maxBytes=${STORAGE_REPORT_WRITE_MAX_BYTES}`,
         ),
       );
 }

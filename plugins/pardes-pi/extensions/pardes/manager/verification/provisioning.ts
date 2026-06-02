@@ -23,7 +23,6 @@ import type {
 } from './contracts.ts';
 import type { VerificationEvidenceReconcilerShape } from './evidence.ts';
 import {
-  boundedVerificationReason,
   DEFAULT_VERIFICATION_TASK,
   makeVerificationEvent,
   nowIso,
@@ -118,6 +117,7 @@ export function makeVerificationProvisioner(
         timestamp,
       );
       const verification: VerificationRecord = {
+        archivedAttemptCount: 0,
         attempts: [firstAttempt],
         createdAt: timestamp,
         id: verificationId,
@@ -183,7 +183,7 @@ export function makeVerificationProvisioner(
         yield* callbacks.appendEventSafely(
           makeVerificationEvent(
             'verification_spawn_failed',
-            `${verificationId} verifier runtime failed to start; attempted safe disposable verifier provisioning compensation: ${boundedVerificationReason(String(Cause.squash(runtimeResult.cause)))}`,
+            `${verificationId} verifier runtime failed to start [runtime_spawn_failed]; attempted safe disposable verifier provisioning compensation. Arbitrary runtime diagnostics omitted.`,
             failedAt,
             { agentId: verifierAgentId, verificationId, workstreamId: source.workstreamId },
           ),
@@ -372,14 +372,22 @@ export function makeVerificationProvisioner(
           const persisted = state.verifications[verificationId] ?? current;
           const prior = withStaleCurrentEvidence(
             persisted,
-            `superseded by refresh attempt ${attempt}`,
+            'refresh_superseded',
             refreshedAt,
+            `by refresh attempt ${attempt}`,
           );
           const { scratchCleanupPending: _scratchCleanupPending, ...withoutPendingCleanup } = prior;
+          const retainedPriorAttempts = prior.attempts.slice(
+            -(VERIFICATION_ATTEMPT_HISTORY_MAX - 1),
+          );
+          const archivedAttemptCount =
+            (prior.archivedAttemptCount ?? 0) +
+            Math.max(0, prior.attempts.length - retainedPriorAttempts.length);
           const next: VerificationRecord = {
             ...withoutPendingCleanup,
+            archivedAttemptCount,
             attempts: [
-              ...prior.attempts.slice(-(VERIFICATION_ATTEMPT_HISTORY_MAX - 1)),
+              ...retainedPriorAttempts,
               verificationAttemptFor(
                 attempt,
                 inspected.headSha,
@@ -461,7 +469,7 @@ export function makeVerificationProvisioner(
         yield* callbacks.appendEventSafely(
           makeVerificationEvent(
             'verification_refresh_failed',
-            `${verificationId} attempt ${attempt} verifier runtime failed to relaunch; attempted safe disposable verifier provisioning cleanup: ${boundedVerificationReason(String(Cause.squash(runtimeResult.cause)))}`,
+            `${verificationId} attempt ${attempt} verifier runtime failed to relaunch [runtime_spawn_failed]; attempted safe disposable verifier provisioning cleanup. Arbitrary runtime diagnostics omitted.`,
             failedAt,
             { agentId: verifierAgent.id, verificationId, workstreamId: verification.workstreamId },
           ),

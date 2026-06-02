@@ -6,6 +6,7 @@ import {
   type ManagerState,
   type VerificationAttempt,
   type VerificationRecord,
+  type VerificationStaleReasonCode,
   type VerificationStatus,
 } from '../domain.ts';
 import type { VerificationLifecycleNamespace } from './contracts.ts';
@@ -36,9 +37,23 @@ export function makeVerificationEvent(
   return { createdAt, id: randomUUID(), summary, type, ...association };
 }
 
-export function boundedVerificationReason(reason: string): string {
-  const normalized = reason.replace(/\s+/g, ' ').trim();
-  return normalized.length <= 240 ? normalized : `${normalized.slice(0, 239)}…`;
+const VERIFICATION_STALE_REASON_LABELS: Readonly<Record<VerificationStaleReasonCode, string>> = {
+  provisioning_failed: 'verifier provisioning failed',
+  refresh_superseded: 'evidence superseded',
+  review_checkout_dirty: 'detached review checkout became dirty',
+  review_checkout_head_changed: 'detached review checkout head changed',
+  source_dirty: 'source managed worktree became dirty',
+  source_head_changed: 'source head changed',
+  source_unverifiable: 'source managed worktree state is no longer verifiable',
+};
+
+export function verificationStaleReason(
+  code: VerificationStaleReasonCode,
+  detail?: string,
+): string {
+  const safeDetail = detail?.replace(/\s+/g, ' ').trim();
+  const label = `[${code}] ${VERIFICATION_STALE_REASON_LABELS[code]}`;
+  return safeDetail ? `${label} ${safeDetail}` : label;
 }
 
 export type VerificationReviewLoopDisposition = 'unassociated' | 'open' | 'resolved_terminal';
@@ -90,15 +105,17 @@ export function withVerificationStatus(
 
 export function withStaleCurrentEvidence(
   verification: VerificationRecord,
-  reason: string,
+  reasonCode: VerificationStaleReasonCode,
   timestamp: string,
+  detail?: string,
 ): VerificationRecord {
-  const staleReason = boundedVerificationReason(reason);
+  const staleReason = verificationStaleReason(reasonCode, detail);
   return updateCurrentVerificationAttempt({ ...verification, updatedAt: timestamp }, (attempt) => ({
     ...attempt,
     evidenceStatus: 'stale',
     staleAt: timestamp,
     staleReason,
+    staleReasonCode: reasonCode,
     updatedAt: timestamp,
   }));
 }

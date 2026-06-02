@@ -1,12 +1,13 @@
 import { once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, test } from 'vitest';
+import type { WorkerProtocolDiagnostic } from '../diagnostics.ts';
 import { attachWorkerRpcJsonl, MAX_WORKER_RPC_JSONL_LINE_LENGTH } from './jsonl.ts';
 
 function fixture(maxLineLength?: number) {
   const stdout = new PassThrough();
   const values: unknown[] = [];
-  const errors: string[] = [];
+  const errors: WorkerProtocolDiagnostic[] = [];
   attachWorkerRpcJsonl(stdout, {
     ...(maxLineLength === undefined ? {} : { maxLineLength }),
     onProtocolError: (message) => {
@@ -41,7 +42,16 @@ describe('worker RPC JSONL decoder', () => {
     stdout.end('{"invalid":\n{"valid":true}\n');
 
     expect(values).toEqual([{ valid: true }]);
-    expect(errors).toEqual(['Invalid JSON RPC line']);
+    expect(errors).toEqual([
+      {
+        countAccuracy: 'exact',
+        message: 'RPC JSONL record was not valid JSON; record content was discarded.',
+        omittedChars: 11,
+        originalChars: 11,
+        reason: 'invalid_json',
+        shownChars: 0,
+      },
+    ]);
   });
 
   test('accepts a legitimate multi-megabyte local report record and continues decoding', () => {
@@ -77,7 +87,38 @@ describe('worker RPC JSONL decoder', () => {
     stdout.end('\n{"ok":1}\n');
 
     expect(values).toEqual([{ ok: 1 }]);
-    expect(errors).toEqual(['RPC JSONL line exceeded the decoding limit']);
+    expect(errors).toEqual([
+      {
+        countAccuracy: 'exact',
+        message:
+          'RPC JSONL record exceeded the 8-character transport framing breaker; record content was discarded through its delimiter.',
+        omittedChars: 24,
+        originalChars: 24,
+        reason: 'line_length_breaker',
+        shownChars: 0,
+      },
+    ]);
+  });
+
+  test('reports a lower bound when an oversized record ends without a delimiter', async () => {
+    const { stdout, values, errors } = fixture(8);
+
+    const ended = once(stdout, 'end');
+    stdout.end('unterminated oversized record');
+    await ended;
+
+    expect(values).toEqual([]);
+    expect(errors).toEqual([
+      {
+        countAccuracy: 'lower_bound',
+        message:
+          'RPC JSONL record exceeded the 8-character transport framing breaker; record content was discarded through its delimiter.',
+        omittedChars: 29,
+        originalChars: 29,
+        reason: 'line_length_breaker',
+        shownChars: 0,
+      },
+    ]);
   });
 
   test('rejects oversized delimited records without dropping the next record', () => {
@@ -86,6 +127,16 @@ describe('worker RPC JSONL decoder', () => {
     stdout.end('xxxxxxxxx\n{"ok":1}\n');
 
     expect(values).toEqual([{ ok: 1 }]);
-    expect(errors).toEqual(['RPC JSONL line exceeded the decoding limit']);
+    expect(errors).toEqual([
+      {
+        countAccuracy: 'exact',
+        message:
+          'RPC JSONL record exceeded the 8-character transport framing breaker; record content was discarded through its delimiter.',
+        omittedChars: 9,
+        originalChars: 9,
+        reason: 'line_length_breaker',
+        shownChars: 0,
+      },
+    ]);
   });
 });

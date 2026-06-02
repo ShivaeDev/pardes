@@ -128,11 +128,11 @@ export function githubIntegrationHealthLines(
 export function storageLines(storage: StorageInspection, maxRows?: number): string {
   const eventScan =
     storage.events.eventLinesAccuracy === 'lower_bound'
-      ? ` · scan limited after ${storage.events.scannedBytes} bytes`
+      ? ` · scan limited [${storage.events.omissionReason ?? 'event_scan_byte_limit'}]: original=${storage.events.bytes ?? storage.events.scannedBytes} shown=${storage.events.scannedBytes} omitted=${storage.events.omittedBytes} bytes`
       : '';
   const reportScan =
     storage.reports.metricsAccuracy === 'lower_bound'
-      ? ` · scan limited after ${storage.reports.scannedEntries} direct entries`
+      ? ` · scan limited [${storage.reports.omissionReason ?? 'direct_entry_scan_limit'}]: shown=${storage.reports.scannedEntries} omitted>=${storage.reports.omittedEntriesLowerBound} direct entries`
       : '';
   const otherReports =
     storage.reports.otherEntries > 0

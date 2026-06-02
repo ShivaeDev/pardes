@@ -264,6 +264,29 @@ describe('manager inbox notification projection', () => {
     expect(row.endsWith('…')).toBe(true);
   });
 
+  test('mints a cursor only through the ready prefix before a presentation-blocked merge row', () => {
+    const inbox = [
+      event('event-ready', 'agent_question', 'A ready prefix row.'),
+      {
+        ...event('event-merge', 'merged', 'Merge refinement is pending.'),
+        presentationBlocked: true,
+      },
+      event('event-suffix', 'agent_question', 'A suffix row held behind merge refinement.'),
+    ];
+    const wake = requiredValue(makeInboxWake('manager-notification', inbox, createdAt));
+    const message = renderInboxWakeMessage({ inbox, wake });
+
+    expect(wake).toMatchObject({ cursor: 'event-ready', pendingCount: 1 });
+    expect(message.content).toContain('- agent_question: [child question] A ready prefix row.');
+    expect(message.content).toContain(
+      '- queued suffix: +2 durable events await the next cursor release.',
+    );
+    expect(message.content).not.toContain('Merge refinement is pending.');
+    expect(message.content).not.toContain('A suffix row held behind merge refinement.');
+    expect(message.details).toMatchObject({ digestCount: 1, queuedSuffixCount: 2 });
+    expect(makeInboxWake('manager-notification', inbox.slice(1), createdAt)).toBeUndefined();
+  });
+
   test('leaves overflow as an explicit queued suffix instead of minting a cursor across hidden rows', () => {
     const inbox = Array.from({ length: MANAGER_INBOX_WAKE_MAX_ROWS + 3 }, (_, index) =>
       event(`event-${index}`, 'agent_idle', `agent-${index} is idle and ready for follow-up.`),

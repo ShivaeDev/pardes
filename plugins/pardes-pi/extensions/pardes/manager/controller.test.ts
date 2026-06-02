@@ -343,6 +343,35 @@ function toggledInspectionWorktrees() {
   };
 }
 
+async function barrierInspectionWorktrees() {
+  const service = makeManagedWorktreeService();
+  const entered = await Effect.runPromise(Deferred.make<void>());
+  const release = await Effect.runPromise(Deferred.make<void>());
+  let blocked = false;
+  const worktrees: ManagedWorktreeShape = {
+    ...service,
+    inspect: (owner, lease) =>
+      Effect.gen(function* () {
+        if (blocked) {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+        }
+        return yield* service.inspect(owner, lease);
+      }),
+  };
+  return {
+    block: () => {
+      blocked = true;
+    },
+    entered,
+    release: () => {
+      blocked = false;
+      return Effect.runPromise(Deferred.succeed(release, undefined));
+    },
+    worktrees,
+  };
+}
+
 function failingWorkers(onSpawn?: (input: WorkerSpawnInput) => void) {
   const makeWorkers = (_onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>) =>
     ({
@@ -5685,6 +5714,121 @@ describe('manager controller', () => {
     expect(restored.snapshot()?.inbox).toEqual([]);
     expect(restored.snapshot()).not.toHaveProperty('inboxWake');
     await Effect.runPromise(restored.shutdown(fixture.ctx));
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('holds a merged wake until suspended retirement durably refines its routine outcome', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const worktrees = await barrierInspectionWorktrees();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+      worktrees: worktrees.worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent, published } = await publishManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    expect(controller.snapshot()?.inbox).toEqual([]);
+    fixture.messages.length = 0;
+    worktrees.block();
+
+    const merge = Effect.runFork(
+      watcher.observe(published.pullRequest.id, observedPullRequest({ status: 'merged' })),
+    );
+    await Effect.runPromise(Deferred.await(worktrees.entered));
+
+    expect(controller.snapshot()?.inbox).toMatchObject([
+      { presentationBlocked: true, type: 'merged' },
+    ]);
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(managerInboxWakeups(fixture.messages)).toEqual([]);
+
+    await worktrees.release();
+    await Effect.runPromise(Fiber.join(merge));
+
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('stopped');
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    expect(controller.snapshot()?.inbox).toMatchObject([{ type: 'merged' }]);
+    expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+    expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+      ),
+    });
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('holds a merged wake until suspended retirement durably refines its exceptional outcome', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const watcher = manualGithubWatcher();
+    const worktrees = await barrierInspectionWorktrees();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+      worktrees: worktrees.worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    writeFileSync(
+      join(requiredValue(agent.worktree).path, 'dirty-suspended-retirement.txt'),
+      'preserve exceptional retirement\n',
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    expect(controller.snapshot()?.inbox).toEqual([]);
+    fixture.messages.length = 0;
+    worktrees.block();
+
+    const merge = Effect.runFork(
+      watcher.observe(published.pullRequest.id, observedPullRequest({ status: 'merged' })),
+    );
+    await Effect.runPromise(Deferred.await(worktrees.entered));
+
+    expect(controller.snapshot()?.inbox).toMatchObject([
+      { presentationBlocked: true, type: 'merged' },
+    ]);
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(managerInboxWakeups(fixture.messages)).toEqual([]);
+
+    await worktrees.release();
+    await Effect.runPromise(Fiber.join(merge));
+
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'merged',
+      'agent_git_audit_dirty',
+    ]);
+    expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+    expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
+      content: expect.stringContaining(
+        '- merged: [GitHub metadata] #42 merge observed; idle-owner:preserved(dirty); stream:preserved(audit+2); follow-up:1.',
+      ),
+      details: { pendingCount: 2 },
+    });
+    expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
+      content: expect.stringContaining('- agent_git_audit_dirty: [Pardes]'),
+    });
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 

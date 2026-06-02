@@ -420,14 +420,11 @@ function withMergedRetirementSummary(
   const summary = mergedRetirementSummary(pullRequest, owner, state, liveRuntimes);
   let changed = false;
   const inbox = state.inbox.map((event) => {
-    if (
-      event.type !== 'merged' ||
-      event.pullRequestId !== pullRequest.id ||
-      event.summary === summary
-    )
-      return event;
+    if (event.type !== 'merged' || event.pullRequestId !== pullRequest.id) return event;
+    const { presentationBlocked: _presentationBlocked, ...readyEvent } = event;
+    if (event.presentationBlocked !== true && event.summary === summary) return event;
     changed = true;
-    return { ...event, summary };
+    return { ...readyEvent, summary };
   });
   return changed ? withInbox(state, inbox) : state;
 }
@@ -881,14 +878,15 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         updatedAt: timestamp,
       };
       const attention = [
-        ...nextTransitions.map((transition) =>
-          makeEvent(
+        ...nextTransitions.map((transition) => ({
+          ...makeEvent(
             transition,
             pullRequestTransitionSummary(nextPullRequest, transition),
             timestamp,
             pullRequestEventAssociation(nextPullRequest),
           ),
-        ),
+          ...(transition === 'merged' ? { presentationBlocked: true } : {}),
+        })),
         ...(newlyDetectedPaginationGap
           ? [
               makeEvent(

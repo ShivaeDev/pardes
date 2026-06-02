@@ -266,6 +266,8 @@ export const ManagerEventSchema = Schema.Struct({
   agentId: Schema.optionalKey(NonEmptyString),
   createdAt: NonEmptyString,
   id: NonEmptyString,
+  /** Presentation cursors stop before this row until its bounded software outcome is durable. */
+  presentationBlocked: Schema.optionalKey(Schema.Boolean),
   pullRequestId: Schema.optionalKey(NonEmptyString),
   reportId: Schema.optionalKey(ReportIdSchema),
   reportPreviewTruncated: Schema.optionalKey(Schema.Boolean),

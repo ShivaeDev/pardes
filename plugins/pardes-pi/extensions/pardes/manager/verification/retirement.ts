@@ -1,12 +1,12 @@
 import { Cause, Effect, Exit } from 'effect';
-import type { VerificationLifecycleCoordinatorOptions } from './verification-contracts.ts';
+import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   boundedVerificationReason,
   makeVerificationEvent,
   nowIso,
   projectVerificationReviewLoopDisposition,
   withVerificationStatus,
-} from './verification-policy.ts';
+} from './policy.ts';
 
 export interface VerificationRetirementShape {
   readonly retireIfResolved: (verificationId: string) => Effect.Effect<boolean, unknown>;

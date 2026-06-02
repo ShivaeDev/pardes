@@ -7,8 +7,8 @@ import {
   type VerificationAttempt,
   type VerificationRecord,
   type VerificationStatus,
-} from './domain.ts';
-import type { VerificationLifecycleNamespace } from './verification-contracts.ts';
+} from '../domain.ts';
+import type { VerificationLifecycleNamespace } from './contracts.ts';
 
 export const nowIso = Clock.currentTimeMillis.pipe(
   Effect.map((millis) => new Date(millis).toISOString()),

@@ -1,12 +1,12 @@
 import { Cause, Effect, Exit } from 'effect';
-import { currentVerificationAttempt, type VerificationRecord } from './domain.ts';
-import type { VerificationLifecycleCoordinatorOptions } from './verification-contracts.ts';
+import { currentVerificationAttempt, type VerificationRecord } from '../domain.ts';
+import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   nowIso,
   reviewCheckoutOwner,
   withStaleCurrentEvidence,
   withVerificationStatus,
-} from './verification-policy.ts';
+} from './policy.ts';
 
 export interface VerificationProvisioningCompensationShape {
   readonly clearScratchCleanupPending: (verificationId: string) => Effect.Effect<boolean>;

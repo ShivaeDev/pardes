@@ -1,6 +1,6 @@
 import type { WorkerRuntimeSnapshot, WorkerStatus } from '../worker-runtime/index.ts';
 import { type AgentRecord, currentVerificationAttempt, type ManagerState } from './domain.ts';
-import { projectVerificationReviewLoopDisposition } from './verification-policy.ts';
+import { projectVerificationReviewLoopDisposition } from './verification/index.ts';
 
 export const RESOLVED_WORK_CLEANUP_PREVIEW_ITEMS = 3;
 

@@ -1,21 +1,21 @@
 import { Effect, Exit } from 'effect';
-import type { WorktreeInspection } from '../git/index.ts';
+import type { WorktreeInspection } from '../../git/index.ts';
 import {
   type AgentRecord,
   currentVerificationAttempt,
   type VerificationRecord,
   type WorktreeLease,
-} from './domain.ts';
-import { VerificationRequestRejectedError } from './errors.ts';
-import { managedLeaseOwner, validateRetainedAgentState } from './namespace.ts';
-import type { VerificationLifecycleCoordinatorOptions } from './verification-contracts.ts';
+} from '../domain.ts';
+import { VerificationRequestRejectedError } from '../errors.ts';
+import { managedLeaseOwner, validateRetainedAgentState } from '../namespace.ts';
+import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   boundedVerificationReason,
   makeVerificationEvent,
   nowIso,
   reviewCheckoutOwner,
   withStaleCurrentEvidence,
-} from './verification-policy.ts';
+} from './policy.ts';
 
 export interface InspectedVerificationSource {
   readonly inspected: WorktreeInspection;

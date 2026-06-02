@@ -7,22 +7,22 @@ import {
   type DetachedReviewCheckoutLease,
   type ManagedWorktreeShape,
   WorktreeError,
-} from '../git/index.ts';
-import type { StateStoreShape } from '../storage/index.ts';
-import { requiredValue } from '../test-support.ts';
+} from '../../git/index.ts';
+import type { StateStoreShape } from '../../storage/index.ts';
+import { requiredValue } from '../../test-support.ts';
 import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
   type WorkerRuntimeSnapshot,
-} from '../worker-runtime/index.ts';
+} from '../../worker-runtime/index.ts';
 import {
   currentVerificationAttempt,
   initialManagerState,
   type ManagerState,
   type VerificationRecord,
-} from './domain.ts';
-import { AgentNotFoundError } from './errors.ts';
-import { makeVerificationLifecycleCoordinator } from './verification.ts';
+} from '../domain.ts';
+import { AgentNotFoundError } from '../errors.ts';
+import { makeVerificationLifecycleCoordinator } from './index.ts';
 
 const temporaryDirectories: string[] = [];
 const timestamp = '2026-01-01T00:00:00.000Z';

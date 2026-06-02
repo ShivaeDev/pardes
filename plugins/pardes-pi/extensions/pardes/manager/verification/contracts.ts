@@ -1,14 +1,14 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { Effect } from 'effect';
-import type { ManagedWorktreeShape } from '../git/index.ts';
-import type { StateStoreShape } from '../storage/index.ts';
+import type { ManagedWorktreeShape } from '../../git/index.ts';
+import type { StateStoreShape } from '../../storage/index.ts';
 import type {
   GuardedWorkerSupervisorShape,
   WorkerRuntimeSnapshot,
   WorkerThinkingLevel,
-} from '../worker-runtime/index.ts';
-import type { ManagerEvent, ManagerState } from './domain.ts';
-import type { ManagerNamespaceContext } from './namespace.ts';
+} from '../../worker-runtime/index.ts';
+import type { ManagerEvent, ManagerState } from '../domain.ts';
+import type { ManagerNamespaceContext } from '../namespace.ts';
 
 export interface VerificationRequestInput {
   readonly sourceAgentId: string;

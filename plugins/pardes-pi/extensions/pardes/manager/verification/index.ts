@@ -1,22 +1,27 @@
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Context, Effect, Semaphore } from 'effect';
-import { currentVerificationAttempt, type VerificationRecord } from './domain.ts';
-import { VerificationNotFoundError } from './errors.ts';
-import { makeVerificationProvisioningCompensation } from './verification-compensation.ts';
+import { currentVerificationAttempt, type VerificationRecord } from '../domain.ts';
+import { VerificationNotFoundError } from '../errors.ts';
+import { makeVerificationProvisioningCompensation } from './compensation.ts';
 import type {
   VerificationLifecycleCoordinatorOptions,
   VerificationRequestInput,
-} from './verification-contracts.ts';
-import { makeVerificationEvidenceReconciler } from './verification-evidence.ts';
-import { makeVerificationProvisioner } from './verification-provisioning.ts';
-import { makeVerificationRetirement } from './verification-retirement.ts';
+} from './contracts.ts';
+import { makeVerificationEvidenceReconciler } from './evidence.ts';
+import { makeVerificationProvisioner } from './provisioning.ts';
+import { makeVerificationRetirement } from './retirement.ts';
 
 export type {
   VerificationLifecycleCallbacks,
   VerificationLifecycleCoordinatorOptions,
   VerificationLifecycleNamespace,
   VerificationRequestInput,
-} from './verification-contracts.ts';
+} from './contracts.ts';
+export {
+  projectVerificationReviewLoopDisposition,
+  updateCurrentVerificationAttempt,
+  type VerificationReviewLoopDisposition,
+} from './policy.ts';
 export interface VerificationLifecycleCoordinatorShape {
   readonly serializeMutation: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
   readonly request: (

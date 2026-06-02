@@ -2,26 +2,26 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Cause, Effect, Exit } from 'effect';
-import { verifierChildProfile } from '../worker-runtime/index.ts';
+import { verifierChildProfile } from '../../worker-runtime/index.ts';
 import {
   type AgentRecord,
   currentVerificationAttempt,
   VERIFICATION_ATTEMPT_HISTORY_MAX,
   type VerificationRecord,
-} from './domain.ts';
+} from '../domain.ts';
 import {
   AgentSpawnConfigurationError,
   VerificationNotFoundError,
   VerificationRefreshRejectedError,
   VerificationRequestRejectedError,
-} from './errors.ts';
-import { validateRetainedAgentState } from './namespace.ts';
-import type { VerificationProvisioningCompensationShape } from './verification-compensation.ts';
+} from '../errors.ts';
+import { validateRetainedAgentState } from '../namespace.ts';
+import type { VerificationProvisioningCompensationShape } from './compensation.ts';
 import type {
   VerificationLifecycleCoordinatorOptions,
   VerificationRequestInput,
-} from './verification-contracts.ts';
-import type { VerificationEvidenceReconcilerShape } from './verification-evidence.ts';
+} from './contracts.ts';
+import type { VerificationEvidenceReconcilerShape } from './evidence.ts';
 import {
   boundedVerificationReason,
   DEFAULT_VERIFICATION_TASK,
@@ -33,7 +33,7 @@ import {
   verifierPrompt,
   withStaleCurrentEvidence,
   withVerificationStatus,
-} from './verification-policy.ts';
+} from './policy.ts';
 
 export interface VerificationProvisionerShape {
   readonly request: (

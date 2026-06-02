@@ -107,6 +107,19 @@ describe('verifier evidence output bounds', () => {
     expect(diagnostic.preview).toHaveLength(diagnostic.shownChars);
     expect(diagnostic.preview).not.toContain('\u001b');
   });
+
+  test('falls back to a sanitized error message when stderr sanitizes to empty', () => {
+    expect(boundedGitDiagnostic('\u001b\u0007\n', 'fatal:\nmissing HEAD\u0007')).toEqual({
+      normalizedAwayChars: 1,
+      omittedChars: 0,
+      originalChars: 20,
+      preview: 'fatal: missing HEAD',
+      safeChars: 19,
+      shownChars: 19,
+      source: 'error',
+      truncated: false,
+    });
+  });
 });
 
 describe('worker child extension loading boundary', () => {

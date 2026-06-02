@@ -113,6 +113,10 @@ export function boundedVerifierPathRows(output: string): {
   };
 }
 
+function inertGitDiagnostic(diagnostic: string): string {
+  return diagnostic.replace(GIT_DIAGNOSTIC_CONTROL_CHARACTERS, ' ').replace(/\s+/g, ' ').trim();
+}
+
 export function boundedGitDiagnostic(
   stderr: string,
   fallback: string,
@@ -126,12 +130,10 @@ export function boundedGitDiagnostic(
   readonly source: 'error' | 'stderr';
   readonly truncated: boolean;
 } {
-  const source = stderr.trim() ? 'stderr' : 'error';
+  const safeStderr = inertGitDiagnostic(stderr);
+  const source = safeStderr ? 'stderr' : 'error';
   const diagnostic = source === 'stderr' ? stderr : fallback;
-  const safe = diagnostic
-    .replace(GIT_DIAGNOSTIC_CONTROL_CHARACTERS, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const safe = source === 'stderr' ? safeStderr : inertGitDiagnostic(fallback);
   const preview = safe.slice(0, GIT_DIAGNOSTIC_MAX_CHARS);
   return {
     normalizedAwayChars: diagnostic.length - safe.length,

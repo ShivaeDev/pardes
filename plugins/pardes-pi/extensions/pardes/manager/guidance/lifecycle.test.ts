@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { requiredValue } from '../test-support.ts';
-import type { WorkerRuntimeSnapshot, WorkerStatus } from '../worker-runtime/index.ts';
+import { requiredValue } from '../../test-support.ts';
+import type { WorkerRuntimeSnapshot, WorkerStatus } from '../../worker-runtime/index.ts';
 import {
   type AgentRecord,
   initialManagerState,
@@ -9,8 +9,9 @@ import {
   type PullRequestRecord,
   type Workstream,
   type WorkstreamStatus,
-} from './domain.ts';
+} from '../domain.ts';
 import {
+  AUTONOMOUS_INBOX_PATH,
   boundManagerGuidance,
   MANAGER_GUIDANCE_BOUNDS,
   MANAGER_GUIDANCE_MAX_CHARS,
@@ -19,9 +20,12 @@ import {
   MANAGER_GUIDANCE_MESSAGE_TYPE,
   type ManagerGuidanceReason,
   managerGuidanceReasonForSessionStart,
+  PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
   queueManagerGuidance,
   renderManagerGuidance,
-} from './guidance.ts';
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from './index.ts';
 
 const createdAt = '2026-06-01T00:00:00.000Z';
 const reasons = ['activated', 'restored', 'reloaded', 'compacted'] as const;
@@ -186,33 +190,43 @@ describe('Pardes manager lifecycle guidance', () => {
     expect(messages).toEqual([]);
   });
 
-  test('keeps explicit activation orientation sparse and outcome-focused', () => {
+  test('fully teaches the operating model on initial activation without assuming prior knowledge', () => {
     const guidance = requiredValue(renderManagerGuidance(fixtureState(), 'activated'));
 
-    expect(guidance).toContain('Pardes manager activated.');
-    expect(guidance).toContain('Next: inspect compact `pardes_status`');
-    expect(guidance).toContain('delegate coherent end-to-end outcomes');
+    expect(guidance).toContain('Pardes manager activated. This is a coordination control plane');
+    expect(guidance).toContain(
+      'software owns deterministic mechanics and you own engineering judgment',
+    );
+    expect(guidance).toContain('do not implement, shell-operate, test, or manually verify');
+    expect(guidance).toContain('delegate one coherent end-to-end outcome per worker');
+    expect(guidance).toContain('request advisory `verification_request({ sourceAgentId })`');
+    expect(guidance).toContain('wait for durable inbox delivery without polling');
+    expect(guidance).toContain('use `pull_request_create` for exact committed worker state');
     expect(guidance).toContain('user controls merges');
+    expect(guidance).toContain('inspect `pardes_status(view="inbox")`');
     expect(guidance).toContain('State:');
-    expect(guidance.split('\n')).toHaveLength(7);
+    expect(guidance.split('\n')).toHaveLength(12);
     expectWithinTierBounds(guidance, 'activated');
   });
 
-  test('orients a restored manager around persisted state and selective resume', () => {
+  test('explains restoration before selective resume guidance', () => {
     const guidance = requiredValue(renderManagerGuidance(fixtureState(), 'restored'));
 
-    expect(guidance).toContain('Pardes manager restored.');
-    expect(guidance).toContain('Fact: persisted state restored');
-    expect(guidance).toContain('account for open review gates');
-    expect(guidance).toContain('revive only detached workers that should continue');
+    expect(guidance).toContain('Pardes manager restored. Persisted state is authoritative');
     expect(guidance).toContain(
-      'Use `pardes_status(view="cleanup")` only for explicit resolved artifact guidance',
+      'process-scoped child runtimes do not survive a prior manager process',
     );
-    expect(guidance.split('\n')).toHaveLength(7);
+    expect(guidance).toContain('attachment is not assumed');
+    expect(guidance).toContain('account for open review gates');
+    expect(guidance).toContain('revive only detached retained conversations that should continue');
+    expect(guidance).toContain(
+      'Use `pardes_status(view="cleanup")` only for explicit resolved-artifact guidance',
+    );
+    expect(guidance.split('\n')).toHaveLength(11);
     expectWithinTierBounds(guidance, 'restored');
   });
 
-  test('renders a tiny plugin-reload explanation', () => {
+  test('explains intentional plugin reload, pinned-snapshot refresh, preservation, and next actions', () => {
     const guidance = requiredValue(renderManagerGuidance(fixtureState(), 'reloaded'));
 
     expect(managerGuidanceReasonForSessionStart('reload')).toBe('reloaded');
@@ -220,54 +234,43 @@ describe('Pardes manager lifecycle guidance', () => {
       expect(managerGuidanceReasonForSessionStart(reason)).toBe('restored');
     }
     expect(guidance).toContain('Pardes plugin reloaded.');
-    expect(guidance).toContain('Fact: children intentionally disconnected');
-    expect(guidance).toContain('worktrees and conversations preserved');
-    expect(guidance).toContain('Next: inspect compact `pardes_status`; revive selectively');
-    expect(guidance.split('\n')).toHaveLength(5);
-    expect(guidance).not.toContain('agent_reload');
-    expect(guidance).not.toContain('State:');
+    expect(guidance).toContain('intentionally rebound to loaded plugin code');
+    expect(guidance).toContain('refreshed its pinned child-runtime snapshot');
+    expect(guidance).toContain('former child RPC attachments disconnected');
+    expect(guidance).toContain('managed worktrees and retained conversations were preserved');
+    expect(guidance).toContain('revive selectively');
+    expect(guidance).toContain('State:');
+    expect(guidance.split('\n')).toHaveLength(10);
     expectWithinTierBounds(guidance, 'reloaded');
   });
 
-  test('renders a concise post-compaction reminder with the operational snapshot', () => {
+  test('deliberately reteaches the operating model after compaction with an operational snapshot', () => {
     const { state, runtimes } = operationalFixture();
     const guidance = requiredValue(renderManagerGuidance(state, 'compacted', runtimes));
 
     expect(guidance).toContain('Pardes manager compacted.');
-    expect(guidance).toContain('Fact: persisted state authoritative');
-    expect(guidance).toContain('inspect compact `pardes_status` before lifecycle actions');
-    expect(guidance).toContain('keep open-review owners attached for feedback');
+    expect(guidance).toContain('Persisted state and the coordinating suffix are authoritative');
+    expect(guidance).toContain('deliberately re-establish the operating model');
+    expect(guidance).toContain('do not implement, shell-operate, test, or manually verify');
+    expect(guidance).toContain('delegate one coherent end-to-end outcome per worker');
+    expect(guidance).toContain('request advisory verification');
     expect(guidance).toContain(
-      'Use `pardes_status(view="cleanup")` only for explicit resolved artifact guidance',
+      'publish exact committed worker state only through `pull_request_create`',
     );
     expect(guidance).toContain('State: streams');
     expect(guidance).toContain('Workers:');
     expect(guidance).toContain('Attention:');
-    expect(guidance).not.toContain('`agent_spawn`');
-    expect(guidance).not.toContain('`pull_request_create`');
-    expect(guidance).not.toContain('`agent_revive`');
-    expect(guidance.split('\n')).toHaveLength(8);
+    expect(guidance.split('\n')).toHaveLength(13);
     expectWithinTierBounds(guidance, 'compacted');
   });
 
-  test('repeats only the dense communication and safety SOP across lifecycle reminders', () => {
+  test('states the same explicit two-path judgment rule across every lifecycle variant', () => {
     for (const reason of reasons) {
       const guidance = requiredValue(renderManagerGuidance(fixtureState(), reason));
-      expect(guidance).toContain(
-        'Communication: state only facts, decision needed, blockers, and next action',
-      );
-      expect(guidance).toContain(
-        'Skip fluff, repeated narration, excess headings, pseudo-diagrams, gratuitous code fences, and vertical whitespace',
-      );
-      expect(guidance).toContain('Safety: surface correctness bugs');
-      expect(guidance).toContain('use `await_user_feedback` only for user judgment');
-      expect(guidance).toContain('request advisory `verification_request({ sourceAgentId })`');
-      expect(guidance).toContain('inspect consolidated durable report without polling');
-      expect(guidance).toContain('manager judges');
-      expect(guidance).toContain('Skip trivial docs/tests unless risk justifies');
-      expect(guidance).toContain('Inbox: trust durable state, not tokenized presentation cursors');
-      expect(guidance).toContain('leave its cursor open until response');
-      expect(guidance).toContain('acknowledge autonomous rows once after handling');
+      expect(guidance).toContain(AUTONOMOUS_INBOX_PATH);
+      expect(guidance).toContain(USER_JUDGMENT_INBOX_PATH);
+      expect(guidance).toContain(USER_JUDGMENT_HANDOFF_PATH);
+      expect(guidance).toContain(PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE);
       expect(guidance).not.toContain('\n\n');
       expect(guidance).not.toContain('#');
       expect(guidance).not.toContain('```');
@@ -397,8 +400,8 @@ describe('Pardes manager lifecycle guidance', () => {
     expect(renderManagerGuidance(state, 'activated')).toContain(
       'streams 500 total (0 active/500 planned/0 complete); workers 500 total (0 attached/500 detached, 500 revivable).',
     );
-    expect(MANAGER_GUIDANCE_MAX_LINES).toBe(8);
-    expect(MANAGER_GUIDANCE_MAX_LINE_CHARS).toBe(240);
-    expect(MANAGER_GUIDANCE_MAX_CHARS).toBe(1_700);
+    expect(MANAGER_GUIDANCE_MAX_LINES).toBe(13);
+    expect(MANAGER_GUIDANCE_MAX_LINE_CHARS).toBe(320);
+    expect(MANAGER_GUIDANCE_MAX_CHARS).toBe(3_800);
   });
 });

@@ -17,11 +17,14 @@ import type {
   Workstream,
 } from '../manager/index.ts';
 import {
+  AUTONOMOUS_INBOX_PATH,
   currentVerificationAttempt,
   projectIdleWorkerDisposition,
   projectInboxAttention,
   projectVerificationReviewLoopDisposition,
   pullRequestNeedsAttention,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
 } from '../manager/index.ts';
 import type {
   StorageInspection,
@@ -507,11 +510,14 @@ export function inboxLines(
 ): string {
   return boundedRows(
     [
-      `inbox: ${plural(state.inbox.length, 'pending event')} · read one: inbox_get({ eventId })`,
+      `inbox: ${plural(state.inbox.length, 'pending event')} · read and judge one: inbox_get({ eventId })`,
       inboxDeliveryLine(state),
+      `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
+      `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
+      `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
       ...state.inbox.flatMap(inboxIndexEventLines),
     ],
-    maxRows,
+    maxRows ?? CONTROL_PLANE_MAX_ROWS,
   );
 }
 
@@ -626,7 +632,9 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
       ? []
       : [`durable child artifact: report_get({ reportId: ${JSON.stringify(metadata.reportId)} })`]),
     ...(observationOnly === undefined ? [] : [observationOnly]),
-    'after handling: inbox_acknowledge()',
+    `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
+    `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
+    `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
   ].join('\n');
   return text.length <= INBOX_EVENT_DETAIL_RENDER_MAX_CHARS
     ? text
@@ -883,7 +891,7 @@ function summaryAttentionRows(
 ): ReadonlyArray<SummaryAttentionRow> {
   const inbox: ReadonlyArray<SummaryAttentionRow> = state.inbox.map((event) => ({
     kind: 'inbox',
-    line: `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · read: inbox_get({ eventId })`,
+    line: `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · judge first: inbox_get({ eventId })`,
   }));
   const reviews: ReadonlyArray<SummaryAttentionRow> = Object.values(state.pullRequests)
     .filter(pullRequestNeedsAttention)

@@ -5,11 +5,16 @@ import { GitHubCommandError, type GitHubIntegrationHealthInspection } from '../g
 import {
   type AgentRecord,
   type AgentStatus,
+  AUTONOMOUS_INBOX_PATH,
+  INBOX_TWO_PATH_GUIDANCE,
   initialManagerState,
   type ManagerController,
   type ManagerEvent,
   type PluginActivationStatus,
+  PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
   type PullRequestRecord,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
   type VerificationRecord,
   type Workstream,
 } from '../manager/index.ts';
@@ -59,6 +64,7 @@ interface RegisteredTool {
   readonly name: string;
   readonly description: string;
   readonly promptSnippet: string;
+  readonly promptGuidelines?: ReadonlyArray<string>;
   readonly parameters: {
     readonly additionalProperties?: boolean;
     readonly properties: Readonly<
@@ -362,6 +368,49 @@ describe('Pardes model-visible tools', () => {
     );
   });
 
+  test('teaches the same explicit two-path cursor rule across inbox and user-judgment tool descriptions', () => {
+    const { pi, tools } = registry();
+    registerQuestionTool(pi);
+    registerWorkstreamTools(pi, {} as ManagerController);
+
+    const canonicalGuidelines = [
+      AUTONOMOUS_INBOX_PATH,
+      USER_JUDGMENT_INBOX_PATH,
+      USER_JUDGMENT_HANDOFF_PATH,
+    ];
+    const status = requiredValue(tools.get('pardes_status'));
+    expect(status.promptGuidelines).toEqual(canonicalGuidelines);
+    expect(status.promptSnippet).toBe(
+      'Inspect concise bounded Pardes manager status and judge inbox attention before acknowledgement',
+    );
+    for (const name of ['inbox_get', 'inbox_acknowledge', 'await_user_feedback', 'question']) {
+      const tool = requiredValue(tools.get(name));
+      expect(tool.description, name).toContain(INBOX_TWO_PATH_GUIDANCE);
+      expect(tool.promptGuidelines, name).toEqual(expect.arrayContaining(canonicalGuidelines));
+    }
+    expect(requiredValue(tools.get('inbox_get')).promptSnippet).toBe(
+      'Read and judge one known durable Pardes attention row after compact inbox status',
+    );
+    expect(requiredValue(tools.get('inbox_acknowledge')).promptSnippet).toBe(
+      'Acknowledge autonomous handled Pardes inbox rows through one exact cursor; never pre-acknowledge user judgment',
+    );
+    expect(requiredValue(tools.get('await_user_feedback')).promptSnippet).toBe(
+      'Surface the active delivered Pardes attention cursor for free-form user feedback without acknowledging it first',
+    );
+    expect(requiredValue(tools.get('question')).promptSnippet).toBe(
+      'Ask a structured user-judgment question while leaving any active Pardes attention cursor open until response',
+    );
+    expect(requiredValue(tools.get('inbox_acknowledge')).description).toContain(
+      'Use only for the autonomous path after rows are handled',
+    );
+    expect(requiredValue(tools.get('await_user_feedback')).description).toContain(
+      'Do not acknowledge the active cursor first',
+    );
+    expect(requiredValue(tools.get('question')).description).toContain(
+      'this tool does not consume that cursor',
+    );
+  });
+
   test('exposes a cheap concise aggregate status without refreshing or leaking raw state', async () => {
     const base = managerState();
     const active = workstream('ws-active', 'active', 'Active implementation');
@@ -422,7 +471,7 @@ describe('Pardes model-visible tools', () => {
         'workers: 1 running · 0 idle · 0 starting · 0 crashed · 1 warnings',
         'review gates: 1 open · 1 attention · advisory verifications: 0 current · 0 stale · inbox: 1 pending',
         'attention index: 3 signals · first 3 shown · drill down: inbox | reviews(attention) | agents(warnings)',
-        '! inbox event-1 [ci_failed] · read: inbox_get({ eventId })',
+        '! inbox event-1 [ci_failed] · judge first: inbox_get({ eventId })',
         '! review #42 [open] · ws-active · agent-12345678 · ⚠ ci:failing',
         '! worker agent-12345678 [running] · ws-active · ⚠ error',
       ].join('\n'),
@@ -529,8 +578,8 @@ describe('Pardes model-visible tools', () => {
       'attention index: 6 signals · first 5 shown · drill down: inbox | reviews(attention) | agents(warnings)',
     ]);
     expect(lines.slice(5, 10)).toEqual([
-      '! inbox event-z [discussion_feedback] · read: inbox_get({ eventId })',
-      '! inbox redacted-event [agent_question] · read: inbox_get({ eventId })',
+      '! inbox event-z [discussion_feedback] · judge first: inbox_get({ eventId })',
+      '! inbox redacted-event [agent_question] · judge first: inbox_get({ eventId })',
       '! review #41 [open] · ws-active · agent-a · ⚠ ci:failing',
       '! review #42 [open] · ws-active · agent-z · ⚠ merge:conflicting',
       '! worker agent-a [running] · ws-active · ⚠ dirty worktree',
@@ -590,7 +639,7 @@ describe('Pardes model-visible tools', () => {
       'attention index: 1 signal · first 1 shown · drill down: inbox',
     );
     expect(summary.content[0]?.text).toContain(
-      '! inbox event-activation [ci_failed] · read: inbox_get({ eventId })',
+      '! inbox event-activation [ci_failed] · judge first: inbox_get({ eventId })',
     );
     expect(inspections).toBe(0);
 
@@ -1171,12 +1220,15 @@ describe('Pardes model-visible tools', () => {
 
     const pending = await status.execute('call-2', { view: 'inbox' }, signal, onUpdate, ctx);
     expect(pending.content[0]?.text).toContain(
-      'inbox: 1 pending event · read one: inbox_get({ eventId })',
+      'inbox: 1 pending event · read and judge one: inbox_get({ eventId })',
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(
       '· queued suffix:0 · awaiting-user:no · wake wake-fixture',
     );
+    expect(pending.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
+    expect(pending.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
+    expect(pending.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
     expect(pending.content[0]?.text).toContain(
       'event-1 [review_feedback] Review gate needs a follow-up.',
     );
@@ -1559,6 +1611,11 @@ describe('Pardes model-visible tools', () => {
       'Defaults to routine auto-routing: prompt while idle, queued follow-up while active',
     );
     expect(send.description).toContain('Reserve explicit steer for urgent interruption');
+    expect(send.description).toContain(PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE);
+    expect(send.promptGuidelines).toEqual([PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE]);
+    expect(send.promptSnippet).toBe(
+      'Send routine auto-routed guidance to a retained Pardes worker; for published-review feedback require additive descendant commits only; steer only for urgent interruption',
+    );
     const automatic = await send.execute(
       'call-1',
       { agentId: 'agent-12345678', message: 'Routine follow-up.' },
@@ -2183,7 +2240,15 @@ describe('Pardes model-visible tools', () => {
     expect(external.content[0]?.text).toContain(
       'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.',
     );
-    expect(external.content[0]?.text).toContain('after handling: inbox_acknowledge()');
+    expect(external.content[0]?.text).toContain(
+      'path autonomous: Autonomous rows may be acknowledged once handled.',
+    );
+    expect(external.content[0]?.text).toContain(
+      'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(external.content[0]?.text).toContain(
+      'judgment handoff: Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+    );
     expect(external.details).toEqual({
       agentId: 'agent-1',
       createdAt,

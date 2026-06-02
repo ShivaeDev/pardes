@@ -297,7 +297,7 @@ describe('Pardes coordinating-manager compaction', () => {
       openReviewGates: { attentionCount: 1, omittedCount: 2, totalCount: 10 },
       repository: { key: 'repo-compaction' },
       revision: 0,
-      schemaVersion: 1,
+      schemaVersion: 2,
       workers: { omittedRelevantCount: 4, relevantCount: 14, totalCount: 14 },
       workstreams: {
         counts: { active: 10, cancelled: 1, complete: 6, planned: 6 },
@@ -344,7 +344,19 @@ describe('Pardes coordinating-manager compaction', () => {
       'pr-3',
       'pr-2',
     ]);
-    expect(rendered).toContain('<pardes-coordinating-state schemaVersion="1">');
+    expect(rendered).toContain('<pardes-coordinating-state schemaVersion="2">');
+    expect(projection.operatingGuidance).toContain(
+      'Autonomous rows may be acknowledged once handled.',
+    );
+    expect(projection.operatingGuidance).toContain(
+      'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(projection.operatingGuidance).toContain(
+      'Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+    );
+    expect(projection.operatingGuidance).toContain(
+      'Published review feedback: tell the retained worker to make additive descendant commits only; do not amend, rebase, or rewrite published branch history. Pardes exact-SHA publication intentionally never force-pushes.',
+    );
     expect(JSON.stringify(projection).length).toBeLessThanOrEqual(
       MANAGER_COMPACTION_PROJECTION_MAX_CHARS,
     );
@@ -463,14 +475,14 @@ describe('Pardes coordinating-manager compaction', () => {
     );
     expect(result?.compaction).toMatchObject({
       details: {
-        coordinatingState: { managerId: 'manager-compaction', schemaVersion: 1 },
-        schemaVersion: 1,
+        coordinatingState: { managerId: 'manager-compaction', schemaVersion: 2 },
+        schemaVersion: 2,
       },
       firstKeptEntryId: 'entry-kept',
       tokensBefore: 12_345,
     });
     expect(result?.compaction.summary).toContain('Fresh Pi narrative');
-    expect(result?.compaction.summary).toContain('<pardes-coordinating-state schemaVersion="1">');
+    expect(result?.compaction.summary).toContain('<pardes-coordinating-state schemaVersion="2">');
     expect(result?.compaction.summary).not.toContain('current-read.ts');
     expect(result?.compaction.summary).not.toContain('current-edit.ts');
     expect(result?.compaction.summary).not.toContain('<read-files>');
@@ -484,9 +496,26 @@ describe('Pardes coordinating-manager compaction', () => {
       projection,
     );
     const withFilesAndProjection = `Checkpoint\n\n<read-files>\none.ts\n</read-files>\n\n<modified-files>\ntwo.ts\n</modified-files>\n\n${withProjection.slice('Narrative with <read-files> inline mention\n\n'.length)}`;
+    const earlierLiteralProjection =
+      'KEEP A\n\n<pardes-coordinating-state schemaVersion="1">\n{}\n</pardes-coordinating-state>\n\nKEEP B';
+    const withEarlierLiteralAndTrailingProjection = appendManagerCompactionProjection(
+      earlierLiteralProjection,
+      projection,
+    );
 
     expect(stripPardesCompactionProjection(withProjection)).toBe(
       'Narrative with <read-files> inline mention',
+    );
+    expect(
+      stripPardesCompactionProjection(
+        'Legacy narrative\n\n<pardes-coordinating-state schemaVersion="1">\n{}\n</pardes-coordinating-state>',
+      ),
+    ).toBe('Legacy narrative');
+    expect(stripPardesCompactionProjection(withEarlierLiteralAndTrailingProjection)).toBe(
+      earlierLiteralProjection,
+    );
+    expect(stripPardesCompactionProjection(withEarlierLiteralAndTrailingProjection)).toContain(
+      'KEEP B',
     );
     expect(stripPiFileOperationSuffix('Checkpoint\n\n<read-files>\none.ts\n</read-files>')).toBe(
       'Checkpoint',
@@ -520,7 +549,7 @@ describe('Pardes coordinating-manager compaction', () => {
       readonly compaction?: CompactionResult;
     };
     expect(compactCalls).toBe(1);
-    expect(result.compaction?.summary).toContain('<pardes-coordinating-state schemaVersion="1">');
+    expect(result.compaction?.summary).toContain('<pardes-coordinating-state schemaVersion="2">');
   });
 
   test('declines the registered override so Pi selects built-in compaction after a custom crash', async () => {

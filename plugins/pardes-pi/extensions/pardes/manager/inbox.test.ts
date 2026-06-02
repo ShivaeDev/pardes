@@ -157,7 +157,10 @@ describe('manager inbox notification projection', () => {
       [
         `[Pardes wake ${message.details.wakeToken}] 1 pending through cursor event-1`,
         '- agent_report_completed: [child summary] agent-1: Implemented the bounded manager inbox wake.',
-        'Inspect `pardes_status(view="inbox")` for full bounded rows; use `inbox_get({ eventId })` to read one known row; call `inbox_acknowledge` after handling; trust current inbox if stale.',
+        'Inspect `pardes_status(view="inbox")` for bounded rows; use `inbox_get({ eventId })` only for a known row; trust current inbox if stale.',
+        'Autonomous rows may be acknowledged once handled.',
+        'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+        'Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
       ].join('\n'),
     );
     expect(message.details).toEqual({

@@ -317,8 +317,36 @@ describe('managed worktree service', () => {
     );
 
     expect(inspection).toMatchObject({
-      changedPaths: ['dirty.txt', 'worker.txt'],
+      changedPaths: ['dirty.txt'],
       dirty: true,
+      provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
+    });
+  });
+
+  test('returns dirty refusal before committed-range output can exceed the audit circuit breaker', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceGitMaxBufferBytes: 64 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-dirty-bound',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    const committedPath = `${'long-committed-path-'.repeat(8)}.txt`;
+    writeFileSync(join(lease.path, committedPath), 'committed worker change\n');
+    git(lease.path, 'add', committedPath);
+    git(lease.path, 'commit', '-m', 'long worker fixture');
+    writeFileSync(join(lease.path, 'dirty.txt'), 'live dirty change\n');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty-bound'), lease),
+      ),
+    ).toMatchObject({
       provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
     });
   });
@@ -404,6 +432,46 @@ describe('managed worktree service', () => {
         reason: 'bounds_exceeded',
         status: 'unavailable',
       },
+    });
+  });
+
+  test('keeps touched cooperative non-merge candidate paths invariant when additive merge context appears', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      service.create({ agentId: 'agent-touched', branchPointSha, managerId: 'manager-1', repo }),
+    );
+    writeFileSync(join(lease.path, 'reverted.txt'), 'temporary\n');
+    git(lease.path, 'add', 'reverted.txt');
+    git(lease.path, 'commit', '-m', 'add temporary fixture');
+    rmSync(join(lease.path, 'reverted.txt'));
+    git(lease.path, 'add', '-A');
+    git(lease.path, 'commit', '-m', 'remove temporary fixture');
+    writeFileSync(join(lease.path, 'stable.txt'), 'stable\n');
+    git(lease.path, 'add', 'stable.txt');
+    git(lease.path, 'commit', '-m', 'stable fixture');
+
+    const before = await Effect.runPromise(
+      inspectProvenance(service, owner(repo, 'manager-1', 'agent-touched'), lease),
+    );
+    writeFileSync(join(primary, 'main.txt'), 'additive main\n');
+    git(primary, 'add', 'main.txt');
+    git(primary, 'commit', '-m', 'main fixture');
+    git(lease.path, 'merge', '--no-edit', 'main');
+    const after = await Effect.runPromise(
+      inspectProvenance(service, owner(repo, 'manager-1', 'agent-touched'), lease),
+    );
+
+    expect(before.provenance).toMatchObject({
+      firstParentNonMergePaths: ['reverted.txt', 'stable.txt'],
+      status: 'available',
+    });
+    expect(after.provenance).toMatchObject({
+      firstParentNonMergePaths: ['reverted.txt', 'stable.txt'],
+      mergePaths: ['main.txt'],
+      status: 'available',
     });
   });
 

@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -28,6 +36,63 @@ function omittedDiagnosticChars(diagnostics: string): number {
 }
 
 describe('Git fixture test support', () => {
+  test('ignores hostile host-global signing, hooks, and init-template configuration', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pardes-hostile-global-git-'));
+    const globalConfig = join(root, 'host-global.gitconfig');
+    const hooks = join(root, 'hooks');
+    const hookMarker = join(root, 'hook-ran');
+    const signer = join(root, 'signer');
+    const signerMarker = join(root, 'signer-ran');
+    const template = join(root, 'template');
+    const templateMarker = 'host-template-marker';
+    const previousGlobal = process.env.GIT_CONFIG_GLOBAL;
+    mkdirSync(hooks);
+    mkdirSync(template);
+    writeFileSync(join(template, templateMarker), 'must not copy\n');
+    writeFileSync(
+      join(hooks, 'pre-commit'),
+      `#!/bin/sh\ntouch ${JSON.stringify(hookMarker)}\nexit 1\n`,
+    );
+    writeFileSync(signer, `#!/bin/sh\ntouch ${JSON.stringify(signerMarker)}\nexit 1\n`);
+    chmodSync(join(hooks, 'pre-commit'), 0o755);
+    chmodSync(signer, 0o755);
+    writeFileSync(
+      globalConfig,
+      [
+        '[commit]',
+        '\tgpgSign = true',
+        '[core]',
+        `\thooksPath = ${hooks}`,
+        '[gpg]',
+        `\tprogram = ${signer}`,
+        '[init]',
+        `\ttemplateDir = ${template}`,
+        '',
+      ].join('\n'),
+    );
+    process.env.GIT_CONFIG_GLOBAL = globalConfig;
+    try {
+      const repo = join(root, 'project');
+      runGitFixture(root, 'init', '-b', 'main', repo);
+      runGitFixture(repo, 'config', 'user.email', 'pardes@example.test');
+      runGitFixture(repo, 'config', 'user.name', 'Pardes Test');
+      runGitFixture(repo, 'config', 'fixture.local', 'preserved');
+      writeFileSync(join(repo, 'README.md'), 'fixture\n');
+      runGitFixture(repo, 'add', 'README.md');
+      runGitFixture(repo, 'commit', '-m', 'fixture');
+
+      expect(runGitFixture(repo, 'config', '--get', 'fixture.local')).toBe('preserved');
+      expect(existsSync(join(repo, '.git', templateMarker))).toBe(false);
+      expect(existsSync(hookMarker)).toBe(false);
+      expect(existsSync(signerMarker)).toBe(false);
+      expect(readGitFixtureDiagnosticsForTest()).toBe('');
+    } finally {
+      if (previousGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previousGlobal;
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   test('times out stalled Git commands boundedly with actionable captured diagnostics', () => {
     const timeoutMs = 25;
     const failure = fixtureFailure(() =>

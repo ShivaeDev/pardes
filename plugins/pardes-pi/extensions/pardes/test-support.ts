@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach } from 'vitest';
 
@@ -59,6 +59,23 @@ function formatGitFixtureCommand(cwd: string, args: ReadonlyArray<string>): stri
   return [`$ git ${args.map((arg) => JSON.stringify(arg)).join(' ')}`, `  cwd: ${cwd}`].join('\n');
 }
 
+function gitFixtureEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_SYSTEM: devNull,
+    GIT_TEMPLATE_DIR: '',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+  delete environment.GIT_CONFIG;
+  delete environment.GIT_CONFIG_COUNT;
+  delete environment.GIT_CONFIG_PARAMETERS;
+  for (const name of Object.keys(environment)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(name)) delete environment[name];
+  }
+  return environment;
+}
+
 function trimGitFixtureOutput(output: unknown): string {
   return typeof output === 'string' ? output.trim() : '';
 }
@@ -97,6 +114,7 @@ export function runGitFixtureWithOptions(
   const result = spawnSync('git', args, {
     cwd,
     encoding: 'utf8',
+    env: gitFixtureEnvironment(),
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: timeoutMs,
   });
@@ -142,6 +160,8 @@ const gitTemplateDirectories = new Set<string>();
 function configureGitFixtureIdentity(repo: string): void {
   runGitFixture(repo, 'config', 'user.email', 'pardes@example.test');
   runGitFixture(repo, 'config', 'user.name', 'Pardes Test');
+  runGitFixture(repo, 'config', 'commit.gpgSign', 'false');
+  runGitFixture(repo, 'config', 'core.hooksPath', devNull);
 }
 
 function initializeGitFixtureRepository(repo: string): void {

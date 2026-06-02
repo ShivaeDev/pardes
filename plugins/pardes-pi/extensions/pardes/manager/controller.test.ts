@@ -7562,7 +7562,7 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.verifications[verification.id]?.attempts).toHaveLength(2);
   });
 
-  test('warns once when an attached verifier settles idle without a terminal report and lets a later blocked report own handoff attention', async () => {
+  test('does not let a prior-generation terminal handoff marker suppress one reportless refreshed-verifier warning', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -7576,12 +7576,34 @@ describe('manager controller', () => {
       controller,
       fixture.ctx,
       repo,
-      'missing advisory terminal report',
+      'cross-generation missing advisory terminal report',
     );
     const verification = await Effect.runPromise(
       controller.requestVerification({ sourceAgentId: agent.id }, fixture.ctx),
     );
     const verifierAgentId = verification.verifierAgentId;
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verifierAgentId,
+        details: 'Attempt-one advisory detail.',
+        status: 'completed',
+        summary: 'Attempt-one advisory complete.',
+        type: 'report',
+      }),
+    );
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'agent_report_completed',
+    ]);
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
+    workers.runtimes.set(verifierAgentId, {
+      ...requiredValue(workers.runtimes.get(verifierAgentId)),
+      isStreaming: false,
+      status: 'idle',
+    });
+    const refreshed = await Effect.runPromise(
+      controller.refreshVerification({ verificationId: verification.id }, fixture.ctx),
+    );
+    expect(currentVerificationAttempt(refreshed)).toMatchObject({ attempt: 2, status: 'running' });
 
     for (let index = 0; index < 2; index++) {
       await Effect.runPromise(
@@ -7606,7 +7628,7 @@ describe('manager controller', () => {
         requiredValue(controller.snapshot()?.verifications[verification.id]),
       ).status,
     ).toBe('idle');
-    expect(workers.stops).toEqual([]);
+    expect(workers.stops).toEqual([verifierAgentId]);
     expect(
       managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),
     ).toHaveLength(1);
@@ -7637,7 +7659,7 @@ describe('manager controller', () => {
         requiredValue(controller.snapshot()?.verifications[verification.id]),
       ),
     ).toMatchObject({ latestReport: { status: 'blocked' }, status: 'blocked' });
-    expect(workers.stops).toEqual([]);
+    expect(workers.stops).toEqual([verifierAgentId]);
     expect(managerEvents(stateDir).filter(({ type }) => type === 'agent_idle')).toEqual([]);
     expect(
       managerEvents(stateDir).filter(({ type }) => type === 'verification_terminal_report_missing'),

@@ -16,7 +16,7 @@ import type { ReviewGateLifecycleCoordinatorShape } from './review-gate-lifecycl
 import {
   projectVerificationReviewLoopDisposition,
   updateCurrentVerificationAttempt,
-} from './verification.ts';
+} from './verification/index.ts';
 import {
   applyHandoffAudit,
   boundedFailureSummary,
@@ -139,7 +139,14 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
   const { namespace, reporting, attachments, reviewGates, pullRequests, liveRuntimes, callbacks } =
     options;
   const semaphore = yield* Semaphore.make(1);
-  const suppressIdleWakeups = new Set<string>();
+  const suppressIdleWakeupGenerations = new Map<string, number | undefined>();
+
+  const consumeIdleWakeupSuppression = (workerEvent: WorkerSupervisorEvent): boolean => {
+    if (!suppressIdleWakeupGenerations.has(workerEvent.agentId)) return false;
+    const lifecycleGeneration = suppressIdleWakeupGenerations.get(workerEvent.agentId);
+    suppressIdleWakeupGenerations.delete(workerEvent.agentId);
+    return lifecycleGeneration === workerEvent.lifecycleGeneration;
+  };
 
   const handleUnlocked = Effect.fnUntraced(function* (workerEvent: WorkerSupervisorEvent) {
     if (callbacks.isSuppressed(workerEvent.agentId)) return;
@@ -231,13 +238,13 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       (workerEvent.status === 'completed' ||
         (persistedAgent.role === 'verifier' && workerEvent.status === 'blocked'))
     )
-      suppressIdleWakeups.add(workerEvent.agentId);
+      suppressIdleWakeupGenerations.set(workerEvent.agentId, workerEvent.lifecycleGeneration);
     else if (workerEvent.type !== 'status' || workerEvent.status !== 'idle')
-      suppressIdleWakeups.delete(workerEvent.agentId);
+      suppressIdleWakeupGenerations.delete(workerEvent.agentId);
     const suppressIdleWakeup =
       workerEvent.type === 'status' &&
       workerEvent.status === 'idle' &&
-      suppressIdleWakeups.delete(workerEvent.agentId);
+      consumeIdleWakeupSuppression(workerEvent);
     const verifierIdle = verifierIdleDisposition(
       workerEvent,
       persistedAgent,

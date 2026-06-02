@@ -66,6 +66,7 @@ Manager mode is opt-in. In an interactive Pi session:
 /pardes start    activate a manager scoped to this Pi session
 /pardes          open the dashboard overlay
 /pardes monitor  toggle the attached-worker bridge monitor
+/pardes config   configure Pardes-owned tool-row presentation
 /pardes stop     deactivate the manager
 ```
 

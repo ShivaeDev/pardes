@@ -121,7 +121,7 @@ import {
   makeVerificationLifecycleCoordinator,
   updateCurrentVerificationAttempt,
   type VerificationLifecycleCoordinatorShape,
-} from './verification.ts';
+} from './verification/index.ts';
 import {
   makeWorkerSupervisorEventCoordinator,
   type WorkerSupervisorEventCoordinatorShape,

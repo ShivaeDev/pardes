@@ -40,6 +40,7 @@ const PARDES_AUTHORED_INBOX_EVENT_TYPES = new Set([
   'agent_auto_stop_failed',
   'pull_request_auto_sync_attention',
   'verification_evidence_stale',
+  'verification_terminal_report_missing',
 ]);
 
 function childAuthoredSourceRole(

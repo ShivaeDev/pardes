@@ -1140,7 +1140,16 @@ describe('Pardes model-visible tools', () => {
     ];
     const state = {
       ...base,
-      inbox,
+      inbox: [
+        ...inbox,
+        {
+          createdAt,
+          id: 'event-blocked-merge',
+          presentationBlocked: true,
+          summary: '#42 externally merged; bounded retirement outcome is pending.',
+          type: 'merged',
+        },
+      ],
       inboxWake: { createdAt, cursor: 'event-1', pendingCount: 1, token: 'wake-fixture' },
       pullRequests: { [calm.id]: calm, [attention.id]: attention },
       workstreams: { [active.id]: active },
@@ -1168,14 +1177,23 @@ describe('Pardes model-visible tools', () => {
 
     const pending = await status.execute('call-2', { view: 'inbox' }, signal, onUpdate, ctx);
     expect(pending.content[0]?.text).toContain(
-      'inbox: 1 pending event · read one: inbox_get({ eventId })',
+      'inbox: 2 pending events · read one: inbox_get({ eventId })',
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(
-      '· queued suffix:0 · awaiting-user:no · wake wake-fixture',
+      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · software refinement pending:1',
     );
     expect(pending.content[0]?.text).toContain(
       'event-1 [review_feedback] Review gate needs a follow-up.',
+    );
+    expect(pending.content[0]?.text).toContain(
+      'event-blocked-merge [merged] · software refinement pending; do not acknowledge #42 externally merged; bounded retirement outcome is pending.',
+    );
+
+    const summary = await status.execute('call-3', {}, signal, onUpdate, ctx);
+    expect(summary.content[0]?.text).toContain('· software refinement pending:1');
+    expect(summary.content[0]?.text).toContain(
+      '! inbox event-blocked-merge [merged] · software refinement pending; read: inbox_get({ eventId }); do not acknowledge',
     );
   });
 
@@ -2125,6 +2143,14 @@ describe('Pardes model-visible tools', () => {
           '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge.',
         type: 'merged',
       },
+      'event-merged-blocked': {
+        createdAt,
+        id: 'event-merged-blocked',
+        presentationBlocked: true,
+        pullRequestId: 'pr-43',
+        summary: '#43 was merged externally; Pardes observed only and did not merge.',
+        type: 'merged',
+      },
       'event-metadata': {
         createdAt,
         id: 'event-metadata',
@@ -2234,6 +2260,31 @@ describe('Pardes model-visible tools', () => {
     expect(merged.content[0]?.text).toContain(
       'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.',
     );
+    expect(merged.content[0]?.text).toContain('after handling: inbox_acknowledge()');
+
+    const blockedMerged = await inboxGet.execute(
+      'call-merged-blocked',
+      { eventId: 'event-merged-blocked' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(blockedMerged.content[0]?.text).toContain(
+      'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is pending software refinement; no worker message was sent.',
+    );
+    expect(blockedMerged.content[0]?.text).toContain(
+      'next: wait for software refinement; do not acknowledge this row or any later suffix cursor yet.',
+    );
+    expect(blockedMerged.content[0]?.text).not.toContain(
+      'bounded Pardes retirement outcome is included above',
+    );
+    expect(blockedMerged.content[0]?.text).not.toContain('after handling: inbox_acknowledge()');
+    expect(blockedMerged.details).toMatchObject({
+      eventId: 'event-merged-blocked',
+      presentationBlocked: true,
+      pullRequestId: 'pr-43',
+      trust: 'external_metadata',
+    });
 
     const report = await inboxGet.execute(
       'call-3',

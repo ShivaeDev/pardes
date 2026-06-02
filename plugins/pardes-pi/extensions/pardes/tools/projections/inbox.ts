@@ -55,13 +55,15 @@ function childAuthoredPreviewLabel(event: Pick<ManagerEvent, 'verificationId'>):
 }
 
 function inboxIndexEventLines(event: ManagerEvent): ReadonlyArray<string> {
-  if (!event.reportId) return [`${event.id} [${event.type}] ${event.summary}`];
+  const refinement =
+    event.presentationBlocked === true ? ' · software refinement pending; do not acknowledge' : '';
+  if (!event.reportId) return [`${event.id} [${event.type}]${refinement} ${event.summary}`];
   const preview = compactText(event.summary, INBOX_REPORT_PREVIEW_LENGTH);
   const previewTruncated =
     event.reportPreviewTruncated === true || preview !== event.summary.replace(/\s+/g, ' ').trim();
   return [
     `reportId:${event.reportId} · previewTruncated:${previewTruncated} · artifact: report_get({ reportId })`,
-    `↳ ${event.id} [${event.type}] ${childAuthoredPreviewLabel(event)} preview: ${preview}`,
+    `↳ ${event.id} [${event.type}]${refinement} ${childAuthoredPreviewLabel(event)} preview: ${preview}`,
   ];
 }
 
@@ -69,9 +71,13 @@ export function inboxDeliveryLine(
   state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
 ): string {
   const delivery = projectInboxAttention(state.inbox, state.inboxWake, state.inboxHandoff);
+  const refinementPending = state.inbox.filter(
+    (event) => event.presentationBlocked === true,
+  ).length;
+  const refinement = ` · software refinement pending:${refinementPending}`;
   return delivery.deliveredCursor === undefined
-    ? 'delivery: idle · awaiting-user:no · queued suffix:0'
-    : `delivery: cursor ${summaryAttentionToken(delivery.deliveredCursor, 'redacted-event')} · delivered age:${delivery.deliveredCursorAgeMs === undefined ? 'unknown' : elapsed(delivery.deliveredCursorAgeMs)} · queued suffix:${delivery.queuedSuffixCount} · awaiting-user:${delivery.awaitingUser ? 'yes' : 'no'} · wake ${summaryAttentionToken(delivery.wakeToken ?? '', 'redacted-wake')}`;
+    ? `delivery: idle · awaiting-user:no · queued suffix:0${refinement}`
+    : `delivery: cursor ${summaryAttentionToken(delivery.deliveredCursor, 'redacted-event')} · delivered age:${delivery.deliveredCursorAgeMs === undefined ? 'unknown' : elapsed(delivery.deliveredCursorAgeMs)} · queued suffix:${delivery.queuedSuffixCount} · awaiting-user:${delivery.awaitingUser ? 'yes' : 'no'} · wake ${summaryAttentionToken(delivery.wakeToken ?? '', 'redacted-wake')}${refinement}`;
 }
 
 export function inboxLines(
@@ -107,6 +113,7 @@ export interface InboxEventDetailMetadata {
   readonly summaryTruncated: boolean;
   readonly workstreamId?: string;
   readonly agentId?: string;
+  readonly presentationBlocked?: boolean;
   readonly pullRequestId?: string;
   readonly verificationId?: string;
   readonly reportId?: string;
@@ -154,6 +161,9 @@ export function inboxEventDetailMetadata(event: ManagerEvent): InboxEventDetailM
       ? {}
       : { workstreamId: boundedInboxMetadata(event.workstreamId) }),
     ...(event.agentId === undefined ? {} : { agentId: boundedInboxMetadata(event.agentId) }),
+    ...(event.presentationBlocked === undefined
+      ? {}
+      : { presentationBlocked: event.presentationBlocked }),
     ...(event.pullRequestId === undefined
       ? {}
       : { pullRequestId: boundedInboxMetadata(event.pullRequestId) }),
@@ -183,12 +193,15 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
       : `verificationId:${JSON.stringify(metadata.verificationId)}`,
   ].filter(Boolean);
   const summary = event.summary.slice(0, metadata.returnedSummaryChars);
+  const refinementPending = metadata.presentationBlocked === true;
   const observationOnly =
     metadata.trust === 'external_feedback'
       ? 'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.'
       : metadata.trust === 'external_metadata'
         ? event.type === 'merged'
-          ? 'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.'
+          ? refinementPending
+            ? 'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is pending software refinement; no worker message was sent.'
+            : 'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.'
           : 'external GitHub metadata remains observation-only; no worker message was sent.'
         : undefined;
   const text = [
@@ -201,7 +214,11 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
       ? []
       : [`durable child artifact: report_get({ reportId: ${JSON.stringify(metadata.reportId)} })`]),
     ...(observationOnly === undefined ? [] : [observationOnly]),
-    'after handling: inbox_acknowledge()',
+    ...(refinementPending
+      ? [
+          'next: wait for software refinement; do not acknowledge this row or any later suffix cursor yet.',
+        ]
+      : ['after handling: inbox_acknowledge()']),
   ].join('\n');
   return text.length <= INBOX_EVENT_DETAIL_RENDER_MAX_CHARS
     ? text

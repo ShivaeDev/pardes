@@ -5717,7 +5717,7 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
-  test('holds a merged wake until suspended retirement durably refines its routine outcome', async () => {
+  test('holds blocked merge and suffix acknowledgements until suspended retirement durably refines its routine outcome', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -5739,10 +5739,25 @@ describe('manager controller', () => {
       fixture.ctx,
       repo,
     );
+    const unrelated = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'queued suffix behind suspended merge refinement',
+    );
     await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
     await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx));
     expect(controller.snapshot()?.inbox).toEqual([]);
     fixture.messages.length = 0;
+    fixture.setManagerIdle(false);
+    await Effect.runPromise(
+      workers.emit({
+        agentId: unrelated.agent.id,
+        question: 'A ready prefix remains independently acknowledgeable.',
+        type: 'question',
+      }),
+    );
+    const readyPrefix = requiredValue(controller.snapshot()?.inbox[0]);
     worktrees.block();
 
     const merge = Effect.runFork(
@@ -5750,25 +5765,67 @@ describe('manager controller', () => {
     );
     await Effect.runPromise(Deferred.await(worktrees.entered));
 
-    expect(controller.snapshot()?.inbox).toMatchObject([
-      { presentationBlocked: true, type: 'merged' },
+    const blockedMerge = requiredValue(controller.snapshot()?.inbox[1]);
+    expect(
+      await Effect.runPromise(controller.getInboxEvent({ eventId: blockedMerge.id }, fixture.ctx)),
+    ).toMatchObject({ id: blockedMerge.id, presentationBlocked: true, type: 'merged' });
+    await Effect.runPromise(
+      workers.emit({
+        agentId: unrelated.agent.id,
+        question: 'Preserve this later suffix while merge refinement is pending.',
+        type: 'question',
+      }),
+    );
+    const suffix = requiredValue(controller.snapshot()?.inbox.at(-1));
+    expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual([
+      'agent_question',
+      'merged',
+      'agent_question',
     ]);
+    expect(
+      await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: readyPrefix.id })),
+    ).toMatchObject({
+      acknowledgedCount: 1,
+      cursor: readyPrefix.id,
+      pendingCount: 2,
+      staleCursor: false,
+    });
+    fixture.setManagerIdle(true);
     expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
     expect(managerInboxWakeups(fixture.messages)).toEqual([]);
+    expect(
+      await Effect.runPromise(
+        controller.acknowledgeInbox(fixture.ctx, { cursor: blockedMerge.id }),
+      ),
+    ).toMatchObject({ acknowledgedCount: 0, cursor: blockedMerge.id, staleCursor: true });
+    expect(
+      await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: suffix.id })),
+    ).toMatchObject({ acknowledgedCount: 0, cursor: suffix.id, staleCursor: true });
+    expect(controller.snapshot()?.inbox.map(({ id }) => id)).toEqual([blockedMerge.id, suffix.id]);
 
     await worktrees.release();
     await Effect.runPromise(Fiber.join(merge));
 
     expect(controller.snapshot()?.agents[agent.id]?.status).toBe('stopped');
     expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
-    expect(controller.snapshot()?.inbox).toMatchObject([{ type: 'merged' }]);
+    expect(controller.snapshot()?.inbox.map(({ id }) => id)).toEqual([blockedMerge.id, suffix.id]);
     expect(controller.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({
       content: expect.stringContaining(
         '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
       ),
+      details: { cursor: suffix.id, pendingCount: 2 },
     });
+    expect(
+      await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: suffix.id })),
+    ).toMatchObject({
+      acknowledgedCount: 2,
+      cursor: suffix.id,
+      pendingCount: 0,
+      staleCursor: false,
+    });
+    expect(controller.snapshot()?.inbox).toEqual([]);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
@@ -6027,6 +6084,7 @@ describe('manager controller', () => {
       agentId: agent.id,
       createdAt: '2026-06-01T00:00:00.000Z',
       id: 'event-unpresented-merge',
+      presentationBlocked: true,
       pullRequestId: published.pullRequest.id,
       summary: '#42 was merged (observation only).',
       type: 'merged',
@@ -6046,6 +6104,8 @@ describe('manager controller', () => {
     );
     expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
     expect(restored.snapshot()?.inbox.map(({ type }) => type)).toEqual(['merged']);
+    expect(restored.snapshot()?.inbox[0]).not.toHaveProperty('presentationBlocked');
+    expect(restored.snapshot()?.inbox[0]?.summary).toContain('#42 merge observed;');
     expect(restored.snapshot()?.inboxWake?.cursor).toBe('event-unpresented-merge');
     expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
     expect(managerInboxWakeups(fixture.messages)[0]?.message).toMatchObject({

@@ -157,7 +157,10 @@ describe('manager inbox notification projection', () => {
       [
         `[Pardes wake ${message.details.wakeToken}] 1 pending through cursor event-1`,
         '- agent_report_completed: [child summary] agent-1: Implemented the bounded manager inbox wake.',
-        'Inspect `pardes_status(view="inbox")` for full bounded rows; use `inbox_get({ eventId })` to read one known row; call `inbox_acknowledge` after handling; trust current inbox if stale.',
+        'Inspect `pardes_status(view="inbox")` for bounded rows; use `inbox_get({ eventId })` only for a known row; trust current inbox if stale.',
+        'Autonomous rows may be acknowledged once handled.',
+        'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+        'Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
       ].join('\n'),
     );
     expect(message.details).toEqual({
@@ -194,6 +197,23 @@ describe('manager inbox notification projection', () => {
     );
     expect(message.content).not.toContain('raw diagnostic');
     expect(message.content).not.toContain('raw GitHub comment body');
+  });
+
+  test('renders retained verifier missing-report attention as one actionable Pardes warning', () => {
+    const message = render([
+      {
+        ...event(
+          'event-verifier-idle',
+          'verification_terminal_report_missing',
+          'verifier-1: terminal report missing; follow up; do not poll. Retained advisory verifier remains attached idle.',
+        ),
+        verificationId: 'verify-1',
+      },
+    ]);
+
+    expect(message.content).toContain(
+      '- verification_terminal_report_missing: [Pardes] verifier-1: terminal report missing; follow up; do not poll. Retained …',
+    );
   });
 
   test('labels verifier-associated reports and questions explicitly without writing-worker attribution', () => {
@@ -237,6 +257,22 @@ describe('manager inbox notification projection', () => {
     expect(row.endsWith('…')).toBe(true);
   });
 
+  test('keeps a routine merge retirement outcome self-contained in one bounded external-metadata row', () => {
+    const message = render([
+      event(
+        'event-merge',
+        'merged',
+        '#42 merge observed; idle-owner:stopped; stream:complete; follow-up:0. External GitHub merge metadata was observed only; Pardes did not merge.',
+      ),
+    ]);
+    const row = requiredValue(message.content.split('\n')[1]);
+
+    expect(row).toContain(
+      '- merged: [GitHub metadata] #42 merge observed; idle-owner:stopped; stream:complete; follow-up:0.',
+    );
+    expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
+  });
+
   test('normalizes and truncates each digest row predictably', () => {
     const message = render([
       event('event-1', 'agent_report_blocked', `agent-1:\n${'x'.repeat(400)}`),
@@ -246,6 +282,29 @@ describe('manager inbox notification projection', () => {
     expect(row.length).toBe(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
     expect(row).not.toContain('\n');
     expect(row.endsWith('…')).toBe(true);
+  });
+
+  test('mints a cursor only through the ready prefix before a presentation-blocked merge row', () => {
+    const inbox = [
+      event('event-ready', 'agent_question', 'A ready prefix row.'),
+      {
+        ...event('event-merge', 'merged', 'Merge refinement is pending.'),
+        presentationBlocked: true,
+      },
+      event('event-suffix', 'agent_question', 'A suffix row held behind merge refinement.'),
+    ];
+    const wake = requiredValue(makeInboxWake('manager-notification', inbox, createdAt));
+    const message = renderInboxWakeMessage({ inbox, wake });
+
+    expect(wake).toMatchObject({ cursor: 'event-ready', pendingCount: 1 });
+    expect(message.content).toContain('- agent_question: [child question] A ready prefix row.');
+    expect(message.content).toContain(
+      '- queued suffix: +2 durable events await the next cursor release.',
+    );
+    expect(message.content).not.toContain('Merge refinement is pending.');
+    expect(message.content).not.toContain('A suffix row held behind merge refinement.');
+    expect(message.details).toMatchObject({ digestCount: 1, queuedSuffixCount: 2 });
+    expect(makeInboxWake('manager-notification', inbox.slice(1), createdAt)).toBeUndefined();
   });
 
   test('leaves overflow as an explicit queued suffix instead of minting a cursor across hidden rows', () => {
@@ -316,5 +375,52 @@ describe('manager inbox notification projection', () => {
     for (const row of digestRows)
       expect(row.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
     expect(message.content).not.toContain('s'.repeat(MANAGER_INBOX_WAKE_MAX_ROW_CHARS));
+    expect(message.content).toContain('Autonomous rows may be acknowledged once handled.');
+    expect(message.content).toContain(
+      'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
+    );
+    expect(message.content.endsWith('and leave the cursor open until response.')).toBe(true);
+  });
+
+  test('reserves intact authored hints and omission metadata before selecting complete legacy wake rows', () => {
+    const coveredCount = MANAGER_INBOX_WAKE_MAX_ROWS + 100;
+    const inbox = Array.from({ length: coveredCount + 100 }, (_, index) =>
+      event(
+        `event-${index}-${'c'.repeat(500)}`,
+        'agent_report_completed',
+        `worker-authored ${'s'.repeat(2_000)}`,
+      ),
+    );
+    const cursor = requiredValue(inbox[coveredCount - 1]).id;
+    const message = renderInboxWakeMessage({
+      inbox,
+      wake: {
+        createdAt,
+        cursor,
+        pendingCount: coveredCount,
+        token: `wake-${'t'.repeat(500)}`,
+      },
+    });
+    const digestRows = message.content
+      .split('\n')
+      .filter((line) => line.startsWith('- agent_report_completed'));
+
+    expect(message.content.length).toBeLessThanOrEqual(MANAGER_INBOX_WAKE_MAX_CHARS);
+    expect(digestRows).toHaveLength(MANAGER_INBOX_WAKE_MAX_ROWS - 1);
+    for (const row of digestRows) expect(row.length).toBe(MANAGER_INBOX_WAKE_MAX_ROW_CHARS);
+    expect(message.details).toMatchObject({
+      digestCount: MANAGER_INBOX_WAKE_MAX_ROWS - 1,
+      omittedCount: coveredCount - MANAGER_INBOX_WAKE_MAX_ROWS + 1,
+      queuedSuffixCount: 100,
+      staleCursor: false,
+    });
+    expect(message.content).toContain(
+      `- … +${coveredCount - MANAGER_INBOX_WAKE_MAX_ROWS + 1} more pending events omitted.`,
+    );
+    expect(message.content).toContain(
+      '- queued suffix: +100 durable events await the next cursor release.',
+    );
+    expect(message.content).toContain('Autonomous rows may be acknowledged once handled.');
+    expect(message.content.endsWith('and leave the cursor open until response.')).toBe(true);
   });
 });

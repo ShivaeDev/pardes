@@ -80,7 +80,7 @@ export function githubIntegrationHealthLines(
     [
       `github integration health: opt-in read-only hosted metadata · ${plural(inspection.inspectedPullRequestCount, 'review gate')} inspected${inspection.omittedPullRequestCount === 0 ? '' : ` · ${inspection.omittedPullRequestCount} omitted`}`,
       defaultBranch,
-      ...inspection.pullRequests.map((pullRequest) => {
+      ...inspection.pullRequests.flatMap((pullRequest) => {
         const label =
           pullRequest.number === undefined
             ? compactText(pullRequest.id, 42)
@@ -88,7 +88,14 @@ export function githubIntegrationHealthLines(
         const sharedFailure = canRenderSharedFailureHint(inspection, pullRequest)
           ? ` · likely-main-shared-failures:${pullRequest.sharedFailingWorkflowCount}`
           : '';
-        return `${label} · audited:${shortSha(pullRequest.auditedHeadSha)} · observed:${shortSha(pullRequest.observedHeadSha)} [${pullRequest.pullRequestHead}] · hosted:${hostedChecksLabel(pullRequest.hostedChecks)}${sharedFailure}`;
+        return [
+          `${label} · audited:${shortSha(pullRequest.auditedHeadSha)} · observed:${shortSha(pullRequest.observedHeadSha)} [${pullRequest.pullRequestHead}] · hosted:${hostedChecksLabel(pullRequest.hostedChecks)}${sharedFailure}`,
+          ...(pullRequest.watcherFailure === undefined
+            ? []
+            : [
+                `↳ ${label} watcher diagnosis [${pullRequest.watcherFailure.kind}]: ${pullRequest.watcherFailure.summary}`,
+              ]),
+        ];
       }),
       `bounds: first ${inspection.bounds.maxPullRequests} open review gates · first ${inspection.bounds.maxHostedChecksPerRef} server-selected hosted checks per ref · no logs, bodies, fetch, or pull`,
     ],

@@ -1,4 +1,6 @@
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Cause, Effect, Exit } from 'effect';
+import { currentVerificationTerminalReportStatus } from '../domain.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   boundedVerificationReason,
@@ -10,6 +12,10 @@ import {
 
 export interface VerificationRetirementShape {
   readonly retireIfResolved: (verificationId: string) => Effect.Effect<boolean, unknown>;
+  readonly stopIdleForWorkstreamCompletion: (
+    verifierAgentId: string,
+    ctx?: ExtensionContext,
+  ) => Effect.Effect<boolean, unknown>;
 }
 
 /** Stop an idle retained verifier only after its associated writer review loop resolves terminal. */
@@ -27,7 +33,12 @@ export function makeVerificationRetirement(
     )
       return false;
     const verifierAgent = namespace.state.agents[verification.verifierAgentId];
-    if (!verifierAgent || verifierAgent.role !== 'verifier' || verifierAgent.status !== 'idle')
+    if (
+      !verifierAgent ||
+      verifierAgent.role !== 'verifier' ||
+      verifierAgent.status !== 'idle' ||
+      currentVerificationTerminalReportStatus(verification) === undefined
+    )
       return false;
     const stoppedResult = yield* workers.stopIfIdle(verifierAgent.id).pipe(Effect.exit);
     if (Exit.isFailure(stoppedResult)) {
@@ -93,5 +104,56 @@ export function makeVerificationRetirement(
     return true;
   });
 
-  return { retireIfResolved };
+  const stopIdleForWorkstreamCompletion = Effect.fnUntraced(function* (
+    verifierAgentId: string,
+    ctx?: ExtensionContext,
+  ) {
+    yield* callbacks.refresh(ctx);
+    const verification = Object.values(namespace.state.verifications).find(
+      (candidate) => candidate.verifierAgentId === verifierAgentId,
+    );
+    const verifierAgent = namespace.state.agents[verifierAgentId];
+    if (!verification || !verifierAgent || verifierAgent.role !== 'verifier') return false;
+    const stoppedResult = yield* workers.stopIfIdle(verifierAgent.id);
+    if (!stoppedResult || stoppedResult.status !== 'stopped') return false;
+    callbacks.recordRuntime(verifierAgent.id, stoppedResult);
+    const stoppedAt = yield* nowIso;
+    const persisted = yield* namespace.store.mutate((state) => {
+      const current = state.verifications[verification.id];
+      const agent = state.agents[verifierAgent.id];
+      if (!current || !agent || agent.role !== 'verifier')
+        return Effect.succeed([false, state] as const);
+      return Effect.succeed([
+        true,
+        {
+          ...state,
+          agents: {
+            ...state.agents,
+            [agent.id]: { ...agent, status: 'stopped', updatedAt: stoppedAt },
+          },
+          verifications: {
+            ...state.verifications,
+            [current.id]: withVerificationStatus(current, 'stopped', stoppedAt),
+          },
+        },
+      ] as const);
+    });
+    if (!persisted) return false;
+    yield* callbacks.appendEventSafely(
+      makeVerificationEvent(
+        'verification_workstream_completion_stopped',
+        `${verification.id} safely stopped idle retained verifier ${verifierAgent.id} during explicit workstream completion; durable advisory history and scratch checkout metadata were preserved.`,
+        stoppedAt,
+        {
+          agentId: verifierAgent.id,
+          verificationId: verification.id,
+          workstreamId: verification.workstreamId,
+        },
+      ),
+    );
+    yield* callbacks.refresh(ctx);
+    return true;
+  });
+
+  return { retireIfResolved, stopIdleForWorkstreamCompletion };
 }

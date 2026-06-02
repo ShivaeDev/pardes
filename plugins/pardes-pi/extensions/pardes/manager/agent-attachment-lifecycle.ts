@@ -126,6 +126,10 @@ export interface AgentAttachmentLifecycleCoordinatorShape {
     agentId: string,
     ctx?: ExtensionContext,
   ) => Effect.Effect<AgentRecord, AgentAttachmentLifecycleError>;
+  readonly stopIfIdleForWorkstreamCompletion: (
+    agentId: string,
+    ctx?: ExtensionContext,
+  ) => Effect.Effect<AgentRecord | undefined, AgentAttachmentLifecycleError>;
   readonly auditHandoffBestEffort: (
     agent: AgentRecord,
     trigger: Exclude<AgentGitAuditTrigger, 'publication'>,
@@ -318,6 +322,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
         agentId,
         branchPointSha: baseline.sha,
         managerId: state.managerId,
+        name: workstream.title,
         repo: state.repo,
       });
       yield* callbacks.appendEventSafely(
@@ -571,5 +576,53 @@ export function makeAgentAttachmentLifecycleCoordinator(
     },
   );
 
-  return AgentAttachmentLifecycleCoordinator.of({ auditHandoffBestEffort, revive, spawn, stop });
+  const stopIfIdleForWorkstreamCompletion: AgentAttachmentLifecycleCoordinatorShape['stopIfIdleForWorkstreamCompletion'] =
+    Effect.fnUntraced(function* (agentId, ctx) {
+      yield* callbacks.refresh(ctx);
+      const agent = namespace.state.agents[agentId];
+      if (!agent) return yield* new AgentNotFoundError({ agentId });
+      const stoppedRuntime = yield* workers.stopIfIdle(agentId);
+      if (!stoppedRuntime || stoppedRuntime.status !== 'stopped') return undefined;
+      callbacks.recordRuntime(agentId, stoppedRuntime);
+      const audit = yield* auditHandoffBestEffort(agent, 'stop');
+      const timestamp = yield* nowIso;
+      yield* namespace.store.mutate((current) => {
+        const currentAgent = current.agents[agentId] ?? agent;
+        return Effect.succeed([
+          undefined,
+          {
+            ...current,
+            agents: {
+              ...current.agents,
+              [agentId]: {
+                ...applyHandoffAudit(currentAgent, audit),
+                status: 'stopped',
+                updatedAt: timestamp,
+              },
+            },
+          },
+        ] as const);
+      });
+      yield* callbacks.appendEventSafely(
+        makeEvent(
+          'agent_workstream_completion_stopped',
+          boundedEventSummary([
+            `Stopped idle ${agentId} during explicit workstream completion; managed worktree, branch history, and session preserved.`,
+            handoffAuditSuffix(audit),
+          ]),
+          timestamp,
+          { agentId, workstreamId: agent.workstreamId },
+        ),
+      );
+      yield* callbacks.refresh(ctx);
+      return yield* requirePersistedAgent(agentId);
+    });
+
+  return AgentAttachmentLifecycleCoordinator.of({
+    auditHandoffBestEffort,
+    revive,
+    spawn,
+    stop,
+    stopIfIdleForWorkstreamCompletion,
+  });
 }

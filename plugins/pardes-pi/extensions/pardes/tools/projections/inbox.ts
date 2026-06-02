@@ -1,8 +1,22 @@
 import type { ManagerEvent, ManagerState } from '../../manager/index.ts';
-import { projectInboxAttention } from '../../manager/index.ts';
-import { boundedRows, compactText, elapsed, plural, summaryAttentionToken } from './core.ts';
+import {
+  AUTONOMOUS_INBOX_PATH,
+  projectInboxAttention,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from '../../manager/index.ts';
+import {
+  CONTROL_PLANE_MAX_LINE_LENGTH,
+  CONTROL_PLANE_MAX_ROWS,
+  CONTROL_PLANE_MAX_TEXT_LENGTH,
+  compactText,
+  elapsed,
+  plural,
+  summaryAttentionToken,
+} from './core.ts';
 
 const INBOX_REPORT_PREVIEW_LENGTH = 96;
+const SAFE_INBOX_METADATA_PATTERN = /^[a-zA-Z0-9._:-]+$/;
 export const INBOX_EVENT_DETAIL_SUMMARY_MAX_CHARS = 900;
 export const INBOX_EVENT_DETAIL_RENDER_MAX_CHARS = 2_000 + 6 * INBOX_EVENT_DETAIL_SUMMARY_MAX_CHARS;
 export const INBOX_EVENT_CHILD_TRUST_LABEL =
@@ -40,6 +54,7 @@ const PARDES_AUTHORED_INBOX_EVENT_TYPES = new Set([
   'agent_auto_stop_failed',
   'pull_request_auto_sync_attention',
   'verification_evidence_stale',
+  'verification_terminal_report_missing',
 ]);
 
 function childAuthoredSourceRole(
@@ -55,13 +70,15 @@ function childAuthoredPreviewLabel(event: Pick<ManagerEvent, 'verificationId'>):
 }
 
 function inboxIndexEventLines(event: ManagerEvent): ReadonlyArray<string> {
-  if (!event.reportId) return [`${event.id} [${event.type}] ${event.summary}`];
+  const refinement =
+    event.presentationBlocked === true ? ' · software refinement pending; do not acknowledge' : '';
+  if (!event.reportId) return [`${event.id} [${event.type}]${refinement} ${event.summary}`];
   const preview = compactText(event.summary, INBOX_REPORT_PREVIEW_LENGTH);
   const previewTruncated =
     event.reportPreviewTruncated === true || preview !== event.summary.replace(/\s+/g, ' ').trim();
   return [
     `reportId:${event.reportId} · previewTruncated:${previewTruncated} · artifact: report_get({ reportId })`,
-    `↳ ${event.id} [${event.type}] ${childAuthoredPreviewLabel(event)} preview: ${preview}`,
+    `↳ ${event.id} [${event.type}]${refinement} ${childAuthoredPreviewLabel(event)} preview: ${preview}`,
   ];
 }
 
@@ -69,23 +86,67 @@ export function inboxDeliveryLine(
   state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
 ): string {
   const delivery = projectInboxAttention(state.inbox, state.inboxWake, state.inboxHandoff);
+  const refinementPending = state.inbox.filter(
+    (event) => event.presentationBlocked === true,
+  ).length;
+  const refinement = ` · software refinement pending:${refinementPending}`;
   return delivery.deliveredCursor === undefined
-    ? 'delivery: idle · awaiting-user:no · queued suffix:0'
-    : `delivery: cursor ${summaryAttentionToken(delivery.deliveredCursor, 'redacted-event')} · delivered age:${delivery.deliveredCursorAgeMs === undefined ? 'unknown' : elapsed(delivery.deliveredCursorAgeMs)} · queued suffix:${delivery.queuedSuffixCount} · awaiting-user:${delivery.awaitingUser ? 'yes' : 'no'} · wake ${summaryAttentionToken(delivery.wakeToken ?? '', 'redacted-wake')}`;
+    ? `delivery: idle · awaiting-user:no · queued suffix:0${refinement}`
+    : `delivery: cursor ${summaryAttentionToken(delivery.deliveredCursor, 'redacted-event')} · delivered age:${delivery.deliveredCursorAgeMs === undefined ? 'unknown' : elapsed(delivery.deliveredCursorAgeMs)} · queued suffix:${delivery.queuedSuffixCount} · awaiting-user:${delivery.awaitingUser ? 'yes' : 'no'} · wake ${summaryAttentionToken(delivery.wakeToken ?? '', 'redacted-wake')}${refinement}`;
 }
 
+function inboxIndexRowCount(inbox: ReadonlyArray<ManagerEvent>): number {
+  return inbox.reduce((count, event) => count + (event.reportId === undefined ? 1 : 2), 0);
+}
+
+function firstInboxIndexRows(inbox: ReadonlyArray<ManagerEvent>, limit: number): string[] {
+  const rows: string[] = [];
+  for (const event of inbox) {
+    for (const line of inboxIndexEventLines(event)) {
+      if (rows.length === limit) return rows;
+      rows.push(compactText(line, CONTROL_PLANE_MAX_LINE_LENGTH));
+    }
+  }
+  return rows;
+}
+
+function inboxIndexOmissionLine(omittedCount: number): string {
+  return `… +${omittedCount} more inbox index ${omittedCount === 1 ? 'row' : 'rows'} omitted; inspect a known eventId for detail`;
+}
+
+/** Keep authored judgment guidance intact; maxRows targets total rows but never clips fixed guidance or omission metadata. */
 export function inboxLines(
   state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
   maxRows?: number,
 ): string {
-  return boundedRows(
-    [
-      `inbox: ${plural(state.inbox.length, 'pending event')} · read one: inbox_get({ eventId })`,
-      inboxDeliveryLine(state),
-      ...state.inbox.flatMap(inboxIndexEventLines),
-    ],
-    maxRows,
+  const authoredLines = [
+    `inbox: ${plural(state.inbox.length, 'pending event')} · read and judge one: inbox_get({ eventId })`,
+    inboxDeliveryLine(state),
+    `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
+    `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
+    `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
+  ];
+  const requestedRows = Math.max(
+    1,
+    Math.min(CONTROL_PLANE_MAX_ROWS, Math.floor(maxRows ?? CONTROL_PLANE_MAX_ROWS)),
   );
+  const totalIndexRows = inboxIndexRowCount(state.inbox);
+  const availableIndexRows = Math.max(0, requestedRows - authoredLines.length);
+  const selectedLimit =
+    totalIndexRows > availableIndexRows ? Math.max(0, availableIndexRows - 1) : availableIndexRows;
+  const selectedRows = firstInboxIndexRows(state.inbox, selectedLimit);
+  let omittedCount = totalIndexRows - selectedRows.length;
+  const render = () =>
+    [
+      ...authoredLines,
+      ...selectedRows,
+      ...(omittedCount === 0 ? [] : [inboxIndexOmissionLine(omittedCount)]),
+    ].join('\n');
+  while (render().length > CONTROL_PLANE_MAX_TEXT_LENGTH && selectedRows.length > 0) {
+    selectedRows.pop();
+    omittedCount += 1;
+  }
+  return render();
 }
 
 export type InboxEventTrust =
@@ -107,6 +168,7 @@ export interface InboxEventDetailMetadata {
   readonly summaryTruncated: boolean;
   readonly workstreamId?: string;
   readonly agentId?: string;
+  readonly presentationBlocked?: boolean;
   readonly pullRequestId?: string;
   readonly verificationId?: string;
   readonly reportId?: string;
@@ -135,7 +197,9 @@ function inboxEventTrustLabel(
 }
 
 function boundedInboxMetadata(value: string): string {
-  return compactText(value, 120);
+  return value.length <= 120 && SAFE_INBOX_METADATA_PATTERN.test(value)
+    ? value
+    : '<redacted-invalid-metadata>';
 }
 
 export function inboxEventDetailMetadata(event: ManagerEvent): InboxEventDetailMetadata {
@@ -154,13 +218,16 @@ export function inboxEventDetailMetadata(event: ManagerEvent): InboxEventDetailM
       ? {}
       : { workstreamId: boundedInboxMetadata(event.workstreamId) }),
     ...(event.agentId === undefined ? {} : { agentId: boundedInboxMetadata(event.agentId) }),
+    ...(event.presentationBlocked === undefined
+      ? {}
+      : { presentationBlocked: event.presentationBlocked }),
     ...(event.pullRequestId === undefined
       ? {}
       : { pullRequestId: boundedInboxMetadata(event.pullRequestId) }),
     ...(event.verificationId === undefined
       ? {}
       : { verificationId: boundedInboxMetadata(event.verificationId) }),
-    ...(event.reportId === undefined ? {} : { reportId: event.reportId }),
+    ...(event.reportId === undefined ? {} : { reportId: boundedInboxMetadata(event.reportId) }),
     ...(event.reportPreviewTruncated === undefined
       ? {}
       : { reportPreviewTruncated: event.reportPreviewTruncated }),
@@ -183,11 +250,16 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
       : `verificationId:${JSON.stringify(metadata.verificationId)}`,
   ].filter(Boolean);
   const summary = event.summary.slice(0, metadata.returnedSummaryChars);
+  const refinementPending = metadata.presentationBlocked === true;
   const observationOnly =
     metadata.trust === 'external_feedback'
       ? 'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.'
       : metadata.trust === 'external_metadata'
-        ? 'external GitHub metadata remains observation-only; no worker message was sent.'
+        ? event.type === 'merged'
+          ? refinementPending
+            ? 'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is pending software refinement; no worker message was sent.'
+            : 'external GitHub merge metadata remains observation-only and user-controlled; bounded Pardes retirement outcome is included above; no worker message was sent.'
+          : 'external GitHub metadata remains observation-only; no worker message was sent.'
         : undefined;
   const text = [
     `[${inboxEventTrustLabel(metadata)}]`,
@@ -199,9 +271,14 @@ export function inboxEventDetailLines(event: ManagerEvent): string {
       ? []
       : [`durable child artifact: report_get({ reportId: ${JSON.stringify(metadata.reportId)} })`]),
     ...(observationOnly === undefined ? [] : [observationOnly]),
-    'after handling: inbox_acknowledge()',
+    ...(refinementPending
+      ? [
+          'next: wait for software refinement; do not acknowledge this row or any later suffix cursor yet.',
+        ]
+      : []),
+    `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
+    `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
+    `judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`,
   ].join('\n');
-  return text.length <= INBOX_EVENT_DETAIL_RENDER_MAX_CHARS
-    ? text
-    : `${text.slice(0, INBOX_EVENT_DETAIL_RENDER_MAX_CHARS - 1)}…`;
+  return text;
 }

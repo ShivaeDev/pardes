@@ -48,6 +48,9 @@
   "pi": {
     "extensions": [
       "./plugins/pardes-pi/extensions/pardes/index.ts"
+    ],
+    "skills": [
+      "./plugins/pardes-pi/skills"
     ]
   }
 }

@@ -1,6 +1,12 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import type { ManagerController } from '../manager/index.ts';
+import {
+  AUTONOMOUS_INBOX_PATH,
+  INBOX_TWO_PATH_GUIDANCE,
+  type ManagerController,
+  USER_JUDGMENT_HANDOFF_PATH,
+  USER_JUDGMENT_INBOX_PATH,
+} from '../manager/index.ts';
 import {
   ATTENTION_HANDOFF_FEEDBACK_MAX_CHARS,
   ATTENTION_HANDOFF_PROMPT_MAX_CHARS,
@@ -10,8 +16,7 @@ import { registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerAttentionHandoffTool(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
-    description:
-      'Surface the one active delivered Pardes attention cursor to the user with a compact free-form input. Submission resumes this manager conversation and acknowledges only that cursor. Escape preserves pending attention.',
+    description: `Free-form user-judgment path: surface the one active delivered Pardes attention cursor to the user with a compact input. Do not acknowledge the active cursor first. Submission resumes this manager conversation and acknowledges only that cursor; escape preserves pending attention. ${INBOX_TWO_PATH_GUIDANCE}`,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return textResult('Error: await_user_feedback requires an interactive UI.');
       if (signal?.aborted)
@@ -90,8 +95,12 @@ export function registerAttentionHandoffTool(pi: ExtensionAPI, manager: ManagerC
     ),
     preview: (args) => [{ mode: 'length', name: 'prompt', value: args.prompt }],
     promptGuidelines: [
-      'Use await_user_feedback only when durable Pardes attention requires user judgment; do not use it for autonomous acknowledgements.',
+      AUTONOMOUS_INBOX_PATH,
+      USER_JUDGMENT_INBOX_PATH,
+      USER_JUDGMENT_HANDOFF_PATH,
+      'Use await_user_feedback only for free-form user judgment on the active delivered Pardes cursor; never acknowledge that cursor first.',
     ],
-    promptSnippet: 'Pause for user feedback on the active delivered Pardes attention cursor',
+    promptSnippet:
+      'Surface the active delivered Pardes attention cursor for free-form user feedback without acknowledging it first',
   });
 }

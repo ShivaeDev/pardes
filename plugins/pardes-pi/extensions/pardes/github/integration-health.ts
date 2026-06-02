@@ -2,6 +2,11 @@ import { Data, type Duration, Effect, Option, Schema } from 'effect';
 import { decodeGitHubJson } from './codecs.ts';
 import { type GitHubCommandError, GitHubResponseError } from './errors.ts';
 import {
+  type GitHubHostedMetadataShape,
+  type GitHubRateLimitHealth,
+  makeGitHubHostedMetadataAdapter,
+} from './hosted-metadata.ts';
+import {
   GitHubAdvertisedDefaultBranchGraphQLSchema,
   type GitHubHostedCheckContext,
   GitHubHostedChecksGraphQLSchema,
@@ -17,9 +22,9 @@ import {
 } from './transport.ts';
 
 const ADVERTISED_DEFAULT_BRANCH_GRAPHQL_QUERY =
-  'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){defaultBranchRef{name target{oid}}}}';
+  'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){defaultBranchRef{name target{oid}}} rateLimit{cost limit remaining resetAt}}';
 const HOSTED_CHECKS_GRAPHQL_QUERY =
-  'query($owner:String!,$repo:String!,$expression:String!,$limit:Int!){repository(owner:$owner,name:$repo){object(expression:$expression){... on Commit{oid statusCheckRollup{contexts(first:$limit){nodes{__typename ... on CheckRun{status conclusion checkSuite{workflowRun{workflow{databaseId}}}} ... on StatusContext{state}} pageInfo{hasNextPage}}}}}}}';
+  'query($owner:String!,$repo:String!,$expression:String!,$limit:Int!){repository(owner:$owner,name:$repo){object(expression:$expression){... on Commit{oid statusCheckRollup{contexts(first:$limit){nodes{__typename ... on CheckRun{status conclusion checkSuite{workflowRun{workflow{databaseId}}}} ... on StatusContext{state}} pageInfo{hasNextPage}}}}}} rateLimit{cost limit remaining resetAt}}';
 const PULL_REQUEST_HEALTH_JSON_FIELDS = 'number,headRefOid';
 const FAILED_CHECK_CONCLUSIONS = new Set([
   'ACTION_REQUIRED',
@@ -112,6 +117,7 @@ export interface GitHubIntegrationHealthInspection {
     readonly maxPullRequests: number;
     readonly maxHostedChecksPerRef: number;
   };
+  readonly rateLimit: GitHubRateLimitHealth;
 }
 
 export interface InspectGitHubIntegrationHealthInput {
@@ -268,9 +274,12 @@ export function makeGitHubIntegrationHealthService(
   options: {
     readonly runner?: GitHubCommandRunnerShape;
     readonly commandTimeout?: Duration.Input;
+    readonly hostedMetadata?: GitHubHostedMetadataShape;
   } = {},
 ): GitHubIntegrationHealthShape {
-  const cli = makeGitHubCli(options.runner ?? makeExecFileGitHubCommandRunner());
+  const runner = options.runner ?? makeExecFileGitHubCommandRunner();
+  const cli = makeGitHubCli(runner);
+  const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const commandTimeout =
     options.commandTimeout ?? DEFAULT_GITHUB_INTEGRATION_HEALTH_COMMAND_TIMEOUT;
   const run = (cwd: string, args: ReadonlyArray<string>) =>
@@ -304,7 +313,7 @@ export function makeGitHubIntegrationHealthService(
       '--field',
       `limit=${MAX_GITHUB_HOSTED_CHECKS}`,
     ]);
-    const decoded = yield* decodeGitHubJson(
+    const decoded = yield* hostedMetadata.decodeGraphQL(
       'inspect hosted checks',
       GitHubHostedChecksGraphQLSchema,
       response.stdout,
@@ -331,7 +340,7 @@ export function makeGitHubIntegrationHealthService(
       '--field',
       'repo={repo}',
     ]);
-    const decoded = yield* decodeGitHubJson(
+    const decoded = yield* hostedMetadata.decodeGraphQL(
       'inspect advertised default branch head',
       GitHubAdvertisedDefaultBranchGraphQLSchema,
       response.stdout,
@@ -380,6 +389,7 @@ export function makeGitHubIntegrationHealthService(
     const association = associationOption.value;
     const identifier =
       association.number === undefined ? association.url : String(association.number);
+    yield* hostedMetadata.noteUnmeteredGraphQLRequest();
     const viewed = yield* run(cwd, [
       'pr',
       'view',
@@ -463,6 +473,7 @@ export function makeGitHubIntegrationHealthService(
         : yield* Effect.forEach(selectedPullRequests, (association) =>
             observePullRequest(input.cwd, association, defaultBranch),
           );
+    const rateLimit = yield* hostedMetadata.snapshot();
     return {
       bounds: {
         maxHostedChecksPerRef: MAX_GITHUB_HOSTED_CHECKS,
@@ -473,6 +484,7 @@ export function makeGitHubIntegrationHealthService(
       observation: 'opt_in_read_only_hosted_metadata',
       omittedPullRequestCount: Math.max(0, input.pullRequests.length - selectedPullRequests.length),
       pullRequests,
+      rateLimit,
     };
   });
 

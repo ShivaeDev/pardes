@@ -670,6 +670,29 @@ function hostedChecksLabel(hostedChecks: GitHubHostedChecksObservation): string 
   return `${shortSha(hostedChecks.headSha)} [${hostedChecks.relation}/${hostedChecks.completeness}] · ci:${hostedChecks.ci} · checks:${countPrefix}${hostedChecks.observedCheckCount} · fail:${countPrefix}${hostedChecks.observedFailingCheckCount}`;
 }
 
+function rateLimitBudgetLabel(
+  budget: GitHubIntegrationHealthInspection['rateLimit']['graphql'],
+): string {
+  return budget.availability === 'unavailable'
+    ? 'unavailable'
+    : `${budget.remaining}/${budget.limit} [${budget.pressure}/${budget.source}] · reset:${compactText(budget.resetAt, 32)}`;
+}
+
+function rateLimitHealthLines(
+  inspection: GitHubIntegrationHealthInspection,
+): ReadonlyArray<string> {
+  const rateLimit = inspection.rateLimit;
+  const watcher = rateLimit.watcherPolling;
+  const watcherLabel =
+    watcher.status === 'ready'
+      ? 'ready'
+      : `deferred (${watcher.reason}${watcher.until === undefined ? '' : ` until ${compactText(watcher.until, 32)}`})`;
+  return [
+    `rate budget: graphql:${rateLimitBudgetLabel(rateLimit.graphql)}`,
+    `rate fallback: rest:${rateLimitBudgetLabel(rateLimit.rest)} · endpoint:${rateLimit.fallback} · watcher:${watcherLabel}`,
+  ];
+}
+
 function canRenderSharedFailureHint(
   inspection: GitHubIntegrationHealthInspection,
   pullRequest: GitHubIntegrationHealthInspection['pullRequests'][number],
@@ -703,6 +726,7 @@ export function githubIntegrationHealthLines(
     [
       `github integration health: opt-in read-only hosted metadata · ${plural(inspection.inspectedPullRequestCount, 'review gate')} inspected${inspection.omittedPullRequestCount === 0 ? '' : ` · ${inspection.omittedPullRequestCount} omitted`}`,
       defaultBranch,
+      ...rateLimitHealthLines(inspection),
       ...inspection.pullRequests.map((pullRequest) => {
         const label =
           pullRequest.number === undefined

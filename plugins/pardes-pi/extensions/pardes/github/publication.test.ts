@@ -1,7 +1,11 @@
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
-import { GitHubCommandError, makeGitHubPublicationService } from './index.ts';
+import {
+  GitHubCommandError,
+  makeGitHubHostedMetadataAdapter,
+  makeGitHubPublicationService,
+} from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
 
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
@@ -105,6 +109,43 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
+  });
+
+  test('conservatively accounts for CLI-only hosted requests without changing exact-SHA publication', async () => {
+    const fallback = scriptedRunner([
+      result(
+        JSON.stringify({
+          resources: {
+            core: { limit: 5_000, remaining: 3_000, reset: 1_800_000_000 },
+            graphql: { limit: 5_000, remaining: 4_000, reset: 1_800_000_000 },
+          },
+        }),
+      ),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.succeed(1_700_000_000_000),
+      runner: fallback.runner,
+    });
+    await Effect.runPromise(hostedMetadata.refreshFallback(input.cwd));
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result('https://github.test/acme/project/pull/42\n'),
+      result(JSON.stringify(pullRequest())),
+    ]);
+    const service = makeGitHubPublicationService({ hostedMetadata, runner: fixture.runner });
+
+    await Effect.runPromise(service.publish(input));
+    const rateLimit = await Effect.runPromise(hostedMetadata.snapshot());
+
+    expect(rateLimit.graphql).toMatchObject({ remaining: 3_985, source: 'local_estimate' });
+    expect(rateLimit.rest).toMatchObject({ remaining: 3_000, source: 'rest_fallback' });
+    expect(fixture.invocations[0]).toEqual({
+      args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+      command: 'git',
+      cwd: input.cwd,
+    });
+    expect(fixture.invocations[0]?.args).not.toContain('--force');
   });
 
   test('rejects a published review gate whose final remote head OID diverges from the audited push', async () => {

@@ -12,6 +12,10 @@ import {
 import { decodeGitHubJson } from './codecs.ts';
 import { type GitHubCommandError, GitHubResponseError, GitHubWatcherInputError } from './errors.ts';
 import {
+  type GitHubHostedMetadataShape,
+  makeGitHubHostedMetadataAdapter,
+} from './hosted-metadata.ts';
+import {
   GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH,
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
@@ -30,7 +34,7 @@ import {
 
 export const DEFAULT_GITHUB_WATCHER_CADENCE: Duration.Input = '15 seconds';
 const WATCHER_JSON_FIELDS = 'number,headRefOid,state,mergeable,reviewDecision,statusCheckRollup';
-const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}}}`;
+const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}} rateLimit{cost limit remaining resetAt}}`;
 
 export type PullRequestWatcherTransition =
   | 'ci_failed'
@@ -300,9 +304,15 @@ export function derivePullRequestTransitions(
 }
 
 export function makeGitHubWatcherService(
-  options: { readonly runner?: GitHubCommandRunnerShape; readonly cadence?: Duration.Input } = {},
+  options: {
+    readonly runner?: GitHubCommandRunnerShape;
+    readonly cadence?: Duration.Input;
+    readonly hostedMetadata?: GitHubHostedMetadataShape;
+  } = {},
 ): GitHubWatcherShape {
-  const github = makeGitHubCli(options.runner ?? makeExecFileGitHubCommandRunner());
+  const runner = options.runner ?? makeExecFileGitHubCommandRunner();
+  const github = makeGitHubCli(runner);
+  const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
   const cadence = options.cadence ?? DEFAULT_GITHUB_WATCHER_CADENCE;
   let active: ActiveWatcher | undefined;
   const pollSemaphore = Semaphore.makeUnsafe(1);
@@ -370,7 +380,7 @@ export function makeGitHubWatcherService(
       '--field',
       `limit=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}`,
     ]);
-    const discussion = yield* decodeGitHubJson(
+    const discussion = yield* hostedMetadata.decodeGraphQL(
       'watch pull request discussion',
       GitHubPullRequestDiscussionGraphQLSchema,
       discussionResponse.stdout,
@@ -436,62 +446,79 @@ export function makeGitHubWatcherService(
       Effect.forEach(
         callbacks.persistedAssociations(),
         (pullRequest) => {
-          const cwd = callbacks.cwd();
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
-          return inspect(cwd, pullRequest).pipe(
+          return Schema.decodeUnknownEffect(PullRequestAssociationSchema)(pullRequest).pipe(
+            Effect.mapError(watcherInputError),
             Effect.matchEffect({
               onFailure: (error) =>
                 callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error }),
-              onSuccess: (inspected) => {
-                if (inspected._tag === 'HeadDivergence') {
-                  const divergence = callbacks.onHeadDivergence({
-                    expectedHeadSha: inspected.expectedHeadSha,
-                    observedHeadSha: inspected.observedHeadSha,
-                    pullRequestId: pullRequest.id,
-                  });
-                  return inspected.terminalObservation === undefined
-                    ? divergence
-                    : divergence.pipe(
-                        Effect.andThen(
-                          callbacks.onObservation({
+              onSuccess: () =>
+                hostedMetadata.reserveWatcherPoll(callbacks.cwd(), 1).pipe(
+                  Effect.flatMap((reservation) => {
+                    if (reservation.status === 'deferred') return Effect.void;
+                    const cwd = callbacks.cwd();
+                    return inspect(cwd, pullRequest).pipe(
+                      Effect.matchEffect({
+                        onFailure: (error) =>
+                          callbacks.onFailure({
                             pullRequestId: pullRequest.id,
                             ...generation,
-                            complete: false,
-                            observation: inspected.terminalObservation,
+                            error,
                           }),
-                        ),
-                      );
-                }
-                return callbacks
-                  .onObservation({
-                    pullRequestId: pullRequest.id,
-                    ...generation,
-                    complete: false,
-                    observation: inspected.observation,
-                  })
-                  .pipe(
-                    Effect.andThen(
-                      inspectDiscussion(cwd, inspected.number).pipe(
-                        Effect.matchEffect({
-                          onFailure: (error) =>
-                            callbacks.onFailure({
+                        onSuccess: (inspected) => {
+                          if (inspected._tag === 'HeadDivergence') {
+                            const divergence = callbacks.onHeadDivergence({
+                              expectedHeadSha: inspected.expectedHeadSha,
+                              observedHeadSha: inspected.observedHeadSha,
+                              pullRequestId: pullRequest.id,
+                            });
+                            return inspected.terminalObservation === undefined
+                              ? divergence
+                              : divergence.pipe(
+                                  Effect.andThen(
+                                    callbacks.onObservation({
+                                      pullRequestId: pullRequest.id,
+                                      ...generation,
+                                      complete: false,
+                                      observation: inspected.terminalObservation,
+                                    }),
+                                  ),
+                                );
+                          }
+                          return callbacks
+                            .onObservation({
                               pullRequestId: pullRequest.id,
                               ...generation,
-                              error,
-                            }),
-                          onSuccess: (discussion) =>
-                            callbacks.onObservation({
-                              pullRequestId: pullRequest.id,
-                              ...generation,
-                              complete: true,
-                              discussion,
+                              complete: false,
                               observation: inspected.observation,
-                            }),
-                        }),
-                      ),
-                    ),
-                  );
-              },
+                            })
+                            .pipe(
+                              Effect.andThen(
+                                inspectDiscussion(cwd, inspected.number).pipe(
+                                  Effect.matchEffect({
+                                    onFailure: (error) =>
+                                      callbacks.onFailure({
+                                        pullRequestId: pullRequest.id,
+                                        ...generation,
+                                        error,
+                                      }),
+                                    onSuccess: (discussion) =>
+                                      callbacks.onObservation({
+                                        pullRequestId: pullRequest.id,
+                                        ...generation,
+                                        complete: true,
+                                        discussion,
+                                        observation: inspected.observation,
+                                      }),
+                                  }),
+                                ),
+                              ),
+                            );
+                        },
+                      }),
+                    );
+                  }),
+                ),
             }),
           );
         },

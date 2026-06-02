@@ -7,6 +7,10 @@ import {
   GitHubSyncInputError,
 } from './errors.ts';
 import {
+  type GitHubHostedMetadataShape,
+  makeGitHubHostedMetadataAdapter,
+} from './hosted-metadata.ts';
+import {
   GitHubOpenGateListSchema,
   GitHubPublicationMetadataSchema,
   GitHubPushedHeadMetadataSchema,
@@ -138,6 +142,7 @@ function boundedVerificationOverride(
 export function makeGitHubPublicationService(
   options: {
     readonly runner?: GitHubCommandRunnerShape;
+    readonly hostedMetadata?: GitHubHostedMetadataShape;
     /** Test seam: production callers may only tighten the bounded convergence window. */
     readonly pushedHeadVerificationDelayMillis?: number;
     /** Test seam: production callers may only tighten the bounded convergence window. */
@@ -148,6 +153,9 @@ export function makeGitHubPublicationService(
   const command = (cwd: string, executable: string, args: ReadonlyArray<string>) =>
     runner.run({ args, command: executable, cwd });
   const github = makeGitHubCli(runner);
+  const hostedMetadata = options.hostedMetadata ?? makeGitHubHostedMetadataAdapter({ runner });
+  const runGitHub = (cwd: string, args: ReadonlyArray<string>) =>
+    hostedMetadata.noteUnmeteredGraphQLRequest().pipe(Effect.andThen(github.run(cwd, args)));
   const pushedHeadVerificationDelayMillis = boundedVerificationOverride(
     'pushedHeadVerificationDelayMillis',
     options.pushedHeadVerificationDelayMillis,
@@ -162,7 +170,7 @@ export function makeGitHubPublicationService(
   );
 
   const verifyPushedHead = Effect.fnUntraced(function* (input: SyncExistingPullRequestInput) {
-    const verified = yield* github.run(input.cwd, [
+    const verified = yield* runGitHub(input.cwd, [
       'pr',
       'view',
       String(input.pullRequestNumber),
@@ -194,7 +202,7 @@ export function makeGitHubPublicationService(
     const input = yield* Schema.decodeUnknownEffect(SyncExistingPullRequestInputSchema)(
       rawInput,
     ).pipe(Effect.mapError((cause) => new GitHubSyncInputError({ cause })));
-    const viewed = yield* github.run(input.cwd, [
+    const viewed = yield* runGitHub(input.cwd, [
       'pr',
       'view',
       String(input.pullRequestNumber),
@@ -264,7 +272,7 @@ export function makeGitHubPublicationService(
           cause: 'legacy published review branch requires an existing pull-request number',
         });
       }
-      const viewed = yield* github.run(input.cwd, [
+      const viewed = yield* runGitHub(input.cwd, [
         'pr',
         'view',
         String(input.legacyExistingPullRequestNumber),
@@ -295,7 +303,7 @@ export function makeGitHubPublicationService(
       `${input.headSha}:refs/heads/${input.headBranch}`,
     ]);
     if (opaqueHeadBranch) {
-      const listed = yield* github.run(input.cwd, [
+      const listed = yield* runGitHub(input.cwd, [
         'pr',
         'list',
         '--state',
@@ -322,7 +330,7 @@ export function makeGitHubPublicationService(
     }
     const action = existing ? ('updated' as const) : ('created' as const);
     if (existing) {
-      yield* github.run(input.cwd, [
+      yield* runGitHub(input.cwd, [
         'pr',
         'edit',
         String(existing.number),
@@ -334,7 +342,7 @@ export function makeGitHubPublicationService(
         input.baseBranch,
       ]);
     } else {
-      yield* github.run(input.cwd, [
+      yield* runGitHub(input.cwd, [
         'pr',
         'create',
         '--title',
@@ -348,7 +356,7 @@ export function makeGitHubPublicationService(
       ]);
     }
     const identifier = existing ? String(existing.number) : input.headBranch;
-    const viewed = yield* github.run(input.cwd, [
+    const viewed = yield* runGitHub(input.cwd, [
       'pr',
       'view',
       identifier,
@@ -371,7 +379,7 @@ export function makeGitHubPublicationService(
       });
     }
     if (input.openInBrowser === true)
-      yield* github.run(input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
+      yield* runGitHub(input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
     return {
       action,
       baseBranch: pullRequest.baseRefName,

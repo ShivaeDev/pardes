@@ -10,6 +10,7 @@ import {
   type GitHubIntegrationHealthShape,
   type GitHubPublicationShape,
   type GitHubWatcherShape,
+  makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
   makeGitHubPublicationService,
   makeGitHubWatcherService,
@@ -352,10 +353,14 @@ export class ManagerController {
     options: ManagerControllerOptions = {},
   ) {
     this.worktrees = options.worktrees ?? makeManagedWorktreeService();
-    this.github = options.github ?? makeGitHubPublicationService();
-    this.githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
+    const githubHostedMetadata = makeGitHubHostedMetadataAdapter();
+    this.github =
+      options.github ?? makeGitHubPublicationService({ hostedMetadata: githubHostedMetadata });
+    this.githubWatcher =
+      options.githubWatcher ?? makeGitHubWatcherService({ hostedMetadata: githubHostedMetadata });
     this.githubIntegrationHealth =
-      options.githubIntegrationHealth ?? makeGitHubIntegrationHealthService();
+      options.githubIntegrationHealth ??
+      makeGitHubIntegrationHealthService({ hostedMetadata: githubHostedMetadata });
     this.presentation = options.presentation ?? makeManagerPresentation();
     this.compactionSafetyScheduler =
       options.compactionSafetyScheduler ?? defaultManagerCompactionSafetyScheduler;

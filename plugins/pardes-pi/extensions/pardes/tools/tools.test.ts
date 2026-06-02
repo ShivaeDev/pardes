@@ -650,6 +650,31 @@ describe('Pardes model-visible tools', () => {
           sharedFailingWorkflowCount: 1,
         },
       ],
+      rateLimit: {
+        fallback: 'available',
+        graphql: {
+          availability: 'available',
+          limit: 5_000,
+          pressure: 'near_exhaustion',
+          remaining: 100,
+          resetAt: '2026-06-01T01:00:00Z',
+          source: 'graphql',
+        },
+        observation: 'bounded_hosted_rate_budget',
+        rest: {
+          availability: 'available',
+          limit: 5_000,
+          pressure: 'ready',
+          remaining: 4_000,
+          resetAt: '2026-06-01T01:00:00Z',
+          source: 'rest_fallback',
+        },
+        watcherPolling: {
+          reason: 'near_exhaustion',
+          status: 'deferred',
+          until: '2026-06-01T01:00:00Z',
+        },
+      },
     };
     let inspections = 0;
     const manager = {
@@ -678,6 +703,8 @@ describe('Pardes model-visible tools', () => {
       [
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
         'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
+        'rate budget: graphql:100/5000 [near_exhaustion/graphql] · reset:2026-06-01T01:00:00Z',
+        'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher:deferred (near_exhaustion until 2026-06-01T01:00:00Z)',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
       ].join('\n'),

@@ -6,6 +6,22 @@ export {
   GitHubWatcherInputError,
 } from './errors.ts';
 export {
+  GITHUB_CLI_GRAPHQL_ESTIMATED_COST,
+  GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS,
+  GITHUB_WATCHER_GRAPHQL_ESTIMATED_COST_PER_PULL_REQUEST,
+  GITHUB_WATCHER_RATE_LIMIT_RESERVE,
+  GITHUB_WATCHER_REST_ESTIMATED_COST_PER_PULL_REQUEST,
+  type GitHubHostedMetadataShape,
+  type GitHubRateLimitBudget,
+  type GitHubRateLimitBudgetObservation,
+  type GitHubRateLimitBudgetSource,
+  type GitHubRateLimitFallbackStatus,
+  type GitHubRateLimitHealth,
+  type GitHubRateLimitPressure,
+  type GitHubWatcherRateLimitStatus,
+  makeGitHubHostedMetadataAdapter,
+} from './hosted-metadata.ts';
+export {
   DEFAULT_GITHUB_INTEGRATION_HEALTH_COMMAND_TIMEOUT,
   GITHUB_INTEGRATION_HEALTH_MAX_HOSTED_CHECKS,
   GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS,
@@ -42,6 +58,9 @@ export {
   GitHubDiscussionPaginationGapsSchema,
   type GitHubDiscussionSurface,
   GitHubDiscussionSurfaceSchema,
+  type GitHubGraphQLRateLimit,
+  GitHubGraphQLRateLimitSchema,
+  GitHubRateLimitFallbackSchema,
   isOpaquePublishedReviewBranch,
   MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE,
   MAX_GITHUB_HOSTED_CHECKS,

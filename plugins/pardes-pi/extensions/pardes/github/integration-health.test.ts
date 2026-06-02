@@ -12,11 +12,20 @@ const MAIN_SHA = 'a'.repeat(40);
 const AUDITED_PR_SHA = 'b'.repeat(40);
 const OBSERVED_PR_SHA = 'c'.repeat(40);
 const OLD_CHECK_SHA = 'd'.repeat(40);
+const RATE_LIMIT = {
+  cost: 1,
+  limit: 5_000,
+  remaining: 4_999,
+  resetAt: '2026-06-01T01:00:00Z',
+};
 
 function defaultBranchResult(sha = MAIN_SHA) {
   return result(
     JSON.stringify({
-      data: { repository: { defaultBranchRef: { name: 'main', target: { oid: sha } } } },
+      data: {
+        rateLimit: RATE_LIMIT,
+        repository: { defaultBranchRef: { name: 'main', target: { oid: sha } } },
+      },
     }),
   );
 }
@@ -32,6 +41,7 @@ function hostedChecksResult(
   return result(
     JSON.stringify({
       data: {
+        rateLimit: RATE_LIMIT,
         repository: {
           object: {
             oid: options.sha ?? MAIN_SHA,
@@ -185,6 +195,20 @@ describe('GitHub integration-health inspection', () => {
           sharedFailingWorkflowCount: 1,
         },
       ],
+      rateLimit: {
+        fallback: 'not_requested',
+        graphql: {
+          availability: 'available',
+          limit: 5_000,
+          pressure: 'ready',
+          remaining: 4_999,
+          resetAt: '2026-06-01T01:00:00Z',
+          source: 'graphql',
+        },
+        observation: 'bounded_hosted_rate_budget',
+        rest: { availability: 'unavailable' },
+        watcherPolling: { status: 'ready' },
+      },
     });
     expect(fixture.invocations.map(({ command }) => command)).toEqual(['gh', 'gh', 'gh', 'gh']);
     expect(fixture.invocations.map(({ args }) => args.slice(0, 2))).toEqual([
@@ -196,6 +220,12 @@ describe('GitHub integration-health inspection', () => {
     expect(fixture.invocations[1]?.args).toContain('expression=main');
     expect(fixture.invocations[1]?.args).toContain('limit=50');
     expect(fixture.invocations[1]?.args.join(' ')).toContain('pageInfo{hasNextPage}');
+    expect(fixture.invocations[0]?.args.join(' ')).toContain(
+      'rateLimit{cost limit remaining resetAt}',
+    );
+    expect(fixture.invocations[1]?.args.join(' ')).toContain(
+      'rateLimit{cost limit remaining resetAt}',
+    );
     expect(fixture.invocations[1]?.args.join(' ')).toContain('workflow{databaseId}');
     expect(fixture.invocations[2]?.args).toEqual([
       'pr',

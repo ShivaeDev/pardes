@@ -6,7 +6,8 @@ import {
   derivePullRequestTransitions,
   GitHubWatcher,
   type GitHubWatcherCallbacks,
-  makeGitHubWatcherService,
+  makeGitHubHostedMetadataAdapter,
+  makeGitHubWatcherService as makeGitHubWatcherServiceProduction,
   type PullRequestObservation,
   type PullRequestWatcherFailure,
   type PullRequestWatcherHeadDivergence,
@@ -17,6 +18,36 @@ import type { GitHubCommandRunnerShape, ProcessResult } from './transport.ts';
 
 const HEAD_SHA = 'a'.repeat(40);
 const PREVIOUS_HEAD_SHA = 'b'.repeat(40);
+const RATE_LIMIT = {
+  cost: 1,
+  limit: 5_000,
+  remaining: 4_999,
+  resetAt: '2026-06-01T01:00:00Z',
+};
+
+function rateLimitFallbackResult(remaining = 5_000): ProcessResult {
+  return result(
+    JSON.stringify({
+      resources: {
+        core: { limit: 5_000, remaining, reset: 1_800_000_000 },
+        graphql: { limit: 5_000, remaining, reset: 1_800_000_000 },
+      },
+    }),
+  );
+}
+
+function makeGitHubWatcherService(
+  options: Parameters<typeof makeGitHubWatcherServiceProduction>[0] = {},
+) {
+  return makeGitHubWatcherServiceProduction({
+    hostedMetadata:
+      options.hostedMetadata ??
+      makeGitHubHostedMetadataAdapter({
+        runner: { run: () => Effect.succeed(rateLimitFallbackResult()) },
+      }),
+    ...options,
+  });
+}
 
 function discussionResult(
   options: {
@@ -24,11 +55,13 @@ function discussionResult(
     readonly reviews?: ReadonlyArray<unknown>;
     readonly commentsHavePreviousPage?: boolean;
     readonly reviewsHavePreviousPage?: boolean;
+    readonly rateLimit?: typeof RATE_LIMIT;
   } = {},
 ): ProcessResult {
   return result(
     JSON.stringify({
       data: {
+        rateLimit: options.rateLimit ?? RATE_LIMIT,
         repository: {
           pullRequest: {
             comments: {
@@ -257,6 +290,9 @@ describe('GitHub watcher service', () => {
     expect(received.observations[1]?.discussion?.feedback).toHaveLength(102);
     expect(fixture.invocations).toHaveLength(3);
     expect(fixture.invocations[1]?.args.join(' ')).toContain('pageInfo{hasPreviousPage}');
+    expect(fixture.invocations[1]?.args.join(' ')).toContain(
+      'rateLimit{cost limit remaining resetAt}',
+    );
   });
 
   test('reads currently persisted associations when the manual poll effect executes', async () => {
@@ -535,6 +571,56 @@ describe('GitHub watcher service', () => {
     expect(persistedAssociationReads).toBe(readsBeforeReleasedReconciliation);
   });
 
+  test('defers watcher polling before watched PR requests when the bounded fallback reports near exhaustion', async () => {
+    const fixture = scriptedRunner([rateLimitFallbackResult(100)]);
+    const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.observations).toEqual([]);
+    expect(received.failures).toEqual([]);
+    expect(fixture.invocations).toEqual([
+      { args: ['api', 'rate_limit'], command: 'gh', cwd: '/tmp/project' },
+    ]);
+  });
+
+  test('rechecks the bounded budget between review gates and defers later gates after a low GraphQL observation', async () => {
+    const fixture = scriptedRunner([
+      rateLimitFallbackResult(),
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 42,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult({
+        rateLimit: { ...RATE_LIMIT, remaining: 100, resetAt: '2027-01-15T08:00:00Z' },
+      }),
+      inlineCommentsResult(),
+    ]);
+    const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
+    const received = callbacks([
+      pullRequest(),
+      pullRequest({ id: 'pr-43', number: 43, url: 'https://github.test/acme/project/pull/43' }),
+    ]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.failures).toEqual([]);
+    expect(received.observations.map(({ pullRequestId }) => pullRequestId)).toEqual([
+      'pr-42',
+      'pr-42',
+    ]);
+    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations[0]?.args).toEqual(['api', 'rate_limit']);
+    expect(fixture.invocations.some(({ args }) => args.includes('43'))).toBe(false);
+  });
+
   test('reports malformed gh metadata through the typed watcher failure callback', async () => {
     const fixture = scriptedRunner([result(JSON.stringify({ number: 'not-a-number' }))]);
     const service = makeGitHubWatcherService({ runner: fixture.runner });
@@ -598,7 +684,7 @@ describe('GitHub watcher service', () => {
 
   test('rejects an unsafe legacy association URL before invoking gh', async () => {
     const fixture = scriptedRunner([]);
-    const service = makeGitHubWatcherService({ runner: fixture.runner });
+    const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
     const received = callbacks([
       pullRequest({ number: undefined, url: '--repo=attacker/project' }),
     ]);

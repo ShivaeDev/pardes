@@ -41,6 +41,7 @@ function fakeRpcWorker(options: FakeRpcWorkerOptions = {}): FakeRpcWorker {
   writeFileSync(
     script,
     `
+import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 const commandLog = ${JSON.stringify(commandLog)};
 const malformedResponseCommand = ${JSON.stringify(options.malformedResponseCommand)};
@@ -79,6 +80,17 @@ function report(summary = "fixture complete", details) {
 }
 function question() {
   send({ type: "tool_execution_end", toolName: "ask_manager", isError: false, result: { details: { pardesWorker: { type: "question", question: "Ship it?" } } } });
+}
+function lateInheritedStdout() {
+  const lateRecords = [
+    { type: "agent_start" },
+    { type: "queue_update", steering: ["late steering"], followUp: ["late follow-up"] },
+    { type: "tool_execution_end", toolName: "report_to_manager", isError: false, result: { details: { pardesWorker: { type: "report", status: "completed", summary: "late report" } } } },
+    { type: "tool_execution_end", toolName: "ask_manager", isError: false, result: { details: { pardesWorker: { type: "question", question: "late question" } } } },
+  ];
+  const payload = lateRecords.map((value) => JSON.stringify(value)).join("\\n") + "\\n";
+  spawn(process.execPath, ["-e", "setTimeout(() => process.stdout.write(" + JSON.stringify(payload) + "), 120); setTimeout(() => {}, 250);"], { stdio: ["ignore", "inherit", "ignore"] });
+  setTimeout(() => process.exit(18), 10);
 }
 function malformedTargetedEvents() {
   send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: 17 } });
@@ -178,6 +190,7 @@ function handle(command) {
     }
     respond(command);
     if (command.message === "crash") return setTimeout(() => process.exit(17), 10);
+    if (command.message === "late-inherited-stdout") return lateInheritedStdout();
     if (command.message === "start-only") return start();
     if (command.message === "duplicate-start") { start(); return start(); }
     if (command.message === "state-reconcile") {
@@ -1421,6 +1434,43 @@ describe('worker supervisor', () => {
     );
     expect(reportIndex).toBeGreaterThanOrEqual(0);
     expect(idleIndex).toBeGreaterThan(reportIndex);
+  });
+
+  test('ignores inherited stdout RPC records after a direct child crash', async () => {
+    const fixture = fakeRpcWorker();
+    const events: WorkerSupervisorEvent[] = [];
+    const supervisor = makeWorkerSupervisor({
+      args: () => [fixture.script],
+      command: process.execPath,
+      onEvent: (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      telemetryInterval: '1 hour',
+    });
+    await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'quiet', 'agent-late-stdout')));
+    await Effect.runPromise(
+      supervisor.send('agent-late-stdout', 'late-inherited-stdout', 'prompt'),
+    );
+    await eventually(() => events.some((event) => event.type === 'unexpected_exit'));
+    const terminalIndex = events.findIndex((event) => event.type === 'unexpected_exit');
+
+    await sleep(350);
+    expect(await Effect.runPromise(supervisor.status('agent-late-stdout'))).toMatchObject({
+      followUpQueueCount: 0,
+      isStreaming: false,
+      pendingMessageCount: 0,
+      status: 'crashed',
+      steeringQueueCount: 0,
+    });
+    expect(
+      events
+        .slice(terminalIndex + 1)
+        .some((event) =>
+          ['protocol_error', 'question', 'report', 'status', 'telemetry'].includes(event.type),
+        ),
+    ).toBe(false);
+    await Effect.runPromise(supervisor.shutdown());
   });
 
   test('emits an unexpected exit event when a child crashes', async () => {

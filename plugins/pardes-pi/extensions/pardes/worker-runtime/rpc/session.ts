@@ -74,6 +74,7 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
     let stderrDecoderFlushed = false;
     let stderrDrainTimeout: ReturnType<typeof setTimeout> | undefined;
     let started = false;
+    let terminalSettled = false;
 
     const appendStderr = (text: string) => {
       if (text) stderr = appendWorkerStderrTail(stderr, text);
@@ -87,20 +88,28 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
     };
     const scheduleStderrFlush = () => {
       if (stderrDecoderFlushed || stderrDrainTimeout) return;
-      stderrDrainTimeout = setTimeout(flushStderr, WORKER_STDERR_FINAL_DRAIN_MS);
+      stderr = { ...stderr, countAccuracy: 'lower_bound' };
+      stderrDrainTimeout = setTimeout(() => {
+        flushStderr();
+        child.stderr.destroy();
+      }, WORKER_STDERR_FINAL_DRAIN_MS);
       stderrDrainTimeout.unref();
     };
 
     const start = (callbacks: WorkerRpcSessionCallbacks) => {
       if (started) return;
       started = true;
+      const notifyProtocolError = (diagnostic: WorkerProtocolDiagnostic) => {
+        if (!terminalSettled) callbacks.onProtocolError(diagnostic);
+      };
       attachWorkerRpcJsonl(child.stdout, {
-        onProtocolError: callbacks.onProtocolError,
+        onProtocolError: notifyProtocolError,
         onValue: (event, record) => {
+          if (terminalSettled) return;
           const envelope = WorkerRpcWire.decodeEnvelope(event);
           if (Option.isSome(envelope) && envelope.value.type === 'response') {
             if (rpcRequests.handleResponse(event) === 'invalid_uncorrelated_response') {
-              callbacks.onProtocolError(
+              notifyProtocolError(
                 workerProtocolDiagnostic(
                   'invalid_response',
                   'RPC response could not be correlated or decoded; response content was discarded.',
@@ -119,7 +128,8 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
       });
       child.stderr.on('end', flushStderr);
       child.on('error', (cause) => {
-        callbacks.onProtocolError(
+        if (terminalSettled) return;
+        notifyProtocolError(
           workerProtocolDiagnostic(
             'runtime_process_error',
             'Retained child process emitted an error; arbitrary process text was omitted.',
@@ -128,6 +138,8 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
         );
       });
       child.on('exit', (exitCode, signal) => {
+        terminalSettled = true;
+        child.stdout.destroy();
         scheduleStderrFlush();
         rpcRequests.failPending(
           `Worker exited with code ${String(exitCode)} and signal ${String(signal)}`,

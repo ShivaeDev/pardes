@@ -52,8 +52,14 @@ function handle(command) {
     return setTimeout(() => process.exit(24), 10);
   }
   if (command.type === "inherited-stderr-descendant") {
+    process.stderr.write(Buffer.from([0xc3]));
     spawn(process.execPath, ["-e", 'setTimeout(() => process.stderr.write("late-descendant"), 400); setTimeout(() => {}, 600);'], { stdio: ["ignore", "ignore", "inherit"] });
     return setTimeout(() => process.exit(17), 10);
+  }
+  if (command.type === "inherited-stdout-descendant") {
+    const lateStdout = JSON.stringify({ type: "notice", value: "late-descendant" }) + "\\nnot-json\\n";
+    spawn(process.execPath, ["-e", "setTimeout(() => process.stdout.write(" + JSON.stringify(lateStdout) + "), 120); setTimeout(() => {}, 250);"], { stdio: ["ignore", "inherit", "ignore"] });
+    return setTimeout(() => process.exit(18), 10);
   }
   if (command.type === "stall") return setTimeout(() => process.exit(23), 10);
   respond(command);
@@ -213,6 +219,7 @@ describe('worker RPC session', () => {
       readonly elapsedMs: number;
       readonly exitCode: number | null;
       readonly signal: NodeJS.Signals | null;
+      readonly stderr: WorkerStderrTail;
     }> = [];
     const session = await Effect.runPromise(
       openWorkerRpcSession(fixture.input, {
@@ -223,8 +230,8 @@ describe('worker RPC session', () => {
     );
     const startedAt = Date.now();
     session.start({
-      onExit: (exitCode, signal) => {
-        exits.push({ elapsedMs: Date.now() - startedAt, exitCode, signal });
+      onExit: (exitCode, signal, stderr) => {
+        exits.push({ elapsedMs: Date.now() - startedAt, exitCode, signal, stderr });
       },
       onProtocolError: () => undefined,
       onValue: () => undefined,
@@ -237,14 +244,62 @@ describe('worker RPC session', () => {
     expect(Exit.isFailure(pending)).toBe(true);
     expect(settledElapsedMs).toBeLessThan(300);
     await eventually(() => exits.length === 1);
-    expect(exits[0]).toMatchObject({ exitCode: 17, signal: null });
+    expect(exits[0]).toMatchObject({
+      exitCode: 17,
+      signal: null,
+      stderr: { countAccuracy: 'lower_bound', originalChars: 0, shownChars: 0, tail: '' },
+    });
     expect(exits[0]?.elapsedMs).toBeLessThan(300);
 
+    expect(session.stderr()).toMatchObject({ countAccuracy: 'lower_bound' });
     await sleep(WORKER_STDERR_FINAL_DRAIN_MS + 50);
     const finalizedTail = session.stderr();
     await sleep(350);
     expect(session.stderr()).toEqual(finalizedTail);
+    expect(session.stderr()).toMatchObject({
+      countAccuracy: 'lower_bound',
+      originalChars: 1,
+      shownChars: 1,
+      tail: '�',
+    });
     expect(session.stderr().tail).not.toContain('late-descendant');
+    await Effect.runPromise(session.close);
+  });
+
+  test('ignores inherited stdout records and protocol failures after direct-child exit', async () => {
+    const fixture = fakeRpcWorker();
+    const exits: number[] = [];
+    const protocolErrors: WorkerProtocolDiagnostic[] = [];
+    const values: unknown[] = [];
+    const session = await Effect.runPromise(
+      openWorkerRpcSession(fixture.input, {
+        args: () => [fixture.script],
+        command: process.execPath,
+        requestTimeoutMs: 1_000,
+      }),
+    );
+    session.start({
+      onExit: (exitCode) => {
+        exits.push(exitCode ?? -1);
+      },
+      onProtocolError: (diagnostic) => {
+        protocolErrors.push(diagnostic);
+      },
+      onValue: (value) => {
+        values.push(value);
+      },
+    });
+
+    expect(
+      Exit.isFailure(
+        await Effect.runPromiseExit(session.request({ type: 'inherited-stdout-descendant' })),
+      ),
+    ).toBe(true);
+    await eventually(() => exits.length === 1);
+    await sleep(300);
+    expect(exits).toEqual([18]);
+    expect(values).toEqual([]);
+    expect(protocolErrors).toEqual([]);
     await Effect.runPromise(session.close);
   });
 

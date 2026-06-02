@@ -45,6 +45,8 @@ export interface WorkerStderrTail extends WorkerTextCounts {
   /** Terminal-only subprocess preview. Never persist this tail in manager state or artifacts. */
   readonly tail: string;
   readonly omissionReason?: 'stderr_tail_limit';
+  /** Present when a direct-child exit forced a bounded drain before inherited pipes closed. */
+  readonly countAccuracy?: 'lower_bound';
 }
 
 export function workerProtocolDiagnostic(
@@ -168,6 +170,7 @@ export function appendWorkerStderrTail(current: WorkerStderrTail, chunk: string)
     shownChars,
     tail,
     ...(omittedChars === 0 ? {} : { omissionReason: 'stderr_tail_limit' as const }),
+    ...(current.countAccuracy === undefined ? {} : { countAccuracy: current.countAccuracy }),
   };
 }
 

@@ -179,6 +179,7 @@ function handle(command) {
     respond(command);
     if (command.message === "crash") return setTimeout(() => process.exit(17), 10);
     if (command.message === "start-only") return start();
+    if (command.message === "duplicate-start") { start(); return start(); }
     if (command.message === "state-reconcile") {
       state.isStreaming = true;
       state.autoCompactionEnabled = false;
@@ -1177,6 +1178,40 @@ describe('worker supervisor', () => {
       status: 'stopped',
       totalActiveMs: 375,
     });
+    await Effect.runPromise(supervisor.shutdown());
+  });
+
+  test('does not read the injected clock for duplicate no-op lifecycle status events', async () => {
+    const fixture = fakeRpcWorker();
+    const events: WorkerSupervisorEvent[] = [];
+    let clockReads = 0;
+    const supervisor = makeWorkerSupervisor({
+      args: () => [fixture.script],
+      command: process.execPath,
+      now: () => {
+        clockReads += 1;
+        return 1_000;
+      },
+      onEvent: (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }),
+      telemetryInterval: '1 hour',
+    });
+
+    await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'quiet')));
+    await eventually(() =>
+      events.some((event) => event.type === 'telemetry' && event.runtime.stats !== undefined),
+    );
+    clockReads = 0;
+    events.length = 0;
+
+    await Effect.runPromise(supervisor.send('agent-fixture', 'duplicate-start', 'prompt'));
+    await eventually(() =>
+      events.some((event) => event.type === 'status' && event.status === 'running'),
+    );
+    await sleep(20);
+    expect(clockReads).toBe(2);
     await Effect.runPromise(supervisor.shutdown());
   });
 

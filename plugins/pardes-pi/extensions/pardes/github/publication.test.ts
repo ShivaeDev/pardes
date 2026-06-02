@@ -1,14 +1,24 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
 import { GitHubCommandError, makeGitHubPublicationService } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
+import {
+  type GitHubCommandRunnerShape,
+  makeExecFileGitHubCommandRunner,
+  type ProcessResult,
+} from './transport.ts';
 
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     baseRefName: 'main',
     body: 'Summary and validation.',
-    headRefName: 'pardes/review/11111111-1111-4111-8111-111111111111',
+    headRefName:
+      'pardes/review/readable-publish-pr-bounded-slice-11111111-1111-4111-8111-111111111111',
     headRefOid: input.headSha,
     isDraft: false,
     number: 42,
@@ -19,16 +29,324 @@ function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+const HUMAN_CLAIM = 'pardes-reservation-manager-1-agent-1-c36cc3ff4f6b';
+
 const input = {
   baseBranch: 'main',
   body: 'Summary and validation.',
   cwd: '/tmp/managed-worker',
-  headBranch: 'pardes/review/11111111-1111-4111-8111-111111111111',
+  headBranch:
+    'pardes/review/readable-publish-pr-bounded-slice-11111111-1111-4111-8111-111111111111',
   headSha: 'a'.repeat(40),
   title: 'Publish the bounded slice',
 };
 
 describe('GitHub publication boundary', () => {
+  test('plans the logged-in GitHub actor readable branch without a visible ID by default', async () => {
+    const fixture = scriptedRunner([result('OctoUser\n'), result()]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const branches = await Effect.runPromise(
+      service.publishedReviewBranchCandidates({
+        cwd: input.cwd,
+        disambiguator: 'agent-12345678',
+        fallbackDisambiguator: 'manager-87654321',
+        workstreamTitle: 'Readable Branch UX',
+      }),
+    );
+
+    expect(branches).toEqual([
+      'octouser/pardes/readable-branch-ux',
+      'octouser/pardes/readable-branch-ux-12345678',
+      'octouser/pardes/readable-branch-ux-12345678-87654321',
+    ]);
+  });
+
+  test('falls back to a sanitized Git config actor when the GitHub login response is not safe', async () => {
+    const fixture = scriptedRunner([result('Not Safe Actor!\n'), result('Local Dev\n'), result()]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const branches = await Effect.runPromise(
+      service.publishedReviewBranchCandidates({
+        cwd: input.cwd,
+        disambiguator: 'agent-12345678',
+        fallbackDisambiguator: 'manager-87654321',
+        workstreamTitle: 'Readable Branch UX',
+      }),
+    );
+
+    expect(branches[0]).toBe('local-dev/pardes/readable-branch-ux');
+  });
+
+  test('plans a bounded flat fallback when an ancestor leaf blocks the readable hierarchy', async () => {
+    const fixture = scriptedRunner([
+      result('actor\n'),
+      result(`${input.headSha}\trefs/heads/actor\n`),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const branches = await Effect.runPromise(
+      service.publishedReviewBranchCandidates({
+        cwd: input.cwd,
+        disambiguator: 'agent-12345678',
+        fallbackDisambiguator: 'manager-87654321',
+        workstreamTitle: 'Readable Branch UX',
+      }),
+    );
+
+    expect(branches[0]).toBe('actor-pardes-readable-branch-ux');
+  });
+
+  test('transfers and reserves an exact local-only audited SHA with a create-only atomic push', async () => {
+    const branch = 'actor/pardes/readable-branch-ux';
+    const claim = HUMAN_CLAIM;
+    const advertised = `${input.headSha}\trefs/heads/${branch}\n${input.headSha}\trefs/heads/${claim}\n`;
+    const fixture = scriptedRunner([result(), result(), result(advertised)]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const reserved = await Effect.runPromise(
+      service.reservePublishedReviewBranch({
+        cwd: input.cwd,
+        headBranch: branch,
+        headSha: input.headSha,
+        ownershipId: 'manager-1-agent-1',
+      }),
+    );
+
+    expect(reserved).toBe('reserved');
+    expect(fixture.invocations[1]).toEqual({
+      args: [
+        'push',
+        '--atomic',
+        `--force-with-lease=refs/heads/${branch}:`,
+        `--force-with-lease=refs/heads/${claim}:`,
+        'origin',
+        `${input.headSha}:refs/heads/${branch}`,
+        `${input.headSha}:refs/heads/${claim}`,
+      ],
+      command: 'git',
+      cwd: input.cwd,
+    });
+  });
+
+  test('removes only the exact transient ownership anchor after durable finalization', async () => {
+    const claim = HUMAN_CLAIM;
+    const fixture = scriptedRunner([result(`${input.headSha}\trefs/heads/${claim}\n`), result()]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    await Effect.runPromise(
+      service.releasePublishedReviewBranchClaim({
+        cwd: input.cwd,
+        headBranch: 'actor/pardes/readable-branch-ux',
+        headSha: input.headSha,
+        ownershipId: 'manager-1-agent-1',
+      }),
+    );
+
+    expect(fixture.invocations[1]?.args).toEqual([
+      'push',
+      `--force-with-lease=refs/heads/${claim}:${input.headSha}`,
+      'origin',
+      `:refs/heads/${claim}`,
+    ]);
+  });
+
+  test('recovers a lost create response only when the exact SHA and ownership anchor are advertised', async () => {
+    const branch = 'actor/pardes/readable-branch-ux';
+    const claim = HUMAN_CLAIM;
+    const advertised = `${input.headSha}\trefs/heads/${branch}\n${input.headSha}\trefs/heads/${claim}\n`;
+    const invocations: Array<{
+      readonly args: ReadonlyArray<string>;
+      readonly command: string;
+      readonly cwd: string;
+    }> = [];
+    const outputs: Array<ProcessResult | 'lost'> = [result(), 'lost', result(advertised)];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        const output = outputs.shift();
+        return output === 'lost'
+          ? Effect.fail(
+              new GitHubCommandError({
+                args: invocation.args,
+                cause: 'fixture lost response',
+                command: invocation.command,
+                cwd: invocation.cwd,
+              }),
+            )
+          : Effect.succeed(output ?? result());
+      },
+    };
+    const service = makeGitHubPublicationService({ runner });
+
+    expect(
+      await Effect.runPromise(
+        service.reservePublishedReviewBranch({
+          cwd: input.cwd,
+          headBranch: branch,
+          headSha: input.headSha,
+          ownershipId: 'manager-1-agent-1',
+        }),
+      ),
+    ).toBe('reserved');
+  });
+
+  test('rejects a hierarchy-descendant collision without pushing or overwriting', async () => {
+    const branch = 'actor/pardes/readable-branch-ux';
+    const fixture = scriptedRunner([result(`${input.headSha}\trefs/heads/${branch}/descendant\n`)]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    expect(
+      await Effect.runPromise(
+        service.reservePublishedReviewBranch({
+          cwd: input.cwd,
+          headBranch: branch,
+          headSha: input.headSha,
+          ownershipId: 'manager-1-agent-1',
+        }),
+      ),
+    ).toBe('collision');
+    expect(fixture.invocations).toHaveLength(1);
+  });
+
+  test('classifies an actual bare-Git ownership-claim descendant as a bounded collision', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'pardes-publication-claim-descendant-'));
+    const origin = join(root, 'origin.git');
+    const project = join(root, 'project');
+    const git = (...args: ReadonlyArray<string>) =>
+      execFileSync('git', args, { cwd: project, encoding: 'utf8' }).trim();
+    try {
+      execFileSync('git', ['init', '--bare', '-b', 'main', origin]);
+      execFileSync('git', ['init', '-b', 'main', project]);
+      git('config', 'user.email', 'pardes@example.test');
+      git('config', 'user.name', 'Pardes Test');
+      writeFileSync(join(project, 'README.md'), 'fixture\n');
+      git('add', 'README.md');
+      git('commit', '-m', 'fixture');
+      git('remote', 'add', 'origin', origin);
+      const headSha = git('rev-parse', 'HEAD');
+      git('push', 'origin', `${headSha}:refs/heads/${HUMAN_CLAIM}/child`);
+      const service = makeGitHubPublicationService({ runner: makeExecFileGitHubCommandRunner() });
+
+      expect(
+        await Effect.runPromise(
+          service.reservePublishedReviewBranch({
+            cwd: project,
+            headBranch: 'actor/pardes/readable-branch-ux',
+            headSha,
+            ownershipId: 'manager-1-agent-1',
+          }),
+        ),
+      ).toBe('collision');
+      expect(git('ls-remote', '--heads', 'origin')).toContain(`refs/heads/${HUMAN_CLAIM}/child`);
+      expect(git('ls-remote', '--heads', 'origin')).not.toContain(
+        'refs/heads/actor/pardes/readable-branch-ux',
+      );
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  test('classifies an actor-root TOCTOU hierarchy conflict after failed atomic reservation', async () => {
+    const branch = 'actor/pardes/readable-branch-ux';
+    const outputs: Array<ProcessResult | 'race'> = [
+      result(),
+      'race',
+      result(`${input.headSha}\trefs/heads/actor\n`),
+    ];
+    const invocations: Array<{
+      readonly args: ReadonlyArray<string>;
+      readonly command: string;
+      readonly cwd: string;
+    }> = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        const output = outputs.shift();
+        return output === 'race'
+          ? Effect.fail(
+              new GitHubCommandError({
+                args: invocation.args,
+                cause: 'fixture actor-root race',
+                command: invocation.command,
+                cwd: invocation.cwd,
+              }),
+            )
+          : Effect.succeed(output ?? result());
+      },
+    };
+    const service = makeGitHubPublicationService({ runner });
+
+    expect(
+      await Effect.runPromise(
+        service.reservePublishedReviewBranch({
+          cwd: input.cwd,
+          headBranch: branch,
+          headSha: input.headSha,
+          ownershipId: 'manager-1-agent-1',
+        }),
+      ),
+    ).toBe('hierarchy_collision');
+    expect(invocations).toHaveLength(3);
+  });
+
+  test('allows create-capable human publication only after mechanical remote reservation proof', async () => {
+    const headBranch = 'actor/pardes/readable-branch-ux';
+    const fixture = scriptedRunner([
+      result(
+        `${input.headSha}\trefs/heads/${headBranch}\n${input.headSha}\trefs/heads/${HUMAN_CLAIM}\n`,
+      ),
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefName: headBranch }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const published = await Effect.runPromise(
+      service.publish({
+        ...input,
+        headBranch,
+        humanHeadBranchReservation: { claimSha: input.headSha, ownershipId: 'manager-1-agent-1' },
+      }),
+    );
+
+    expect(published).toMatchObject({ action: 'created', headBranch });
+    expect(fixture.invocations[0]?.args).toEqual([
+      'ls-remote',
+      '--heads',
+      'origin',
+      `refs/heads/${headBranch}`,
+      `refs/heads/${HUMAN_CLAIM}`,
+    ]);
+    expect(fixture.invocations[1]?.args).toEqual([
+      'push',
+      'origin',
+      `${input.headSha}:refs/heads/${headBranch}`,
+    ]);
+  });
+
+  test('rejects unrelated pre-existing human refs when their claimed ownership anchor is absent', async () => {
+    const headBranch = 'actor/pardes/unrelated';
+    const fixture = scriptedRunner([result(`${input.headSha}\trefs/heads/${headBranch}\n`)]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(
+      service
+        .publish({
+          ...input,
+          headBranch,
+          humanHeadBranchReservation: { claimSha: input.headSha, ownershipId: 'manager-1-agent-1' },
+        })
+        .pipe(Effect.flip),
+    );
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    if (failure._tag !== 'GitHubResponseError') throw failure;
+    expect(failure.operation).toBe('verify human-owned published review branch reservation');
+    expect(fixture.invocations).toHaveLength(1);
+  });
+
   test('pushes exactly the audited SHA with an explicit branch refspec before creating a ready-for-review PR', async () => {
     const fixture = scriptedRunner([
       result(),
@@ -105,6 +423,53 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
+  });
+
+  test('keeps schema-v1 opaque reservations publishable without force-pushing', async () => {
+    const opaqueHeadBranch = 'pardes/review/11111111-1111-4111-8111-111111111111';
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefName: opaqueHeadBranch }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const published = await Effect.runPromise(
+      service.publish({ ...input, headBranch: opaqueHeadBranch }),
+    );
+
+    expect(published).toMatchObject({ action: 'created', headBranch: opaqueHeadBranch });
+    expect(fixture.invocations[0]?.args).toEqual([
+      'push',
+      'origin',
+      `${input.headSha}:refs/heads/${opaqueHeadBranch}`,
+    ]);
+    expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
+  });
+
+  test('keeps pre-flat nested readable reservations publishable for stable durable reuse', async () => {
+    const nestedHeadBranch =
+      'pardes/review/readable/publish-pr/bounded-slice-11111111-1111-4111-8111-111111111111';
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefName: nestedHeadBranch }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const published = await Effect.runPromise(
+      service.publish({ ...input, headBranch: nestedHeadBranch }),
+    );
+
+    expect(published).toMatchObject({ action: 'created', headBranch: nestedHeadBranch });
+    expect(fixture.invocations[0]?.args).toEqual([
+      'push',
+      'origin',
+      `${input.headSha}:refs/heads/${nestedHeadBranch}`,
+    ]);
+    expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
   });
 
   test('rejects a published review gate whose final remote head OID diverges from the audited push', async () => {
@@ -190,6 +555,157 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
+  test('accepts explicit existing-PR publication after its temporarily stale hosted head OID converges', async () => {
+    const existing = pullRequest();
+    const stale = result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) })));
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      stale,
+      result(JSON.stringify(pullRequest())),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const published = await Effect.runPromise(service.publish(input));
+
+    expect(published.action).toBe('updated');
+    expect(fixture.invocations).toHaveLength(5);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+    expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
+      false,
+    );
+  });
+
+  test('fails explicit existing-PR publication after bounded hosted head OID convergence attempts', async () => {
+    const existing = pullRequest();
+    const divergent = result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) })));
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      divergent,
+      divergent,
+      divergent,
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    if (failure._tag !== 'GitHubResponseError') throw failure;
+    expect(failure.operation).toBe('verify published pull request head and base');
+    expect(fixture.invocations).toHaveLength(6);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+    expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
+      false,
+    );
+  });
+
+  test('rejects explicit existing-PR identity drift immediately without repeating publication effects', async () => {
+    const existing = pullRequest();
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      result(JSON.stringify(pullRequest({ number: 43 }))),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    if (failure._tag !== 'GitHubResponseError') throw failure;
+    expect(failure.operation).toBe('verify published pull request head and base');
+    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+    expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
+      false,
+    );
+  });
+
+  test('rejects malformed explicit existing-PR publication metadata immediately without repeating effects', async () => {
+    const existing = pullRequest();
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      result('{'),
+    ]);
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: fixture.runner,
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubResponseError');
+    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+  });
+
+  test('does not retry an explicit existing-PR command failure after hosted-OID lag', async () => {
+    const existing = pullRequest();
+    const fixture = scriptedRunner([
+      result(),
+      result(JSON.stringify([existing])),
+      result(),
+      result(JSON.stringify(pullRequest({ headRefOid: 'b'.repeat(40) }))),
+    ]);
+    let invocationCount = 0;
+    const service = makeGitHubPublicationService({
+      pushedHeadVerificationDelayMillis: 0,
+      pushedHeadVerificationRetries: 2,
+      runner: {
+        run: (invocation) => {
+          invocationCount += 1;
+          return invocationCount === 5
+            ? Effect.fail(
+                new GitHubCommandError({
+                  ...invocation,
+                  cause: 'fixture publication verification outage',
+                }),
+              )
+            : fixture.runner.run(invocation);
+        },
+      },
+    });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure._tag).toBe('GitHubCommandError');
+    expect(invocationCount).toBe(5);
+    expect(fixture.invocations.filter(({ command }) => command === 'git')).toHaveLength(1);
+    expect(
+      fixture.invocations.filter(({ args }) => args[0] === 'pr' && args[1] === 'edit'),
+    ).toHaveLength(1);
+  });
+
   test('rejects malformed gh JSON through a typed response error', async () => {
     const fixture = scriptedRunner([result(), result('[{"number":"not-a-number"}]')]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
@@ -217,6 +733,41 @@ describe('GitHub publication boundary', () => {
     expect(branchFailure._tag).toBe('GitHubPublicationInputError');
     expect(shaFailure._tag).toBe('GitHubPublicationInputError');
     expect(localHeadFailure._tag).toBe('GitHubPublicationInputError');
+    expect(fixture.invocations).toEqual([]);
+
+    const unreserved = scriptedRunner([result()]);
+    const readableLocalHeadFailure = await Effect.runPromise(
+      makeGitHubPublicationService({ runner: unreserved.runner })
+        .publish({ ...input, headBranch: 'local-dev/pardes/readable-workstream' })
+        .pipe(Effect.flip),
+    );
+    expect(readableLocalHeadFailure._tag).toBe('GitHubPublicationInputError');
+    expect(unreserved.invocations).toHaveLength(0);
+  });
+
+  test('rejects invalid Git ref forms in pre-hardening branch compatibility before invoking a child process', async () => {
+    const fixture = scriptedRunner([]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    for (const headBranch of [
+      'pardes/../agent-1',
+      'pardes/manager-1/..',
+      'pardes/manager.lock/agent-1',
+      'pardes/manager-1/agent.lock',
+      'pardes/.manager/agent-1',
+      'pardes/manager-1/.agent',
+      'pardes/manager-1/agent.',
+      'pardes/manager..one/agent-1',
+      'pardes/manager-1/agent..one',
+    ]) {
+      const failure = await Effect.runPromise(
+        service
+          .publish({ ...input, headBranch, legacyExistingPullRequestNumber: 42 })
+          .pipe(Effect.flip),
+      );
+      expect(failure._tag).toBe('GitHubPublicationInputError');
+    }
+
     expect(fixture.invocations).toEqual([]);
   });
 
@@ -356,7 +907,7 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
-  test('syncs an existing opaque review gate by viewing its persisted number and non-force pushing exactly the audited SHA', async () => {
+  test('syncs an existing managed review gate by viewing its persisted number and non-force pushing exactly the audited SHA', async () => {
     const fixture = scriptedRunner([
       result(JSON.stringify(pullRequest())),
       result(),
@@ -711,6 +1262,38 @@ describe('GitHub publication boundary', () => {
       expect(failure.operation).toBe('view pull request');
       expect('url' in failure).toBe(false);
     }
+  });
+
+  test('keeps schema-v1 state with an opaque agent branch reservation decodable', async () => {
+    const state = initialManagerState('manager-1', {
+      currentCheckout: '/tmp/project',
+      gitCommonDir: '/tmp/project/.git',
+      key: 'repo-1',
+      primaryCheckout: '/tmp/project',
+    });
+    const opaqueHeadBranch = 'pardes/review/11111111-1111-4111-8111-111111111111';
+    const agent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'agent-1',
+      model: 'fixture-model',
+      publishedReviewBranch: opaqueHeadBranch,
+      role: 'worker' as const,
+      sessionDir: '/tmp/session',
+      status: 'idle' as const,
+      task: 'Preserve the schema-v1 reservation.',
+      thinkingLevel: 'high' as const,
+      updatedAt: '2026-06-01T00:00:00.000Z',
+      workstreamId: 'ws-1',
+    };
+
+    const decoded = await Effect.runPromise(
+      Schema.decodeUnknownEffect(ManagerStateSchema)({
+        ...state,
+        agents: { [agent.id]: agent },
+      }),
+    );
+
+    expect(decoded.agents[agent.id]?.publishedReviewBranch).toBe(opaqueHeadBranch);
   });
 
   test('keeps schema-v1 state with the original minimal PR record decodable', async () => {

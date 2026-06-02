@@ -322,6 +322,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
         agentId,
         branchPointSha: baseline.sha,
         managerId: state.managerId,
+        name: workstream.title,
         repo: state.repo,
       });
       yield* callbacks.appendEventSafely(

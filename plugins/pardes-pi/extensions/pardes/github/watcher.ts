@@ -26,10 +26,8 @@ import {
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
-  GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH,
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
-  GitHubInlineReviewCommentsSchema,
   GitHubPullRequestDiscussionGraphQLSchema,
   type GitHubPullRequestObservation,
   GitHubPullRequestObservationSchema,
@@ -46,7 +44,7 @@ import { classifyGitHubWatcherFailure } from './watcher-diagnostics.ts';
 export const DEFAULT_GITHUB_WATCHER_CADENCE: Duration.Input = '15 seconds';
 export const DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT: Duration.Input = '10 seconds';
 const WATCHER_JSON_FIELDS = 'number,headRefOid,state,mergeable,reviewDecision,statusCheckRollup';
-const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login} body} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} body submittedAt} pageInfo{hasPreviousPage}}}} rateLimit{cost limit remaining resetAt}}`;
+const DISCUSSION_GRAPHQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!,$limit:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(last:$limit){nodes{databaseId author{login}} pageInfo{hasPreviousPage}} reviews(last:$limit){nodes{databaseId author{login} submittedAt} pageInfo{hasPreviousPage}} reviewThreads(last:$limit){nodes{comments(last:1){nodes{databaseId author{login}} pageInfo{hasPreviousPage}}} pageInfo{hasPreviousPage}}}}} rateLimit{cost limit remaining resetAt}}`;
 
 export type PullRequestWatcherTransition =
   | 'ci_failed'
@@ -85,16 +83,14 @@ export interface PullRequestDiscussionPageCap {
   readonly oldestFetchedId: number;
 }
 
-/** Bounded, provenance-labelled projection of one untrusted external feedback item. */
+/** Bounded structural metadata for one untrusted external feedback item. Bodies remain opt-in. */
 export interface PullRequestDiscussionFeedback {
   readonly kind: PullRequestDiscussionFeedbackKind;
   readonly id: number;
   readonly author: string;
-  readonly preview: string;
-  readonly previewTruncated: boolean;
 }
 
-/** Transient bounded snapshot. Only its content-free cursor and detected gap surfaces are durable. */
+/** Transient bounded snapshot. Only metadata, its content-free cursor, and detected gap surfaces are durable. */
 export interface PullRequestDiscussionSnapshot {
   readonly cursor: GitHubDiscussionCursor;
   readonly feedback: ReadonlyArray<PullRequestDiscussionFeedback>;
@@ -264,39 +260,20 @@ function maximumId(values: ReadonlyArray<number>): number | undefined {
   return values.length === 0 ? undefined : Math.max(...values);
 }
 
-function preview(
-  body: string,
-): { readonly preview: string; readonly previewTruncated: boolean } | undefined {
-  const normalized = body.replace(/\s+/g, ' ').trim();
-  if (normalized.length === 0) return undefined;
-  return normalized.length <= GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH
-    ? { preview: normalized, previewTruncated: false }
-    : {
-        preview: `${normalized.slice(0, GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH - 1)}…`,
-        previewTruncated: true,
-      };
-}
+const SAFE_DISCUSSION_AUTHOR_PATTERN = /^[a-zA-Z0-9-]+(?:\[bot\])?$/;
 
 function feedback(
   kind: PullRequestDiscussionFeedbackKind,
   id: number,
   author: { readonly login: string } | null,
-  body: string,
-): PullRequestDiscussionFeedback | undefined {
-  const bodyPreview = preview(body);
-  return bodyPreview === undefined
-    ? undefined
-    : { author: author?.login ?? 'unknown-author', id, kind, ...bodyPreview };
-}
-
-function compactFeedback<A>(
-  values: ReadonlyArray<A>,
-  project: (value: A) => PullRequestDiscussionFeedback | undefined,
-): ReadonlyArray<PullRequestDiscussionFeedback> {
-  return values.flatMap((value) => {
-    const projected = project(value);
-    return projected === undefined ? [] : [projected];
-  });
+): PullRequestDiscussionFeedback {
+  const login = author?.login;
+  return {
+    author:
+      login !== undefined && SAFE_DISCUSSION_AUTHOR_PATTERN.test(login) ? login : 'unknown-author',
+    id,
+    kind,
+  };
 }
 
 function pageCap(
@@ -435,7 +412,6 @@ export function makeGitHubWatcherService(
     number: number,
     graphqlReservationId: string,
     route: GitHubRepositoryIdentity,
-    watcherRestReservationId: string,
   ) {
     yield* hostedMetadata.launchGraphQLRequest(graphqlReservationId);
     const discussionResponse = yield* run(cwd, [
@@ -460,28 +436,15 @@ export function makeGitHubWatcherService(
       discussionResponse.stdout,
       graphqlReservationId,
     );
-    const inlineResponse = yield* hostedMetadata.accountReservedOpaqueRequest(
-      'rest',
-      watcherRestReservationId,
-      run(cwd, [
-        'api',
-        `repos/${route.owner}/${route.repo}/pulls/${number}/comments?per_page=${MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE}&sort=created&direction=desc`,
-        '--hostname',
-        GITHUB_HOSTED_METADATA_HOSTNAME,
-      ]),
-    );
-    const inlineComments = yield* decodeGitHubJson(
-      'watch inline pull request comments',
-      GitHubInlineReviewCommentsSchema,
-      inlineResponse.stdout,
-    );
     const issueComments = discussion.data.repository.pullRequest.comments.nodes;
     const reviews = discussion.data.repository.pullRequest.reviews.nodes;
+    const reviewThreads = discussion.data.repository.pullRequest.reviewThreads;
+    const inlineComments = reviewThreads.nodes.flatMap((thread) => thread.comments.nodes);
     const issueCommentId = maximumId(issueComments.map(({ databaseId }) => databaseId));
     const reviewId = maximumId(
       reviews.filter(({ submittedAt }) => submittedAt !== null).map(({ databaseId }) => databaseId),
     );
-    const inlineReviewCommentId = maximumId(inlineComments.map(({ id }) => id));
+    const inlineReviewCommentId = maximumId(inlineComments.map(({ databaseId }) => databaseId));
     const pageCaps = [
       pageCap(
         'issue_comment',
@@ -495,8 +458,9 @@ export function makeGitHubWatcherService(
       ),
       pageCap(
         'inline_review_comment',
-        inlineComments.map(({ id }) => id),
-        inlineComments.length === MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE,
+        inlineComments.map(({ databaseId }) => databaseId),
+        reviewThreads.pageInfo.hasPreviousPage ||
+          reviewThreads.nodes.some((thread) => thread.comments.pageInfo.hasPreviousPage),
       ),
     ].filter((value): value is PullRequestDiscussionPageCap => value !== undefined);
     return {
@@ -506,16 +470,14 @@ export function makeGitHubWatcherService(
         ...(inlineReviewCommentId === undefined ? {} : { inlineReviewCommentId }),
       },
       feedback: [
-        ...compactFeedback(issueComments, (comment) =>
-          feedback('issue_comment', comment.databaseId, comment.author, comment.body),
+        ...issueComments.map((comment) =>
+          feedback('issue_comment', comment.databaseId, comment.author),
         ),
-        ...compactFeedback(reviews, (review) =>
-          review.submittedAt === null
-            ? undefined
-            : feedback('review', review.databaseId, review.author, review.body),
+        ...reviews.flatMap((review) =>
+          review.submittedAt === null ? [] : [feedback('review', review.databaseId, review.author)],
         ),
-        ...compactFeedback(inlineComments, (comment) =>
-          feedback('inline_review_comment', comment.id, comment.user, comment.body),
+        ...inlineComments.map((comment) =>
+          feedback('inline_review_comment', comment.databaseId, comment.author),
         ),
       ],
       ...(pageCaps.length === 0 ? {} : { pageCaps }),
@@ -588,13 +550,10 @@ export function makeGitHubWatcherService(
                                   if (
                                     reservation.status === 'deferred' ||
                                     reservation.graphqlReservationId === undefined ||
-                                    reservation.watcherCliReservationId === undefined ||
-                                    reservation.watcherRestReservationId === undefined
+                                    reservation.watcherCliReservationId === undefined
                                   )
                                     return Effect.void;
                                   const reservationId = reservation.graphqlReservationId;
-                                  const watcherRestReservationId =
-                                    reservation.watcherRestReservationId;
                                   return inspect(
                                     cwd,
                                     pullRequest,
@@ -637,7 +596,6 @@ export function makeGitHubWatcherService(
                                                 inspected.number,
                                                 reservationId,
                                                 route,
-                                                watcherRestReservationId,
                                               ).pipe(
                                                 Effect.matchEffect({
                                                   onFailure: watchedFailure,
@@ -664,7 +622,6 @@ export function makeGitHubWatcherService(
                                       [
                                         reservation.graphqlReservationId,
                                         reservation.watcherCliReservationId,
-                                        reservation.watcherRestReservationId,
                                       ].flatMap((reservationId) =>
                                         reservationId === undefined
                                           ? []

@@ -1,7 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
-import { GitHubCommandError, type GitHubIntegrationHealthInspection } from '../github/index.ts';
+import {
+  GITHUB_CI_LOG_EXCERPT_TRUST_LABEL,
+  GITHUB_DISCUSSION_EXCERPT_TRUST_LABEL,
+  GITHUB_HOSTED_DRILLDOWN_EXCERPT_MAX_CHARS,
+  GITHUB_HOSTED_DRILLDOWN_MAX_PAGE,
+  GitHubCommandError,
+  type GitHubIntegrationHealthInspection,
+} from '../github/index.ts';
 import {
   type AgentRecord,
   type AgentStatus,
@@ -44,6 +51,7 @@ import {
   INBOX_EVENT_VERIFIER_TRUST_LABEL,
   RESOLVED_WORK_CLEANUP_DEFAULT_ROWS,
   registerAgentTools,
+  registerHostedDrilldownTools,
   registerPullRequestTools,
   registerQuestionTool,
   registerWorkstreamTools,
@@ -192,6 +200,9 @@ describe('Pardes model-visible tools', () => {
       'inbox_acknowledge',
       'await_user_feedback',
       'pull_request_create',
+      'pull_request_ci_inspect',
+      'pull_request_ci_log_excerpt_get',
+      'pull_request_discussion_excerpt_get',
       'verification_request',
       'verification_refresh',
       'verification_status',
@@ -2051,6 +2062,127 @@ describe('Pardes model-visible tools', () => {
     );
   });
 
+  test('registers explicit read-only hosted drill-down tools with metadata-first and excerpt-only results', async () => {
+    const secretLogExcerpt = 'redacted log excerpt';
+    const secretDiscussionExcerpt = 'redacted discussion excerpt';
+    const manager = {
+      getPullRequestCiLogExcerpt: () =>
+        Effect.succeed({
+          exactHeadSha: 'a'.repeat(40),
+          excerpt: secretLogExcerpt,
+          excerptChars: secretLogExcerpt.length,
+          hasMore: true,
+          jobId: 8001,
+          maxChars: 2_000,
+          observation: 'opt_in_read_only_redacted_ci_log_excerpt' as const,
+          page: 1,
+          pullRequestId: 'pr-42',
+          pullRequestNumber: 42,
+          runId: 7001,
+          trust: GITHUB_CI_LOG_EXCERPT_TRUST_LABEL,
+          url: 'https://github.com/acme/project/actions/runs/7001/job/8001',
+        }),
+      getPullRequestDiscussionBodyExcerpts: () =>
+        Effect.succeed({
+          bounds: { itemsPerPage: 10, maxExcerptCharsPerItem: 1_000 },
+          hasMore: false,
+          items: [
+            {
+              author: 'alice',
+              bodyChars: secretDiscussionExcerpt.length,
+              excerpt: secretDiscussionExcerpt,
+              excerptChars: secretDiscussionExcerpt.length,
+              hasMore: false,
+              id: 101,
+            },
+          ],
+          observation: 'opt_in_read_only_redacted_discussion_body_excerpts' as const,
+          page: 1,
+          pullRequestId: 'pr-42',
+          pullRequestNumber: 42,
+          surface: 'issue_comment' as const,
+          trust: GITHUB_DISCUSSION_EXCERPT_TRUST_LABEL,
+        }),
+      inspectPullRequestFailingChecks: () =>
+        Effect.succeed({
+          bounds: { maxChecks: 50 },
+          exactHeadSha: 'a'.repeat(40),
+          failingChecks: [
+            {
+              conclusion: 'FAILURE',
+              jobId: 8001,
+              name: 'lint',
+              runId: 7001,
+              status: 'COMPLETED',
+              url: 'https://github.com/acme/project/actions/runs/7001/job/8001',
+            },
+          ],
+          observation: 'opt_in_read_only_hosted_check_metadata' as const,
+          observedCheckCount: 1,
+          omittedCheckCountAccuracy: 'exact' as const,
+          pullRequestId: 'pr-42',
+          pullRequestNumber: 42,
+          unmappedFailingCheckCount: 0,
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerHostedDrilldownTools(pi, manager);
+
+    expect([...tools.keys()]).toEqual([
+      'pull_request_ci_inspect',
+      'pull_request_ci_log_excerpt_get',
+      'pull_request_discussion_excerpt_get',
+    ]);
+    expect(
+      [...tools.keys()].some((name) => /(rerun|cancel|approve|merge|mutation)/.test(name)),
+    ).toBe(false);
+    const logTool = requiredValue(tools.get('pull_request_ci_log_excerpt_get'));
+    expect(logTool.parameters.properties.page).toMatchObject({
+      maximum: GITHUB_HOSTED_DRILLDOWN_MAX_PAGE,
+      minimum: 1,
+    });
+    expect(logTool.parameters.properties.maxChars).toMatchObject({
+      maximum: GITHUB_HOSTED_DRILLDOWN_EXCERPT_MAX_CHARS,
+      minimum: 1,
+    });
+    const checks = await requiredValue(tools.get('pull_request_ci_inspect')).execute(
+      'call-1',
+      { pullRequestId: 'pr-42' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(checks.content[0]?.text).toContain(`exactHeadSha:${'a'.repeat(40)}`);
+    expect(checks.content[0]?.text).toContain('runId:7001 · jobId:8001');
+    expect(checks.content[0]?.text).toContain('no logs or bodies loaded');
+    const log = await logTool.execute(
+      'call-2',
+      { jobId: 8001, pullRequestId: 'pr-42', runId: 7001 },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(log.content[0]?.text).toContain(`[${GITHUB_CI_LOG_EXCERPT_TRUST_LABEL}]`);
+    expect(log.content[0]?.text).toContain(
+      `excerpt(JSON string): ${JSON.stringify(secretLogExcerpt)}`,
+    );
+    expect(JSON.stringify(log.details)).not.toContain(secretLogExcerpt);
+    const discussion = await requiredValue(
+      tools.get('pull_request_discussion_excerpt_get'),
+    ).execute(
+      'call-3',
+      { pullRequestId: 'pr-42', surface: 'issue_comment' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(discussion.content[0]?.text).toContain(`[${GITHUB_DISCUSSION_EXCERPT_TRUST_LABEL}]`);
+    expect(discussion.content[0]?.text).toContain(
+      `excerpt(JSON string): ${JSON.stringify(secretDiscussionExcerpt)}`,
+    );
+    expect(JSON.stringify(discussion.details)).not.toContain(secretDiscussionExcerpt);
+  });
+
   test('redacts failed pull_request_create body content from bounded tool output', async () => {
     const { pi, tools } = registry();
     const body = 'private PR body marker '.repeat(500);
@@ -2408,7 +2540,7 @@ describe('Pardes model-visible tools', () => {
       'summary(JSON string): "[external GitHub feedback] #42 observed a preview.\\n\\"quoted external preview\\""',
     );
     expect(external.content[0]?.text).toContain(
-      'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.',
+      'external GitHub feedback remains observation-only: persisted bounded metadata only; retrieve bodies only through explicit hosted drill-down; no worker message was sent.',
     );
     expect(external.content[0]?.text).toContain(
       'path autonomous: Autonomous rows may be acknowledged once handled.',

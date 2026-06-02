@@ -7,11 +7,13 @@ import {
   registerInboxGetTool,
   registerPardesStatusTool,
 } from './control-plane.ts';
+import { registerHostedDrilldownTools } from './hosted-drilldown.ts';
 import { registerPullRequestTools } from './pull-requests.ts';
 import { registerReportTools } from './reports.ts';
 import { registerVerificationTools } from './verifications.ts';
 import { registerWorkstreamDomainTools } from './workstreams.ts';
 
+export { registerHostedDrilldownTools } from './hosted-drilldown.ts';
 export { conciseAgentStatus } from './projections/agents.ts';
 export { RESOLVED_WORK_CLEANUP_DEFAULT_ROWS } from './projections/cleanup.ts';
 export {
@@ -47,6 +49,7 @@ export function registerWorkstreamTools(pi: ExtensionAPI, manager: ManagerContro
 
 export function registerAgentTools(pi: ExtensionAPI, manager: ManagerController): void {
   registerPullRequestTools(pi, manager);
+  registerHostedDrilldownTools(pi, manager);
   registerVerificationTools(pi, manager);
   registerAgentDomainTools(pi, manager);
 }

@@ -6,7 +6,6 @@ import {
   DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT,
   derivePullRequestTransitions,
   GitHubCommandError,
-  type GitHubHostedMetadataShape,
   GitHubWatcher,
   type GitHubWatcherCallbacks,
   type GitHubWatcherThrottleDiagnostic,
@@ -69,8 +68,10 @@ function discussionResult(
   options: {
     readonly comments?: ReadonlyArray<unknown>;
     readonly reviews?: ReadonlyArray<unknown>;
+    readonly inlineComments?: ReadonlyArray<unknown>;
     readonly commentsHavePreviousPage?: boolean;
     readonly reviewsHavePreviousPage?: boolean;
+    readonly inlineCommentsHavePreviousPage?: boolean;
     readonly rateLimit?: typeof RATE_LIMIT;
   } = {},
 ): ProcessResult {
@@ -87,6 +88,18 @@ function discussionResult(
             reviews: {
               nodes: options.reviews ?? [],
               pageInfo: { hasPreviousPage: options.reviewsHavePreviousPage ?? false },
+            },
+            reviewThreads: {
+              nodes: (options.inlineComments ?? []).map((comment) => {
+                const legacy = comment as { readonly id: number; readonly user: unknown };
+                return {
+                  comments: {
+                    nodes: [{ author: legacy.user, databaseId: legacy.id }],
+                    pageInfo: { hasPreviousPage: options.inlineCommentsHavePreviousPage ?? false },
+                  },
+                };
+              }),
+              pageInfo: { hasPreviousPage: false },
             },
           },
         },
@@ -153,7 +166,7 @@ function observation(overrides: Partial<PullRequestObservation> = {}): PullReque
 }
 
 describe('GitHub watcher service', () => {
-  test('invokes gh with argv only and projects bounded provenance-labelled discussion previews for supported review surfaces', async () => {
+  test('invokes gh with argv only and projects bounded provenance-labelled discussion metadata without requesting bodies', async () => {
     const oversizedPreview = `Please inspect ${'x'.repeat(300)}`;
     const fixture = scriptedRunner([
       result(
@@ -177,6 +190,7 @@ describe('GitHub watcher service', () => {
       ),
       discussionResult({
         comments: [{ author: { login: 'alice' }, body: oversizedPreview, databaseId: 101 }],
+        inlineComments: [{ body: 'Inline concern on the changed line.', id: 301, user: null }],
         reviews: [
           {
             author: { login: 'bob' },
@@ -193,7 +207,6 @@ describe('GitHub watcher service', () => {
           { author: null, body: '   ', databaseId: 203, submittedAt: '2026-06-01T00:00:00Z' },
         ],
       }),
-      inlineCommentsResult([{ body: 'Inline concern on the changed line.', id: 301, user: null }]),
     ]);
     const service = makeGitHubWatcherService({ runner: fixture.runner });
     const received = callbacks([pullRequest({ lastPushedHeadSha: HEAD_SHA })]);
@@ -220,27 +233,10 @@ describe('GitHub watcher service', () => {
         discussion: {
           cursor: { inlineReviewCommentId: 301, issueCommentId: 101, reviewId: 203 },
           feedback: [
-            {
-              author: 'alice',
-              id: 101,
-              kind: 'issue_comment',
-              preview: `${oversizedPreview.slice(0, 159)}…`,
-              previewTruncated: true,
-            },
-            {
-              author: 'bob',
-              id: 201,
-              kind: 'review',
-              preview: 'Please add the focused regression test.',
-              previewTruncated: false,
-            },
-            {
-              author: 'unknown-author',
-              id: 301,
-              kind: 'inline_review_comment',
-              preview: 'Inline concern on the changed line.',
-              previewTruncated: false,
-            },
+            { author: 'alice', id: 101, kind: 'issue_comment' },
+            { author: 'bob', id: 201, kind: 'review' },
+            { author: 'unknown-author', id: 203, kind: 'review' },
+            { author: 'unknown-author', id: 301, kind: 'inline_review_comment' },
           ],
         },
         expectedHeadSha: HEAD_SHA,
@@ -266,17 +262,45 @@ describe('GitHub watcher service', () => {
     expect(fixture.invocations[1]?.args).toContain('github.com');
     expect(fixture.invocations[1]?.args).toContain('owner=acme');
     expect(fixture.invocations[1]?.args).toContain('repo=project');
-    expect(fixture.invocations[2]?.args).toEqual([
-      'api',
-      'repos/acme/project/pulls/42/comments?per_page=100&sort=created&direction=desc',
-      '--hostname',
-      'github.com',
-    ]);
+    expect(fixture.invocations).toHaveLength(2);
+    expect(fixture.invocations[1]?.args.join(' ')).toContain('reviewThreads(last:$limit)');
+    expect(fixture.invocations[1]?.args.join(' ')).not.toContain('body');
     expect(fixture.invocations.every(({ command }) => command === 'gh')).toBe(true);
     expect(fixture.invocations[0]?.args.join(',')).not.toContain('body');
     expect(fixture.invocations[0]?.args.join(',')).not.toContain('comment');
     expect(JSON.stringify(received.observations)).not.toContain('pending body');
     expect(JSON.stringify(received.observations)).not.toContain(oversizedPreview);
+  });
+
+  test('normalizes unsafe external discussion authors while retaining body-free structural metadata', async () => {
+    const fixture = scriptedRunner([
+      result(
+        JSON.stringify({
+          headRefOid: HEAD_SHA,
+          mergeable: 'MERGEABLE',
+          number: 42,
+          reviewDecision: 'APPROVED',
+          state: 'OPEN',
+          statusCheckRollup: [],
+        }),
+      ),
+      discussionResult({
+        comments: [
+          { author: { login: 'unsafe\u202eauthor' }, body: 'must remain omitted', databaseId: 101 },
+        ],
+      }),
+    ]);
+    const service = makeGitHubWatcherService({ runner: fixture.runner });
+    const received = callbacks([pullRequest()]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(received.failures).toEqual([]);
+    expect(received.observations[1]?.discussion?.feedback).toEqual([
+      { author: 'unknown-author', id: 101, kind: 'issue_comment' },
+    ]);
+    expect(JSON.stringify(received.observations)).not.toContain('must remain omitted');
+    expect(JSON.stringify(received.observations)).not.toContain('\u202e');
   });
 
   test('projects content-free page-cap evidence without fetching additional discussion pages', async () => {
@@ -302,8 +326,9 @@ describe('GitHub watcher service', () => {
           { author: { login: 'bob' }, body: 'second bounded preview', databaseId: 102 },
         ],
         commentsHavePreviousPage: true,
+        inlineComments,
+        inlineCommentsHavePreviousPage: true,
       }),
-      inlineCommentsResult(inlineComments),
     ]);
     const service = makeGitHubWatcherService({ runner: fixture.runner });
     const received = callbacks([pullRequest()]);
@@ -316,7 +341,7 @@ describe('GitHub watcher service', () => {
       { oldestFetchedId: 301, surface: 'inline_review_comment' },
     ]);
     expect(received.observations[1]?.discussion?.feedback).toHaveLength(102);
-    expect(fixture.invocations).toHaveLength(3);
+    expect(fixture.invocations).toHaveLength(2);
     expect(fixture.invocations[1]?.args.join(' ')).toContain('pageInfo{hasPreviousPage}');
     expect(fixture.invocations[1]?.args.join(' ')).toContain(
       'rateLimit{cost limit remaining resetAt}',
@@ -336,7 +361,6 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult(),
-      inlineCommentsResult(),
     ]);
     const service = makeGitHubWatcherService({ runner: fixture.runner });
     const associations: PullRequestRecord[] = [];
@@ -353,7 +377,7 @@ describe('GitHub watcher service', () => {
       reviewDecision: 'unknown',
       status: 'open',
     });
-    expect(fixture.invocations).toHaveLength(3);
+    expect(fixture.invocations).toHaveLength(2);
   });
 
   test('polls immediately when started and then uses the prompt bounded cadence', async () => {
@@ -369,7 +393,6 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult(),
-      inlineCommentsResult(),
     ]);
     const service = makeGitHubWatcherService({ cadence: '1 hour', runner: fixture.runner });
     const received = callbacks([pullRequest()]);
@@ -378,7 +401,7 @@ describe('GitHub watcher service', () => {
     await Effect.runPromise(service.start(received.callbacks));
 
     expect(received.observations).toHaveLength(2);
-    expect(fixture.invocations).toHaveLength(3);
+    expect(fixture.invocations).toHaveLength(2);
     await Effect.runPromise(service.stop());
   });
 
@@ -460,7 +483,6 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult(),
-      inlineCommentsResult(),
     ]);
     const service = makeGitHubWatcherService({ runner: fixture.runner });
     const associations = [pullRequest({ lastPushedHeadSha: HEAD_SHA })];
@@ -503,7 +525,6 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult(),
-      inlineCommentsResult(),
     ]);
     const service = makeGitHubWatcherService({ cadence: '1 hour', runner: fixture.runner });
     const associations: PullRequestRecord[] = [];
@@ -517,7 +538,7 @@ describe('GitHub watcher service', () => {
     await Effect.runPromise(service.reconcile());
 
     expect(received.observations).toHaveLength(2);
-    expect(fixture.invocations).toHaveLength(3);
+    expect(fixture.invocations).toHaveLength(2);
   });
 
   test('serializes overlapping poll entry paths used by periodic polling and manual reconciliation', async () => {
@@ -565,7 +586,7 @@ describe('GitHub watcher service', () => {
     await Effect.runPromise(Fiber.join(first));
     await Effect.runPromise(Fiber.join(second));
 
-    expect(invocations).toBe(6);
+    expect(invocations).toBe(4);
     expect(maximumConcurrentCommands).toBe(1);
     expect(received.observations).toHaveLength(4);
   });
@@ -613,7 +634,6 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult(),
-      inlineCommentsResult(),
     ]);
     let invocations = 0;
     const runner: GitHubCommandRunnerShape = {
@@ -775,10 +795,10 @@ describe('GitHub watcher service', () => {
     }
   });
 
-  test('defers before ready when 62 identities leave no capacity for the mandatory trio', async () => {
+  test('defers before ready when 63 identities leave no capacity for the mandatory metadata pair', async () => {
     const fixture = scriptedRunner([rateLimitFallbackResult()]);
     const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
-    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2; index += 1) {
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 1; index += 1) {
       const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
       await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
     }
@@ -821,10 +841,9 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult(),
-      inlineCommentsResult(),
     ]);
     const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
-    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 3; index += 1) {
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 2; index += 1) {
       const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
       await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
     }
@@ -863,10 +882,10 @@ describe('GitHub watcher service', () => {
     expect(foregroundAttempts).toEqual(['GitHubResponseError']);
     expect(received.failures).toEqual([]);
     expect(received.observations).toHaveLength(2);
-    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations).toHaveLength(3);
   });
 
-  test('consumes the pre-leased inline REST placeholder after discussion decode despite concurrent fill', async () => {
+  test('uses server-selected GraphQL inline metadata without allocating REST watcher debt', async () => {
     const fixture = scriptedRunner([
       rateLimitFallbackResult(),
       result(
@@ -879,56 +898,25 @@ describe('GitHub watcher service', () => {
           statusCheckRollup: [],
         }),
       ),
-      discussionResult(),
-      inlineCommentsResult(),
+      discussionResult({ inlineComments: [{ id: 301, user: { login: 'alice' } }] }),
     ]);
     const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
-    const concurrentReservations: string[] = [];
-    const watcherMetadata: GitHubHostedMetadataShape = {
-      ...hostedMetadata,
-      accountReservedOpaqueRequest: (resource, reservationId, request) =>
-        resource !== 'rest'
-          ? hostedMetadata.accountReservedOpaqueRequest(resource, reservationId, request)
-          : Effect.gen(function* () {
-              for (let index = 0; index < 3; index += 1) {
-                const reservation = yield* hostedMetadata
-                  .reserveGraphQLRequest()
-                  .pipe(Effect.orDie);
-                yield* hostedMetadata.launchGraphQLRequest(reservation.id);
-                concurrentReservations.push(reservation.id);
-              }
-              return yield* hostedMetadata.accountReservedOpaqueRequest(
-                resource,
-                reservationId,
-                request,
-              );
-            }),
-    };
-    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS - 4; index += 1) {
-      const reservation = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
-      await Effect.runPromise(hostedMetadata.launchGraphQLRequest(reservation.id));
-    }
-    const service = makeGitHubWatcherServiceProduction({
-      hostedMetadata: watcherMetadata,
-      runner: fixture.runner,
-    });
+    const service = makeGitHubWatcherServiceProduction({ hostedMetadata, runner: fixture.runner });
     const received = callbacks([pullRequest()]);
 
     await Effect.runPromise(service.poll(received.callbacks));
 
     expect(received.failures).toEqual([]);
-    expect(received.observations).toHaveLength(2);
-    expect(fixture.invocations).toHaveLength(4);
-    expect(concurrentReservations).toHaveLength(3);
-    const finalCapacity = await Effect.runPromise(hostedMetadata.reserveGraphQLRequest());
-    expect(finalCapacity.id).toBe('request-67');
-    expect(
-      await Effect.runPromise(hostedMetadata.reserveGraphQLRequest().pipe(Effect.flip)),
-    ).toMatchObject({
-      _tag: 'GitHubResponseError',
-      operation: 'reserve hosted GitHub request',
+    expect(received.observations[1]?.discussion?.feedback).toContainEqual({
+      author: 'alice',
+      id: 301,
+      kind: 'inline_review_comment',
     });
-    await Effect.runPromise(hostedMetadata.cancelUnlaunchedGraphQLReservation(finalCapacity.id));
+    expect(fixture.invocations).toHaveLength(3);
+    expect(fixture.invocations[2]?.args.join(' ')).not.toContain('/pulls/42/comments');
+    expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
+      rest: { remaining: 5_000, source: 'rest_fallback' },
+    });
   });
 
   test('rechecks the bounded budget between review gates and defers later gates after a low GraphQL observation', async () => {
@@ -947,7 +935,6 @@ describe('GitHub watcher service', () => {
       discussionResult({
         rateLimit: { ...RATE_LIMIT, remaining: 100, resetAt: '2027-01-15T08:00:00Z' },
       }),
-      inlineCommentsResult(),
     ]);
     const service = makeGitHubWatcherServiceProduction({ runner: fixture.runner });
     const received = callbacks([
@@ -966,7 +953,7 @@ describe('GitHub watcher service', () => {
       { status: 'rate_metadata_recovered', tier: 'normal' },
       { status: 'proactive_throttle', tier: 'paused' },
     ]);
-    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations).toHaveLength(3);
     expect(fixture.invocations[0]?.args).toEqual(['api', 'rate_limit', '--hostname', 'github.com']);
     expect(fixture.invocations.some(({ args }) => args.includes('43'))).toBe(false);
   });
@@ -994,11 +981,9 @@ describe('GitHub watcher service', () => {
         ...(initialDelay === 0 ? [] : [rateLimitFallbackResult(remaining)]),
         metadata(42),
         discussionResult({ rateLimit: { ...RATE_LIMIT, remaining } }),
-        inlineCommentsResult(),
         ...(interval < 60_000 ? [] : [rateLimitFallbackResult(remaining)]),
         metadata(43),
         discussionResult({ rateLimit: { ...RATE_LIMIT, remaining } }),
-        inlineCommentsResult(),
       ]);
       const hostedMetadata = makeGitHubHostedMetadataAdapter({
         nowMillis: Effect.sync(() => now),
@@ -1044,7 +1029,6 @@ describe('GitHub watcher service', () => {
         }),
       ),
       discussionResult({ rateLimit: { ...RATE_LIMIT, remaining: 1_500 } }),
-      inlineCommentsResult(),
     ]);
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
@@ -1071,7 +1055,7 @@ describe('GitHub watcher service', () => {
     expect(received.failures).toEqual([]);
     expect(received.observations).toHaveLength(2);
     expect(originProofs).toBe(3);
-    expect(fixture.invocations).toHaveLength(4);
+    expect(fixture.invocations).toHaveLength(3);
   });
 
   test('settles each healthy watcher GraphQL reservation after its exact decoded observation', async () => {
@@ -1089,12 +1073,10 @@ describe('GitHub watcher service', () => {
       rateLimitFallbackResult(),
       metadata,
       discussionResult({ rateLimit: { ...RATE_LIMIT, resetAt: '2027-01-15T08:00:00Z' } }),
-      inlineCommentsResult(),
       metadata,
       discussionResult({
         rateLimit: { ...RATE_LIMIT, remaining: 4_998, resetAt: '2027-01-15T08:00:00Z' },
       }),
-      inlineCommentsResult(),
     ]);
     const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner: fixture.runner });
     const service = makeGitHubWatcherServiceProduction({ hostedMetadata, runner: fixture.runner });
@@ -1106,11 +1088,11 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toHaveLength(4);
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
       graphql: { remaining: 4_998, source: 'graphql' },
-      rest: { remaining: 4_998, source: 'local_estimate' },
+      rest: { remaining: 5_000, source: 'rest_fallback' },
     });
   });
 
-  test('keeps 12 healthy review gates live across repeated watcher cycles with conservative REST debt', async () => {
+  test('keeps 12 healthy metadata-only review gates live across repeated watcher cycles without REST debt', async () => {
     const gates = Array.from({ length: 12 }, (_, index) =>
       pullRequest({
         id: `pr-${index + 1}`,
@@ -1141,7 +1123,6 @@ describe('GitHub watcher service', () => {
               resetAt: '2027-01-15T08:00:00Z',
             },
           }),
-          inlineCommentsResult(),
         );
       }
     }
@@ -1157,10 +1138,10 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toHaveLength(48);
     expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
       graphql: { remaining: 4_976, source: 'graphql' },
-      rest: { remaining: 4_976, source: 'local_estimate' },
+      rest: { remaining: 5_000, source: 'rest_fallback' },
       watcherPolling: { status: 'ready', tier: 'normal' },
     });
-    expect(fixture.invocations).toHaveLength(1 + 2 * 12 * 3);
+    expect(fixture.invocations).toHaveLength(1 + 2 * 12 * 2);
   });
 
   test('cancels unlaunched watcher placeholders when an observation callback fails', async () => {
@@ -1313,8 +1294,7 @@ describe('GitHub watcher service', () => {
     ]);
     const malformedInline = scriptedRunner([
       metadata,
-      discussionResult(),
-      inlineCommentsResult([{ body: 42, id: 301, user: { login: 'alice' } }]),
+      discussionResult({ inlineComments: [{ id: 301, user: { login: 42 } }] }),
     ]);
 
     for (const fixture of [malformedGraphql, malformedInline]) {
@@ -1339,7 +1319,7 @@ describe('GitHub watcher service', () => {
       expect(received.failures[0]?.error._tag).toBe('GitHubResponseError');
     }
     expect(malformedGraphql.invocations).toHaveLength(2);
-    expect(malformedInline.invocations).toHaveLength(3);
+    expect(malformedInline.invocations).toHaveLength(2);
   });
 
   test('rejects a persisted association whose URL path number disagrees before invoking gh', async () => {

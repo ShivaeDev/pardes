@@ -216,13 +216,13 @@ function discussionFeedbackSummary(
     .slice(0, 3)
     .map(
       (item) =>
-        `${itemLabel(item)} by ${JSON.stringify(`@${truncateModelFacingText(item.author)}`)}: ${JSON.stringify(truncateModelFacingText(item.preview))}`,
+        `${itemLabel(item)} id:${item.id} by ${JSON.stringify(`@${truncateModelFacingText(item.author)}`)}`,
     );
   return boundedEventSummary([
     `[external GitHub feedback] ${label} for ${pullRequest.agentId} observed ${feedback.length} new discussion item${feedback.length === 1 ? '' : 's'}.`,
     visible.join(' | '),
     feedback.length > visible.length
-      ? `+${feedback.length - visible.length} more bounded item${feedback.length - visible.length === 1 ? '' : 's'} omitted.`
+      ? `+${feedback.length - visible.length} more metadata item${feedback.length - visible.length === 1 ? '' : 's'} omitted.`
       : '',
     'Observation only; no worker message was sent.',
   ]);

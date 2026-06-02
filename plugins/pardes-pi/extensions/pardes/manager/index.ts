@@ -131,6 +131,7 @@ export {
   ManagerInactiveError,
   type PardesError,
   PluginActivationBlockedError,
+  PullRequestNotFoundError,
   PullRequestPublicationValidationError,
   renderModelFacingGitHubCommandOperation,
   VerificationNotFoundError,
@@ -177,6 +178,7 @@ export {
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
   ManagerInputValidationError,
   type PullRequestCreateInput,
+  type PullRequestIdInput,
   type VerificationIdInput,
   type VerificationRequestInput,
 } from './inputs.ts';

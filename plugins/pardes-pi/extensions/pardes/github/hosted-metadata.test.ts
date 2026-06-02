@@ -182,17 +182,14 @@ describe('GitHub hosted metadata adapter', () => {
     if (
       first.status !== 'ready' ||
       first.graphqlReservationId === undefined ||
-      first.watcherCliReservationId === undefined ||
-      first.watcherRestReservationId === undefined
+      first.watcherCliReservationId === undefined
     )
       throw new Error('fixture watcher reservation was not admitted');
     await Effect.runPromise(
       Effect.all(
-        [
-          first.graphqlReservationId,
-          first.watcherCliReservationId,
-          first.watcherRestReservationId,
-        ].map((reservationId) => adapter.cancelUnlaunchedGraphQLReservation(reservationId)),
+        [first.graphqlReservationId, first.watcherCliReservationId].map((reservationId) =>
+          adapter.cancelUnlaunchedGraphQLReservation(reservationId),
+        ),
         { discard: true },
       ),
     );
@@ -254,17 +251,14 @@ describe('GitHub hosted metadata adapter', () => {
     if (
       reservation.status !== 'ready' ||
       reservation.graphqlReservationId === undefined ||
-      reservation.watcherCliReservationId === undefined ||
-      reservation.watcherRestReservationId === undefined
+      reservation.watcherCliReservationId === undefined
     )
       throw new Error('fixture watcher reservation was not admitted');
     await Effect.runPromise(
       Effect.all(
-        [
-          reservation.graphqlReservationId,
-          reservation.watcherCliReservationId,
-          reservation.watcherRestReservationId,
-        ].map((reservationId) => adapter.cancelUnlaunchedGraphQLReservation(reservationId)),
+        [reservation.graphqlReservationId, reservation.watcherCliReservationId].map(
+          (reservationId) => adapter.cancelUnlaunchedGraphQLReservation(reservationId),
+        ),
         { discard: true },
       ),
     );
@@ -299,17 +293,14 @@ describe('GitHub hosted metadata adapter', () => {
     if (
       reservation.status !== 'ready' ||
       reservation.graphqlReservationId === undefined ||
-      reservation.watcherCliReservationId === undefined ||
-      reservation.watcherRestReservationId === undefined
+      reservation.watcherCliReservationId === undefined
     )
       throw new Error('fixture watcher reservation was not admitted');
     await Effect.runPromise(
       Effect.all(
-        [
-          reservation.graphqlReservationId,
-          reservation.watcherCliReservationId,
-          reservation.watcherRestReservationId,
-        ].map((reservationId) => adapter.cancelUnlaunchedGraphQLReservation(reservationId)),
+        [reservation.graphqlReservationId, reservation.watcherCliReservationId].map(
+          (reservationId) => adapter.cancelUnlaunchedGraphQLReservation(reservationId),
+        ),
         { discard: true },
       ),
     );
@@ -665,14 +656,14 @@ describe('GitHub hosted metadata adapter', () => {
     );
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 3_980, source: 'local_estimate' },
-      rest: { remaining: 2_999, source: 'local_estimate' },
+      rest: { remaining: 3_000, source: 'rest_fallback' },
     });
 
     now += GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS;
     await Effect.runPromise(adapter.refreshFallback('/tmp/project'));
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       graphql: { remaining: 3_985, source: 'local_estimate' },
-      rest: { remaining: 2_999, source: 'local_estimate' },
+      rest: { remaining: 3_000, source: 'rest_fallback' },
     });
   });
 
@@ -836,7 +827,7 @@ describe('GitHub hosted metadata adapter', () => {
     expect(await Effect.runPromise(adapter.snapshot())).toMatchObject({
       fallback: 'available',
       graphql: { remaining: 3_985, source: 'local_estimate' },
-      rest: { remaining: 2_999, source: 'local_estimate' },
+      rest: { remaining: 3_000, source: 'rest_fallback' },
       watcherPolling: { effectiveRemaining: 3_000, status: 'ready', tier: 'normal' },
     });
     expect(fixture.invocations).toHaveLength(2);

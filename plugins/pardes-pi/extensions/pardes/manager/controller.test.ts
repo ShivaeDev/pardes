@@ -5605,8 +5605,6 @@ describe('manager controller', () => {
             author: 'early-reviewer',
             id: 10,
             kind: 'issue_comment',
-            preview: 'Posted before the first poll.',
-            previewTruncated: false,
           },
         ],
       }),
@@ -5617,7 +5615,7 @@ describe('manager controller', () => {
     });
     expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual(['discussion_feedback']);
     expect(controller.snapshot()?.inbox[0]?.summary).toContain(
-      'issue comment by "@early-reviewer"',
+      'issue comment id:10 by "@early-reviewer"',
     );
     expect(workers.sends).toEqual([]);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
@@ -5649,22 +5647,16 @@ describe('manager controller', () => {
           author: 'historical-user',
           id: 10,
           kind: 'issue_comment',
-          preview: 'Old issue-style comment.',
-          previewTruncated: false,
         },
         {
           author: 'historical-reviewer',
           id: 20,
           kind: 'review',
-          preview: 'Old submitted review.',
-          previewTruncated: false,
         },
         {
           author: 'historical-inline',
           id: 30,
           kind: 'inline_review_comment',
-          preview: 'Old inline comment.',
-          previewTruncated: false,
         },
       ],
     };
@@ -5686,22 +5678,16 @@ describe('manager controller', () => {
           author: 'alice',
           id: 11,
           kind: 'issue_comment',
-          preview: `Issue preview ${rawTail.slice(0, 120)}…`,
-          previewTruncated: true,
         },
         {
           author: 'bob',
           id: 21,
           kind: 'review',
-          preview: 'Submitted review preview.',
-          previewTruncated: false,
         },
         {
           author: 'carol',
           id: 31,
           kind: 'inline_review_comment',
-          preview: 'Inline review preview.',
-          previewTruncated: false,
         },
       ],
     };
@@ -5714,9 +5700,9 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.inbox.map(({ type }) => type)).toEqual(['discussion_feedback']);
     const attention = requiredValue(controller.snapshot()?.inbox[0]);
     expect(attention.summary).toContain('[external GitHub feedback] #42');
-    expect(attention.summary).toContain('issue comment by "@alice"');
-    expect(attention.summary).toContain('submitted review by "@bob"');
-    expect(attention.summary).toContain('inline review comment by "@carol"');
+    expect(attention.summary).toContain('issue comment id:11 by "@alice"');
+    expect(attention.summary).toContain('submitted review id:21 by "@bob"');
+    expect(attention.summary).toContain('inline review comment id:31 by "@carol"');
     expect(attention.summary).toContain('Observation only; no worker message was sent.');
     expect(attention.summary.length).toBeLessThanOrEqual(900);
     expect(attention.summary).not.toContain(rawTail);
@@ -5746,8 +5732,6 @@ describe('manager controller', () => {
           author: 'dana',
           id: 32,
           kind: 'inline_review_comment',
-          preview: 'New after restore.',
-          previewTruncated: false,
         },
       ],
     };
@@ -5755,7 +5739,9 @@ describe('manager controller', () => {
       restoredWatcher.observe(pullRequestId, observedPullRequest(), afterRestore),
     );
     expect(restored.snapshot()?.inbox.map(({ type }) => type)).toEqual(['discussion_feedback']);
-    expect(restored.snapshot()?.inbox[0]?.summary).toContain('inline review comment by "@dana"');
+    expect(restored.snapshot()?.inbox[0]?.summary).toContain(
+      'inline review comment id:32 by "@dana"',
+    );
     expect(restoredWorkers.sends).toEqual([]);
     expect(
       managerEvents(activationStateDir(fixture.entries)).filter(
@@ -5797,22 +5783,16 @@ describe('manager controller', () => {
           author: 'external-user',
           id: 210,
           kind: 'issue_comment',
-          preview: cappedSurfacePreview,
-          previewTruncated: false,
         },
         {
           author: 'bob',
           id: 21,
           kind: 'review',
-          preview: 'Visible submitted review.',
-          previewTruncated: false,
         },
         {
           author: 'carol',
           id: 31,
           kind: 'inline_review_comment',
-          preview: 'Visible inline review comment.',
-          previewTruncated: false,
         },
       ],
       pageCaps: [{ oldestFetchedId: 111, surface: 'issue_comment' }],
@@ -5835,8 +5815,8 @@ describe('manager controller', () => {
       'bounded GitHub discussion pagination gap on issue comments',
     );
     expect(state.inbox[0]?.summary).toContain('Affected cursors were held');
-    expect(state.inbox[1]?.summary).toContain('submitted review by "@bob"');
-    expect(state.inbox[1]?.summary).toContain('inline review comment by "@carol"');
+    expect(state.inbox[1]?.summary).toContain('submitted review id:21 by "@bob"');
+    expect(state.inbox[1]?.summary).toContain('inline review comment id:31 by "@carol"');
     expect(JSON.stringify(state)).not.toContain(cappedSurfacePreview);
     expect(workers.sends).toEqual([]);
     expect(
@@ -5883,8 +5863,6 @@ describe('manager controller', () => {
             author: 'alice',
             id: 160,
             kind: 'issue_comment',
-            preview: 'New visible overlap item.',
-            previewTruncated: false,
           },
         ],
         pageCaps: [{ oldestFetchedId: 140, surface: 'issue_comment' }],
@@ -5895,7 +5873,7 @@ describe('manager controller', () => {
     expect(state.pullRequests[pullRequestId]?.discussionCursor).toEqual({ issueCommentId: 160 });
     expect(state.pullRequests[pullRequestId]?.discussionPaginationGaps).toBeUndefined();
     expect(state.inbox.map(({ type }) => type)).toEqual(['discussion_feedback']);
-    expect(state.inbox[0]?.summary).toContain('issue comment by "@alice"');
+    expect(state.inbox[0]?.summary).toContain('issue comment id:160 by "@alice"');
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
@@ -8287,8 +8265,6 @@ describe('manager controller', () => {
               author: 'stale-reviewer',
               id: 101,
               kind: 'issue_comment',
-              preview: 'Stale completion must be dropped.',
-              previewTruncated: false,
             },
           ],
         },

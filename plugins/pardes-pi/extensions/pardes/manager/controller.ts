@@ -7,10 +7,15 @@ import {
   makeManagedWorktreeService,
 } from '../git/index.ts';
 import {
+  type GetGitHubCiLogExcerptInput,
+  type GetGitHubDiscussionBodyExcerptsInput,
+  type GitHubHostedDrilldownAssociation,
+  type GitHubHostedDrilldownShape,
   type GitHubHostedMetadataShape,
   type GitHubIntegrationHealthShape,
   type GitHubPublicationShape,
   type GitHubWatcherShape,
+  makeGitHubHostedDrilldownService,
   makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
   makeGitHubPublicationService,
@@ -66,6 +71,7 @@ import {
   InvalidManagedStateError,
   ManagerAlreadyActiveError,
   ManagerInactiveError,
+  PullRequestNotFoundError,
   WorkstreamCompletionRejectedError,
   WorkstreamNotFoundError,
 } from './errors.ts';
@@ -90,6 +96,7 @@ import {
   decodeInboxAcknowledgeInput,
   decodeInboxGetInput,
   decodePullRequestCreateInput,
+  decodePullRequestIdInput,
   decodeVerificationIdInput,
   decodeVerificationRefreshInput,
   decodeVerificationRequestInput,
@@ -280,6 +287,7 @@ export interface ManagerControllerOptions {
   readonly github?: GitHubPublicationShape;
   readonly githubWatcher?: GitHubWatcherShape;
   readonly githubIntegrationHealth?: GitHubIntegrationHealthShape;
+  readonly githubHostedDrilldown?: GitHubHostedDrilldownShape;
   readonly githubRateLimitSymptomOwnership?: GitHubRateLimitSymptomOwnershipPort;
   readonly makeWorkers?: (
     onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
@@ -345,6 +353,7 @@ export class ManagerController {
   private readonly githubHostedMetadata: GitHubHostedMetadataShape;
   private readonly githubWatcher: GitHubWatcherShape;
   private readonly githubIntegrationHealth: GitHubIntegrationHealthShape;
+  private readonly githubHostedDrilldown: GitHubHostedDrilldownShape;
   private readonly githubRateLimitSymptomOwnership: GitHubRateLimitSymptomOwnershipPort | undefined;
   private readonly workers: GuardedWorkerSupervisorShape;
   private readonly presentation: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
@@ -381,6 +390,9 @@ export class ManagerController {
     this.githubIntegrationHealth =
       options.githubIntegrationHealth ??
       makeGitHubIntegrationHealthService({ hostedMetadata: githubHostedMetadata });
+    this.githubHostedDrilldown =
+      options.githubHostedDrilldown ??
+      makeGitHubHostedDrilldownService({ hostedMetadata: githubHostedMetadata });
     this.githubRateLimitSymptomOwnership = options.githubRateLimitSymptomOwnership;
     this.presentation = options.presentation ?? makeManagerPresentation();
     this.compactionSafetyScheduler =
@@ -591,6 +603,66 @@ export class ManagerController {
             ? {}
             : { watcherFailure: pullRequest.watcherFailure }),
         })),
+    });
+  });
+
+  private readonly hostedDrilldownAssociation = Effect.fnUntraced(function* (
+    this: ManagerController,
+    rawPullRequestId: string,
+  ) {
+    const { pullRequestId } = yield* decodePullRequestIdInput({ pullRequestId: rawPullRequestId });
+    const active = yield* this.requireActive();
+    const pullRequest = active.state.pullRequests[pullRequestId];
+    if (!pullRequest) return yield* new PullRequestNotFoundError({ pullRequestId });
+    return {
+      active,
+      pullRequest: {
+        id: pullRequest.id,
+        url: pullRequest.url,
+        ...(pullRequest.number === undefined ? {} : { number: pullRequest.number }),
+        ...(pullRequest.lastPushedHeadSha === undefined
+          ? {}
+          : { lastPushedHeadSha: pullRequest.lastPushedHeadSha }),
+      } satisfies GitHubHostedDrilldownAssociation,
+    };
+  });
+
+  readonly inspectPullRequestFailingChecks = Effect.fnUntraced(function* (
+    this: ManagerController,
+    input: { readonly pullRequestId: string },
+  ) {
+    const { active, pullRequest } = yield* this.hostedDrilldownAssociation(input.pullRequestId);
+    return yield* this.githubHostedDrilldown.inspectFailingChecks({
+      cwd: active.repo.primaryCheckout,
+      pullRequest,
+    });
+  });
+
+  readonly getPullRequestCiLogExcerpt = Effect.fnUntraced(function* (
+    this: ManagerController,
+    input: Omit<GetGitHubCiLogExcerptInput, 'cwd' | 'pullRequest'> & {
+      readonly pullRequestId: string;
+    },
+  ) {
+    const { active, pullRequest } = yield* this.hostedDrilldownAssociation(input.pullRequestId);
+    return yield* this.githubHostedDrilldown.getCiLogExcerpt({
+      ...input,
+      cwd: active.repo.primaryCheckout,
+      pullRequest,
+    });
+  });
+
+  readonly getPullRequestDiscussionBodyExcerpts = Effect.fnUntraced(function* (
+    this: ManagerController,
+    input: Omit<GetGitHubDiscussionBodyExcerptsInput, 'cwd' | 'pullRequest'> & {
+      readonly pullRequestId: string;
+    },
+  ) {
+    const { active, pullRequest } = yield* this.hostedDrilldownAssociation(input.pullRequestId);
+    return yield* this.githubHostedDrilldown.getDiscussionBodyExcerpts({
+      ...input,
+      cwd: active.repo.primaryCheckout,
+      pullRequest,
     });
   });
 

@@ -65,6 +65,11 @@ export const InboxGetInputSchema = Schema.Struct({
 });
 export type InboxGetInput = typeof InboxGetInputSchema.Type;
 
+export const PullRequestIdInputSchema = Schema.Struct({
+  pullRequestId: ManagerInputIdSchema,
+});
+export type PullRequestIdInput = typeof PullRequestIdInputSchema.Type;
+
 export const InboxAcknowledgeInputSchema = Schema.Struct({
   cursor: Schema.optionalKey(ManagerInputIdSchema),
 });
@@ -177,6 +182,8 @@ export const decodeInboxGetInput = (input: unknown) =>
   decodeManagerInput('inbox_get', InboxGetInputSchema, input);
 export const decodeInboxAcknowledgeInput = (input: unknown) =>
   decodeManagerInput('inbox_acknowledge', InboxAcknowledgeInputSchema, input);
+export const decodePullRequestIdInput = (input: unknown) =>
+  decodeManagerInput('pull_request_id', PullRequestIdInputSchema, input);
 export const decodeAgentIdInput = (input: unknown) =>
   decodeManagerInput('agent_id', AgentIdInputSchema, input);
 export const decodeWorkstreamCreateInput = (input: unknown) =>

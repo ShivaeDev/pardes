@@ -4,6 +4,7 @@ export {
   GitHubResponseError,
   GitHubSyncInputError,
   GitHubWatcherInputError,
+  GitHubWatcherTimeoutError,
 } from './errors.ts';
 export {
   DEFAULT_GITHUB_INTEGRATION_HEALTH_COMMAND_TIMEOUT,
@@ -78,6 +79,7 @@ export {
 } from './schemas.ts';
 export {
   DEFAULT_GITHUB_WATCHER_CADENCE,
+  DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT,
   derivePullRequestTransitions,
   GitHubWatcher,
   type GitHubWatcherCallbacks,
@@ -95,3 +97,11 @@ export {
   type PullRequestWatcherObservation,
   type PullRequestWatcherTransition,
 } from './watcher.ts';
+export {
+  classifyGitHubWatcherFailure,
+  GITHUB_WATCHER_DIAGNOSTIC_SCAN_MAX_CHARS,
+  GITHUB_WATCHER_FAILURE_SUMMARIES,
+  type GitHubWatcherFailureDiagnostic,
+  GitHubWatcherFailureDiagnosticSchema,
+  type GitHubWatcherFailureKind,
+} from './watcher-diagnostics.ts';

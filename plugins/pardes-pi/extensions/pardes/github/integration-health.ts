@@ -15,6 +15,7 @@ import {
   makeExecFileGitHubCommandRunner,
   makeGitHubCli,
 } from './transport.ts';
+import type { GitHubWatcherFailureDiagnostic } from './watcher-diagnostics.ts';
 
 const ADVERTISED_DEFAULT_BRANCH_GRAPHQL_QUERY =
   'query($owner:String!,$repo:String!){repository(owner:$owner,name:$repo){defaultBranchRef{name target{oid}}}}';
@@ -90,6 +91,7 @@ export interface GitHubPullRequestIntegrationHealthAssociation {
   readonly number?: number;
   readonly lastPushedHeadSha?: string;
   readonly headBranch?: string;
+  readonly watcherFailure?: GitHubWatcherFailureDiagnostic;
 }
 
 export interface GitHubPullRequestIntegrationHealth {
@@ -100,6 +102,7 @@ export interface GitHubPullRequestIntegrationHealth {
   readonly pullRequestHead: GitHubPullRequestHeadRelation;
   readonly hostedChecks: GitHubHostedChecksObservation;
   readonly sharedFailingWorkflowCount: number;
+  readonly watcherFailure?: GitHubWatcherFailureDiagnostic;
 }
 
 export interface GitHubIntegrationHealthInspection {
@@ -261,6 +264,9 @@ function unavailablePullRequest(
     hostedChecks: { availability: 'unavailable', issue: value },
     pullRequestHead: 'unavailable',
     sharedFailingWorkflowCount: 0,
+    ...(Option.isNone(association) || association.value.watcherFailure === undefined
+      ? {}
+      : { watcherFailure: association.value.watcherFailure }),
   };
 }
 
@@ -419,6 +425,9 @@ export function makeGitHubIntegrationHealthService(
       observedHeadSha: pullRequest.headRefOid,
       pullRequestHead,
       sharedFailingWorkflowCount: 0,
+      ...(association.watcherFailure === undefined
+        ? {}
+        : { watcherFailure: association.watcherFailure }),
     } satisfies GitHubPullRequestIntegrationHealth;
     return canHintSharedFailure(defaultBranch.projection, projected)
       ? {

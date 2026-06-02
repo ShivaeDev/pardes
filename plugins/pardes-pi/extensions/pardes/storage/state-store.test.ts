@@ -407,7 +407,7 @@ describe('filesystem state store', () => {
     expect(restored.verifications[transitional.id]).not.toHaveProperty('staleReason');
 
     await Effect.runPromise(
-      store.mutate((current) => Effect.succeed([undefined, current] as const)),
+      store.mutate((current) => Effect.succeed([undefined, { ...current }] as const)),
     );
     const persisted = JSON.parse(await readFile(store.statePath, 'utf8')) as {
       verifications: Record<string, Record<string, unknown>>;
@@ -823,6 +823,22 @@ describe('filesystem state store', () => {
 
     expect((await Effect.runPromise(store.load())).inbox).toEqual([event]);
     expect(await readFile(store.eventPath, 'utf8')).toBe(`${JSON.stringify(event)}\n`);
+  });
+
+  test('skips exact-reference no-op mutations without rewriting or incrementing revision', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    const before = await readFile(store.statePath, 'utf8');
+
+    expect(
+      await Effect.runPromise(
+        store.mutate((state) => Effect.succeed(['unchanged', state] as const)),
+      ),
+    ).toBe('unchanged');
+
+    expect(await readFile(store.statePath, 'utf8')).toBe(before);
+    expect((await Effect.runPromise(store.load())).revision).toBe(0);
   });
 
   test('serializes concurrent mutations and increments revisions', async () => {

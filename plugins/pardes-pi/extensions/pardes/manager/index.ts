@@ -58,6 +58,8 @@ export {
   type AgentSendResult,
   type AgentSpawnInput,
   type AgentStatus,
+  type GitHubRateLimitSymptom,
+  type GitHubRateLimitSymptomOwnershipPort,
   type InboxAcknowledgement,
   type InboxAcknowledgementReason,
   MANAGER_COMPACTION_SAFETY_EXPIRY_MS,

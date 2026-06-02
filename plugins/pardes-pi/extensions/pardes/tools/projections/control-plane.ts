@@ -80,8 +80,8 @@ function summaryAttentionRows(
     kind: 'inbox',
     line:
       event.presentationBlocked === true
-        ? `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · software refinement pending; read: inbox_get({ eventId }); do not acknowledge`
-        : `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · read: inbox_get({ eventId })`,
+        ? `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · software refinement pending; judge first: inbox_get({ eventId }); do not acknowledge`
+        : `! inbox ${summaryAttentionToken(event.id, 'redacted-event')} [${summaryAttentionToken(event.type, 'redacted-type')}] · judge first: inbox_get({ eventId })`,
   }));
   const reviews: ReadonlyArray<SummaryAttentionRow> = Object.values(state.pullRequests)
     .filter(pullRequestNeedsAttention)

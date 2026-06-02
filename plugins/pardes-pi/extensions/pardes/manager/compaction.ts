@@ -9,8 +9,9 @@ import type { GitHubDiscussionSurface } from '../github/index.ts';
 import type { WorkerRuntimeSnapshot } from '../worker-runtime/index.ts';
 import { effectiveAgentStatus, hasAgentWarning, pullRequestNeedsAttention } from './attention.ts';
 import type { ManagerState, PullRequestRecord, WorkstreamStatus } from './domain.ts';
+import { MANAGER_COMPACTION_COORDINATING_GUIDANCE } from './guidance/lifecycle.ts';
 
-export const MANAGER_COMPACTION_PROJECTION_SCHEMA_VERSION = 1;
+export const MANAGER_COMPACTION_PROJECTION_SCHEMA_VERSION = 2;
 export const MANAGER_COMPACTION_PROJECTION_MAX_CHARS = 24_000;
 export const MANAGER_COMPACTION_FALLBACK_MAX_CHARS = 1_200;
 export const MANAGER_COMPACTION_FALLBACK_REASON_MAX_CHARS = 640;
@@ -91,6 +92,7 @@ export interface ManagerCompactionProjection {
   readonly managerId: string;
   readonly revision: number;
   readonly repository: { readonly key: string };
+  readonly operatingGuidance: ReadonlyArray<string>;
   readonly workstreams: {
     readonly counts: Readonly<Record<WorkstreamStatus, number>>;
     readonly active: ReadonlyArray<ManagerCompactionWorkstreamProjection>;
@@ -355,6 +357,7 @@ export function projectManagerCompactionState(
       omittedCount: Math.max(0, openReviewGates.length - visibleReviewGates.length),
       totalCount: openReviewGates.length,
     },
+    operatingGuidance: MANAGER_COMPACTION_COORDINATING_GUIDANCE,
     repository: { key: boundInline(state.repo.key, MAX_ID_CHARS) },
     revision: state.revision,
     schemaVersion: MANAGER_COMPACTION_PROJECTION_SCHEMA_VERSION,
@@ -378,11 +381,16 @@ export function projectManagerCompactionState(
   };
 }
 
-/** Drop a former Pardes snapshot before iterative update so snapshots cannot accumulate. */
+/** Drop only the final Pardes snapshot so narrative lookalikes survive schema upgrades. */
 export function stripPardesCompactionProjection(summary: string): string {
-  const suffixStart = summary.lastIndexOf(`\n\n${PROJECTION_OPEN}\n`);
-  if (suffixStart === -1 || !summary.endsWith(`\n${PROJECTION_CLOSE}`)) return summary;
-  return summary.slice(0, suffixStart).trimEnd();
+  const suffixStart = summary.lastIndexOf(`\n\n<${PROJECTION_TAG} schemaVersion="`);
+  if (suffixStart === -1) return summary;
+  const suffix = summary.slice(suffixStart);
+  return /^\n\n<pardes-coordinating-state schemaVersion="\d+">\n[\s\S]*\n<\/pardes-coordinating-state>$/.test(
+    suffix,
+  )
+    ? summary.slice(0, suffixStart).trimEnd()
+    : summary;
 }
 
 /** Drop Pi's default trailing cumulative file XML; manager coordination uses authoritative Pardes state instead. */

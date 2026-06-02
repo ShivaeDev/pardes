@@ -6209,7 +6209,15 @@ describe('manager controller', () => {
       summary: 'GitHub CLI authentication likely failed; run gh auth status.',
     });
     await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
+    const escalatedRevision = controller.snapshot()?.revision;
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeDefined();
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
+      kind: 'rate_limit_likely',
+      summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
+    });
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    await Effect.runPromise(watcher.fail(pullRequestId, repo));
+    expect(controller.snapshot()?.revision).toBe(escalatedRevision);
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
       kind: 'rate_limit_likely',
       summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
@@ -6220,13 +6228,17 @@ describe('manager controller', () => {
     expect(
       controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed')?.summary,
     ).toContain(
-      'watcher failed [command_failed]: GitHub CLI command failed; check gh connectivity.',
+      'watcher failed [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later.',
     );
     expect(
       controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed')?.summary,
     ).not.toContain('fixture outage');
     expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
     expect(fixture.messages).toHaveLength(1);
+    expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
+      'watcher failed [command_failed]',
+    );
+    expect(JSON.stringify(fixture.messages[0]?.message)).not.toContain('rate_limit_likely');
     const eventLogBeforeClear = readFileSync(
       join(activationStateDir(fixture.entries), 'events.jsonl'),
       'utf8',

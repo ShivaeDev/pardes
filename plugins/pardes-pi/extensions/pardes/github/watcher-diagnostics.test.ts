@@ -2,11 +2,13 @@ import { Option, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
   classifyGitHubWatcherFailure,
+  GITHUB_WATCHER_FAILURE_RANKS,
   GitHubCommandError,
   GitHubResponseError,
   GitHubWatcherFailureDiagnosticSchema,
   GitHubWatcherInputError,
   GitHubWatcherTimeoutError,
+  isGitHubWatcherFailureEscalation,
 } from './index.ts';
 
 function commandFailure(cause: unknown) {
@@ -56,6 +58,30 @@ describe('GitHub watcher diagnostics', () => {
     expect(classifyGitHubWatcherFailure(new Error('untyped'))).toMatchObject({
       kind: 'unexpected_error',
     });
+  });
+
+  test('defines one explicit bounded monotonic escalation policy', () => {
+    expect(GITHUB_WATCHER_FAILURE_RANKS).toEqual({
+      association_invalid: 2,
+      authentication_likely: 3,
+      command_failed: 1,
+      command_timed_out: 2,
+      metadata_invalid: 2,
+      rate_limit_likely: 4,
+      unexpected_error: 0,
+      unexpected_typed_error: 0,
+    });
+    const classify = (cause: unknown) => classifyGitHubWatcherFailure(commandFailure(cause));
+    const command = classify('network unavailable');
+    const auth = classify({ status: 401 });
+    const rate = classify({ statusCode: 429 });
+
+    expect(isGitHubWatcherFailureEscalation(undefined, command)).toBe(true);
+    expect(isGitHubWatcherFailureEscalation(command, auth)).toBe(true);
+    expect(isGitHubWatcherFailureEscalation(auth, rate)).toBe(true);
+    expect(isGitHubWatcherFailureEscalation(rate, auth)).toBe(false);
+    expect(isGitHubWatcherFailureEscalation(rate, command)).toBe(false);
+    expect(isGitHubWatcherFailureEscalation(rate, rate)).toBe(false);
   });
 
   test('degrades throwing getters and proxies without letting unknown diagnostics escape reduction', () => {

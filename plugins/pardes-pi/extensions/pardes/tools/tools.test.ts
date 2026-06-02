@@ -2216,7 +2216,7 @@ describe('Pardes model-visible tools', () => {
         id: 'event-watcher',
         pullRequestId: 'pr-42',
         summary:
-          '#42 watcher failed [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
+          '#42 watcher failed [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later. Raw CLI diagnostics omitted.',
         type: 'watcher_failed',
       },
     };
@@ -2289,7 +2289,7 @@ describe('Pardes model-visible tools', () => {
     );
     expect(watcher.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
     expect(watcher.content[0]?.text).toContain(
-      'GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
+      'GitHub API rate limit likely affected watcher inspection; retry later. Raw CLI diagnostics omitted.',
     );
     expect(watcher.content[0]?.text).not.toContain('stderr');
     expect(watcher.details).toMatchObject({

@@ -6,6 +6,7 @@ import {
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
   type GitHubWatcherCallbacks,
+  isGitHubWatcherFailureEscalation,
   type PullRequestDiscussionFeedback,
   type PullRequestDiscussionPageCap,
   type PullRequestDiscussionSnapshot,
@@ -64,6 +65,24 @@ function makeEvent(
   association: ManagerEventAssociation = {},
 ): ManagerEvent {
   return { createdAt, id: randomUUID(), summary, type, ...association };
+}
+
+function updatePendingWatcherFailureAttention(
+  inbox: ReadonlyArray<ManagerEvent>,
+  pullRequest: PullRequestRecord,
+  summary: string,
+): ReadonlyArray<ManagerEvent> {
+  if (pullRequest.watcherFailedAt === undefined) return inbox;
+  for (let index = inbox.length - 1; index >= 0; index--) {
+    const event = inbox[index];
+    if (
+      event?.type === 'watcher_failed' &&
+      event.pullRequestId === pullRequest.id &&
+      event.createdAt === pullRequest.watcherFailedAt
+    )
+      return inbox.map((row, rowIndex) => (rowIndex === index ? { ...row, summary } : row));
+  }
+  return inbox;
 }
 
 function pullRequestObservationsEqual(
@@ -808,7 +827,10 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     )
       return;
     const diagnostic = classifyGitHubWatcherFailure(event.error);
-    if (known.watcherFailedAt !== undefined && known.watcherFailure?.kind === diagnostic.kind)
+    if (
+      known.watcherFailedAt !== undefined &&
+      !isGitHubWatcherFailureEscalation(known.watcherFailure, diagnostic)
+    )
       return;
     const timestamp = yield* nowIso;
     const attention = makeEvent(
@@ -824,7 +846,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         !watcherEventMatchesAssociation(pullRequest, event.expectedHeadSha) ||
         pullRequest.status !== 'open' ||
         (pullRequest.watcherFailedAt !== undefined &&
-          pullRequest.watcherFailure?.kind === diagnostic.kind)
+          !isGitHubWatcherFailureEscalation(pullRequest.watcherFailure, diagnostic))
       )
         return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
       const enqueued = pullRequest.watcherFailedAt === undefined;
@@ -832,7 +854,11 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         { changed: true, enqueued },
         {
           ...state,
-          inbox: enqueued ? [...state.inbox, attention] : state.inbox,
+          // An already-delivered wake remains bounded onset evidence. Current
+          // inbox drill-down and review/health projections carry escalation.
+          inbox: enqueued
+            ? [...state.inbox, attention]
+            : updatePendingWatcherFailureAttention(state.inbox, pullRequest, attention.summary),
           pullRequests: {
             ...state.pullRequests,
             [pullRequest.id]: {

@@ -30,6 +30,63 @@ function compactJwt(signature: 'signed' | 'unsecured'): string {
   }`;
 }
 
+const AMBIGUOUS_SECRET_EXCERPT_MARKER =
+  '[REDACTED EXCERPT: ambiguous secret-bearing serialization]';
+
+function ambiguousSecretSources() {
+  const tokenKey = `to${'ken'}`;
+  const passwordKey = `pass${'word'}`;
+  const escapedQuote = `\\${'"'}`;
+  const tripleQuote = ['"', '"', '"'].join('');
+  const nestedSecret = ['escaped', 'json', 'tail'].join('-');
+  const nestedToken = ['escaped', 'token', 'tail'].join('-');
+  const deeplyNestedSecret = ['deeply', 'escaped', 'json', 'tail'].join('-');
+  const deeplyNestedToken = ['deeply', 'escaped', 'token', 'tail'].join('-');
+  return [
+    {
+      label: 'YAML block scalar',
+      source: `${tokenKey}: |\n  yaml-block-tail`,
+      tail: 'yaml-block-tail',
+    },
+    {
+      label: 'YAML folded scalar',
+      source: `${passwordKey}: >-\n  yaml-folded-tail`,
+      tail: 'yaml-folded-tail',
+    },
+    {
+      label: 'TOML triple-quoted scalar',
+      source: `${tokenKey} = ${tripleQuote}\nmultiline-tail\n${tripleQuote}`,
+      tail: 'multiline-tail',
+    },
+    {
+      label: 'incomplete escaped assignment',
+      source: `{${escapedQuote}client_${'secret'}${escapedQuote}:${escapedQuote}terminal-tail`,
+      tail: 'terminal-tail',
+    },
+    {
+      label: 'escaped unquoted assignment',
+      source: `{${escapedQuote}${tokenKey}${escapedQuote}:unquoted-tail}`,
+      tail: 'unquoted-tail',
+    },
+    {
+      label: 'nested serialized assignment',
+      source: JSON.stringify({
+        message: JSON.stringify({ client_secret: nestedSecret, token: nestedToken }),
+      }),
+      tail: nestedSecret,
+    },
+    {
+      label: 'deeply nested serialized assignment',
+      source: JSON.stringify({
+        message: JSON.stringify({
+          message: JSON.stringify({ client_secret: deeplyNestedSecret, token: deeplyNestedToken }),
+        }),
+      }),
+      tail: deeplyNestedSecret,
+    },
+  ] as const;
+}
+
 function association(
   overrides: Partial<{ readonly url: string; readonly lastPushedHeadSha: string }> = {},
 ) {
@@ -217,14 +274,51 @@ describe('GitHub hosted drill-down service', () => {
 
   test('applies shared authorization and quoted-key redaction before CI excerpt pagination', async () => {
     const authorization = `Author${'ization'}`;
+    const tokenKey = `to${'ken'}`;
     const longCredential = 'x'.repeat(400);
     const signedShortJwt = compactJwt('signed');
     const fixture = scriptedRunner([
       checksResult(),
       result(
-        `${authorization}: Basic ${longCredential}\n${JSON.stringify({ authorization: 'Basic json-auth-tail', client_secret: 'json-ci-secret', password: 'json ci tail' })}\n${signedShortJwt}\nvisible`,
+        `${authorization}: Basic ${longCredential}\n${JSON.stringify({ authorization: 'Basic json-auth-tail', client_secret: 'json-ci-secret', password: 'json ci tail' })}\n${tokenKey}=unquoted-tail with-ambiguous-suffix\n${signedShortJwt}\nBearer tiny\nvisible`,
       ),
     ]);
+
+    const excerpt = await Effect.runPromise(
+      makeGitHubHostedDrilldownService({ runner: fixture.runner }).getCiLogExcerpt({
+        cwd: '/tmp/project',
+        jobId: 8001,
+        maxChars: 400,
+        pullRequest: association(),
+        runId: 7001,
+      }),
+    );
+
+    expect(excerpt.excerpt).toContain('Authorization: [REDACTED]');
+    expect(excerpt.excerpt).toContain('"authorization":[REDACTED]');
+    expect(excerpt.excerpt).toContain('"client_secret":[REDACTED]');
+    expect(excerpt.excerpt).toContain('"password":[REDACTED]');
+    expect(excerpt.excerpt).toContain('[REDACTED JWT]');
+    expect(excerpt.excerpt).toContain(`${tokenKey}=[REDACTED]`);
+    expect(excerpt.excerpt).not.toContain('with-ambiguous-suffix');
+    expect(excerpt.excerpt).toContain('Bearer [REDACTED]');
+    expect(excerpt.excerpt).not.toContain('Bearer tiny');
+    expect(excerpt.excerpt).toContain('visible');
+    expect(excerpt.hasMore).toBe(false);
+    expect(excerpt.excerpt).not.toContain(longCredential);
+    expect(excerpt.excerpt).not.toContain('json-auth-tail');
+    expect(excerpt.excerpt).not.toContain('json-ci-secret');
+    expect(excerpt.excerpt).not.toContain('json ci tail');
+    expect(excerpt.excerpt).not.toContain(signedShortJwt);
+  });
+
+  test.each(
+    ambiguousSecretSources(),
+  )('omits ambiguous $label from explicit CI excerpts before pagination', async ({
+    source,
+    tail,
+  }) => {
+    const fixture = scriptedRunner([checksResult(), result(`${source}\nvisible-after-secret`)]);
 
     const excerpt = await Effect.runPromise(
       makeGitHubHostedDrilldownService({ runner: fixture.runner }).getCiLogExcerpt({
@@ -236,18 +330,10 @@ describe('GitHub hosted drill-down service', () => {
       }),
     );
 
-    expect(excerpt.excerpt).toContain('Authorization: [REDACTED]');
-    expect(excerpt.excerpt).toContain('"authorization":[REDACTED]');
-    expect(excerpt.excerpt).toContain('"client_secret":[REDACTED]');
-    expect(excerpt.excerpt).toContain('"password":[REDACTED]');
-    expect(excerpt.excerpt).toContain('[REDACTED JWT]');
-    expect(excerpt.excerpt).toContain('visible');
+    expect(excerpt.excerpt).toBe(AMBIGUOUS_SECRET_EXCERPT_MARKER);
     expect(excerpt.hasMore).toBe(false);
-    expect(excerpt.excerpt).not.toContain(longCredential);
-    expect(excerpt.excerpt).not.toContain('json-auth-tail');
-    expect(excerpt.excerpt).not.toContain('json-ci-secret');
-    expect(excerpt.excerpt).not.toContain('json ci tail');
-    expect(excerpt.excerpt).not.toContain(signedShortJwt);
+    expect(excerpt.excerpt).not.toContain(tail);
+    expect(excerpt.excerpt).not.toContain('visible-after-secret');
   });
 
   test('rejects an arbitrary run/job before requesting a hosted log body', async () => {
@@ -275,18 +361,6 @@ describe('GitHub hosted drill-down service', () => {
     const authorization = `Author${'ization'}`;
     const authorizationLower = authorization.toLowerCase();
     const quotedYamlKey = `'api_${'key'}': 'yaml-tail-marker'`;
-    const nestedSecret = ['escaped', 'json', 'tail'].join('-');
-    const nestedToken = ['escaped', 'token', 'tail'].join('-');
-    const deeplyNestedSecret = ['deeply', 'escaped', 'json', 'tail'].join('-');
-    const deeplyNestedToken = ['deeply', 'escaped', 'token', 'tail'].join('-');
-    const nested = JSON.stringify({
-      message: JSON.stringify({ client_secret: nestedSecret, token: nestedToken }),
-    });
-    const deeplyNested = JSON.stringify({
-      message: JSON.stringify({
-        message: JSON.stringify({ client_secret: deeplyNestedSecret, token: deeplyNestedToken }),
-      }),
-    });
     const signedShortJwt = compactJwt('signed');
     // Unsecured compact JWTs carry an empty signature; redact conservatively rather than project them.
     const unsecuredJwt = compactJwt('unsecured');
@@ -295,7 +369,7 @@ describe('GitHub hosted drill-down service', () => {
     const items = Array.from({ length: 10 }, (_, index) => ({
       body:
         index === 0
-          ? `client_secret=do-not-leak password="alpha beta" api_key='gamma delta' token=${secret} aws=${temporaryAwsKey} marker\u061cleft\n${JSON.stringify({ client_secret: 'json-do-not-leak', password: 'json alpha beta', token: 'generic-json-token' })}\n${quotedYamlKey}\n${nested}\n${deeplyNested}\n${signedShortJwt}\n${unsecuredJwt}\n${authorization}: Basic basic-tail-marker\n${authorizationLower}=token opaque-tail-marker\n${authorizationLower}: Digest username="admin", response="digest-tail-marker"\n${authorization}: Bearer bearer-tail-marker\n${authorization}: Custom unknown-tail-marker\n${'x'.repeat(5_000)}`
+          ? `marker\u061cleft\nclient_secret=do-not-leak\npassword="alpha beta"\napi_key='gamma delta'\ntoken=${secret}\naws=${temporaryAwsKey}\n${JSON.stringify({ client_secret: 'json-do-not-leak', password: 'json alpha beta', token: 'generic-json-token' })}\n${quotedYamlKey}\n${signedShortJwt}\n${unsecuredJwt}\nBearer tiny\n${authorization}: Basic basic-tail-marker\n${authorizationLower}=token opaque-tail-marker\n${authorizationLower}: Digest username="admin", response="digest-tail-marker"\n${authorization}: Bearer bearer-tail-marker\n${authorization}: Custom unknown-tail-marker\n${'x'.repeat(5_000)}`
           : `body-${index}`,
       id: index + 1,
       user: index === 0 ? { login: 'alice' } : index === 1 ? { login: 'evil\u202e' } : null,
@@ -347,13 +421,11 @@ describe('GitHub hosted drill-down service', () => {
     expect(page.items[0]?.excerpt).not.toContain('json-do-not-leak');
     expect(page.items[0]?.excerpt).not.toContain('json alpha beta');
     expect(page.items[0]?.excerpt).not.toContain('generic-json-token');
-    expect(page.items[0]?.excerpt).not.toContain(nestedSecret);
-    expect(page.items[0]?.excerpt).not.toContain(nestedToken);
-    expect(page.items[0]?.excerpt).not.toContain(deeplyNestedSecret);
-    expect(page.items[0]?.excerpt).not.toContain(deeplyNestedToken);
     expect(page.items[0]?.excerpt).not.toContain(signedShortJwt);
     expect(page.items[0]?.excerpt).not.toContain(unsecuredJwt);
     expect(page.items[0]?.excerpt.match(/\[REDACTED JWT\]/g)).toHaveLength(2);
+    expect(page.items[0]?.excerpt).not.toContain('Bearer tiny');
+    expect(page.items[0]?.excerpt).toContain('Bearer [REDACTED]');
     expect(page.items[0]?.excerpt).not.toContain('basic-tail-marker');
     expect(page.items[0]?.excerpt).not.toContain('yaml-tail-marker');
     expect(page.items[0]?.excerpt).not.toContain('opaque-tail-marker');
@@ -371,6 +443,31 @@ describe('GitHub hosted drill-down service', () => {
       '--hostname',
       'github.com',
     ]);
+  });
+
+  test.each(
+    ambiguousSecretSources(),
+  )('omits ambiguous $label from explicit PR-level discussion excerpts before pagination', async ({
+    source,
+    tail,
+  }) => {
+    const fixture = scriptedRunner([
+      result(JSON.stringify([{ body: `${source}\nvisible-after-secret`, id: 1, user: null }])),
+    ]);
+
+    const page = await Effect.runPromise(
+      makeGitHubHostedDrilldownService({ runner: fixture.runner }).getDiscussionBodyExcerpts({
+        cwd: '/tmp/project',
+        pullRequest: association(),
+        surface: 'issue_comment',
+      }),
+    );
+
+    expect(page.items[0]?.excerpt).toBe(AMBIGUOUS_SECRET_EXCERPT_MARKER);
+    expect(page.items[0]?.hasMore).toBe(false);
+    expect(page.items[0]?.excerpt).not.toContain(tail);
+    expect(page.items[0]?.excerpt).not.toContain('visible-after-secret');
+    expect(page.provenance.scope).toBe('pull_request_level_not_commit_bound');
   });
 
   test('labels discussion bodies as PR-level rather than commit-bound when no audited SHA is available', async () => {

@@ -1,7 +1,8 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
@@ -25,6 +26,9 @@ const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Git diagnostics are rendered inert before model-visible display.
 const GIT_DIAGNOSTIC_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const GIT_DIAGNOSTIC_MAX_CHARS = 1_000;
+const GIT_HEAD_MAX_CHARS = 1_000;
+const GIT_INSPECTION_STDERR_MAX_BYTES = 64 * 1_024;
+export const GIT_INSPECTION_STDOUT_MAX_BYTES = 16 * 1_024 * 1_024;
 export const VERIFIER_CHANGED_PATHS_MAX_CHARS = 12_000;
 
 function nearestExistingAncestor(path: string): string {
@@ -86,31 +90,65 @@ function text(text: string, details: unknown) {
   return { content: [{ text, type: 'text' as const }], details };
 }
 
-export function boundedVerifierPathRows(output: string): {
+interface GitRowEvidence {
   readonly omitted: number;
   readonly output: string;
   readonly shown: number;
   readonly total: number;
   readonly truncated: boolean;
+}
+
+function gitRowCollector(maxChars: number): {
+  readonly append: (chunk: string) => void;
+  readonly finish: () => GitRowEvidence;
 } {
-  const rows = output === '' ? [] : output.replace(/\n$/, '').split('\n');
-  const shownRows: string[] = [];
+  let pending = '';
+  let retaining = true;
   let shownChars = 0;
-  for (const row of rows) {
+  let total = 0;
+  const shownRows: string[] = [];
+  const accept = (row: string) => {
+    total += 1;
+    if (!retaining) return;
     const nextChars = shownChars + (shownRows.length === 0 ? 0 : 1) + row.length;
-    if (nextChars > VERIFIER_CHANGED_PATHS_MAX_CHARS) break;
+    if (nextChars > maxChars) {
+      retaining = false;
+      return;
+    }
     shownRows.push(row);
     shownChars = nextChars;
-  }
-  const shown = shownRows.length;
-  const omitted = rows.length - shown;
-  return {
-    omitted,
-    output: shownRows.join('\n'),
-    shown,
-    total: rows.length,
-    truncated: omitted > 0,
   };
+  return {
+    append(chunk) {
+      pending += chunk;
+      let newline = pending.indexOf('\n');
+      while (newline !== -1) {
+        accept(pending.slice(0, newline));
+        pending = pending.slice(newline + 1);
+        newline = pending.indexOf('\n');
+      }
+    },
+    finish() {
+      if (pending) {
+        accept(pending);
+        pending = '';
+      }
+      const shown = shownRows.length;
+      return {
+        omitted: total - shown,
+        output: shownRows.join('\n'),
+        shown,
+        total,
+        truncated: shown < total,
+      };
+    },
+  };
+}
+
+export function boundedVerifierPathRows(output: string): GitRowEvidence {
+  const collector = gitRowCollector(VERIFIER_CHANGED_PATHS_MAX_CHARS);
+  collector.append(output);
+  return collector.finish();
 }
 
 function inertGitDiagnostic(diagnostic: string): string {
@@ -147,19 +185,78 @@ export function boundedGitDiagnostic(
   };
 }
 
-function git(root: string, args: ReadonlyArray<string>): Promise<string> {
+function gitInspectionTransportBreaker(
+  stream: 'stderr' | 'stdout',
+  observedBytes: number,
+  limitBytes: number,
+): Error {
+  return new Error(
+    `Git inspection transport breaker: ${JSON.stringify({ limitBytes, observedBytes, stream })}`,
+  );
+}
+
+function gitRows(
+  root: string,
+  args: ReadonlyArray<string>,
+  maxChars: number,
+): Promise<GitRowEvidence> {
   return new Promise((resolve, reject) => {
-    execFile(
-      'git',
-      [...args],
-      { cwd: root, encoding: 'utf8', maxBuffer: 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          const diagnostic = boundedGitDiagnostic(String(stderr), error.message);
-          reject(new Error(`Git inspection failed: ${JSON.stringify(diagnostic)}`));
-        } else resolve(stdout);
-      },
-    );
+    const child = spawn('git', [...args], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+    const collector = gitRowCollector(maxChars);
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrChunks: Buffer[] = [];
+    let settled = false;
+    let stderrBytes = 0;
+    let stdoutBytes = 0;
+    const rejectOnce = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+      child.kill();
+    };
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > GIT_INSPECTION_STDOUT_MAX_BYTES) {
+        rejectOnce(
+          gitInspectionTransportBreaker('stdout', stdoutBytes, GIT_INSPECTION_STDOUT_MAX_BYTES),
+        );
+        return;
+      }
+      collector.append(stdoutDecoder.write(chunk));
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > GIT_INSPECTION_STDERR_MAX_BYTES) {
+        rejectOnce(
+          gitInspectionTransportBreaker('stderr', stderrBytes, GIT_INSPECTION_STDERR_MAX_BYTES),
+        );
+        return;
+      }
+      stderrChunks.push(chunk);
+    });
+    child.on('error', (error) => {
+      rejectOnce(
+        new Error(
+          `Git inspection failed: ${JSON.stringify(boundedGitDiagnostic('', error.message))}`,
+        ),
+      );
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      collector.append(stdoutDecoder.end());
+      if (code !== 0) {
+        const stderr = Buffer.concat(stderrChunks).toString('utf8');
+        const fallback = `git exited with code ${String(code)} and signal ${String(signal)}`;
+        rejectOnce(
+          new Error(
+            `Git inspection failed: ${JSON.stringify(boundedGitDiagnostic(stderr, fallback))}`,
+          ),
+        );
+        return;
+      }
+      settled = true;
+      resolve(collector.finish());
+    });
   });
 }
 
@@ -174,11 +271,20 @@ function registerVerifierTools(
     description:
       'Read bounded immutable-head and clean-checkout evidence for this detached advisory review checkout. Executes fixed Git inspection argv only.',
     async execute() {
-      const headSha = (await git(root, ['rev-parse', '--verify', 'HEAD^{commit}'])).trim();
-      const dirty =
-        (await git(root, ['status', '--porcelain=v1', '--untracked-files=all'])).trim().length > 0;
-      const names = await git(root, ['diff', '--name-only', `${baselineSha}...${reviewedHeadSha}`]);
-      const bounded = boundedVerifierPathRows(names);
+      const head = await gitRows(
+        root,
+        ['rev-parse', '--verify', 'HEAD^{commit}'],
+        GIT_HEAD_MAX_CHARS,
+      );
+      if (head.truncated) throw new Error('Git inspection returned oversized HEAD evidence.');
+      const headSha = head.output.trim();
+      const status = await gitRows(root, ['status', '--porcelain=v1', '--untracked-files=all'], 0);
+      const dirty = status.total > 0;
+      const bounded = await gitRows(
+        root,
+        ['diff', '--name-only', `${baselineSha}...${reviewedHeadSha}`],
+        VERIFIER_CHANGED_PATHS_MAX_CHARS,
+      );
       return text(
         [
           `reviewedHeadSha: ${reviewedHeadSha}`,

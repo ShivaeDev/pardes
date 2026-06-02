@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,6 +12,7 @@ import { requiredValue } from '../test-support.ts';
 import pardesWorker, {
   boundedGitDiagnostic,
   boundedVerifierPathRows,
+  GIT_INSPECTION_STDOUT_MAX_BYTES,
   getWorkerToolPathDenialReason,
   isPathInsideWorktree,
   normalizeWorkerToolPath,
@@ -43,7 +44,35 @@ function createFixture(parent = tmpdir()) {
   mkdirSync(join(worktree, 'src'), { recursive: true });
   mkdirSync(outside);
   symlinkSync(outside, join(worktree, 'escape'));
-  return { outside, worktree };
+  return { outside, root, worktree };
+}
+
+function installLargeOutputGit(root: string): string {
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  const executable = join(bin, 'git');
+  writeFileSync(
+    executable,
+    `#!/usr/bin/env node
+const command = process.argv[2];
+if (command === 'rev-parse') {
+  process.stdout.write('${'c'.repeat(40)}\\n');
+} else if (command === 'status' && process.env.PARDES_TEST_GIT_PATHOLOGICAL === 'true') {
+  process.stdout.write('x'.repeat(${16 * 1_024 * 1_024 + 1}));
+} else if (command === 'status') {
+  for (let index = 0; index < 7_000; index += 1)
+    process.stdout.write(\`?? status/\${String(index).padStart(4, '0')}-\${'s'.repeat(170)}\\n\`);
+} else if (command === 'diff') {
+  for (let index = 0; index < 7_000; index += 1)
+    process.stdout.write(\`src/\${String(index).padStart(4, '0')}-\${'p'.repeat(170)}.ts\\n\`);
+} else {
+  process.stderr.write('unexpected fake Git command');
+  process.exitCode = 1;
+}
+`,
+  );
+  chmodSync(executable, 0o755);
+  return `${bin}:${process.env.PATH ?? ''}`;
 }
 
 afterEach(() => {
@@ -85,9 +114,9 @@ describe('worker path boundary', () => {
 
 describe('verifier evidence output bounds', () => {
   test('omits changed-path suffixes instead of slicing through a path row', () => {
-    const first = 'a'.repeat(VERIFIER_CHANGED_PATHS_MAX_CHARS);
+    const first = 'a'.repeat(VERIFIER_CHANGED_PATHS_MAX_CHARS - 2);
     const second = 'src/second-complete-path.ts';
-    const bounded = boundedVerifierPathRows(`${first}\n${second}\nsrc/tail.ts\n`);
+    const bounded = boundedVerifierPathRows(`${first}\n${second}\nz\n`);
 
     expect(bounded).toEqual({
       omitted: 2,
@@ -236,6 +265,71 @@ describe('verifier child profile', () => {
       else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
       if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
       else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
+    }
+  });
+
+  test('streams large status and changed-path output with complete-row omission metadata', async () => {
+    const { root, worktree } = createFixture();
+    const previous = {
+      baseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
+      path: process.env.PATH,
+      pathological: process.env.PARDES_TEST_GIT_PATHOLOGICAL,
+      profile: process.env.PARDES_AGENT_PROFILE,
+      reviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
+      root: process.env.PARDES_WORKTREE_ROOT,
+    };
+    process.env.PATH = installLargeOutputGit(root);
+    process.env.PARDES_WORKTREE_ROOT = worktree;
+    process.env.PARDES_AGENT_PROFILE = 'verifier';
+    process.env.PARDES_VERIFICATION_BASELINE_SHA = 'a'.repeat(40);
+    process.env.PARDES_VERIFICATION_REVIEWED_SHA = 'b'.repeat(40);
+    try {
+      const tools: ToolDefinition[] = [];
+      pardesWorker({
+        on() {},
+        registerTool(tool: ToolDefinition) {
+          tools.push(tool);
+        },
+      } as unknown as ExtensionAPI);
+      const evidence = requiredValue(tools.find((tool) => tool.name === 'verification_evidence'));
+      const execute = evidence.execute as unknown as ExecuteToolForTest;
+      const result = await execute('call', {});
+      const firstPath = `src/0000-${'p'.repeat(170)}.ts`;
+      const firstOmittedPath = `src/0065-${'p'.repeat(170)}.ts`;
+
+      expect(7_000 * `?? status/0000-${'s'.repeat(170)}\n`.length).toBeGreaterThan(1024 * 1024);
+      expect(7_000 * `${firstPath}\n`.length).toBeGreaterThan(1024 * 1024);
+      expect(result.content[0].text).toContain('checkoutClean: false');
+      expect(result.content[0].text).toContain(
+        'changed path evidence: total=7000; shown=65; omitted=6935',
+      );
+      expect(result.content[0].text).toContain(firstPath);
+      expect(result.content[0].text).not.toContain(firstOmittedPath);
+      expect(result.details).toMatchObject({
+        pardesVerifier: {
+          changedPaths: { omitted: 6_935, shown: 65, total: 7_000 },
+          checkoutClean: false,
+          truncated: true,
+        },
+      });
+
+      process.env.PARDES_TEST_GIT_PATHOLOGICAL = 'true';
+      await expect(execute('breaker', {})).rejects.toThrow(
+        `Git inspection transport breaker: {"limitBytes":${GIT_INSPECTION_STDOUT_MAX_BYTES},"observedBytes":`,
+      );
+    } finally {
+      if (previous.root === undefined) delete process.env.PARDES_WORKTREE_ROOT;
+      else process.env.PARDES_WORKTREE_ROOT = previous.root;
+      if (previous.profile === undefined) delete process.env.PARDES_AGENT_PROFILE;
+      else process.env.PARDES_AGENT_PROFILE = previous.profile;
+      if (previous.baseline === undefined) delete process.env.PARDES_VERIFICATION_BASELINE_SHA;
+      else process.env.PARDES_VERIFICATION_BASELINE_SHA = previous.baseline;
+      if (previous.reviewed === undefined) delete process.env.PARDES_VERIFICATION_REVIEWED_SHA;
+      else process.env.PARDES_VERIFICATION_REVIEWED_SHA = previous.reviewed;
+      if (previous.path === undefined) delete process.env.PATH;
+      else process.env.PATH = previous.path;
+      if (previous.pathological === undefined) delete process.env.PARDES_TEST_GIT_PATHOLOGICAL;
+      else process.env.PARDES_TEST_GIT_PATHOLOGICAL = previous.pathological;
     }
   });
 

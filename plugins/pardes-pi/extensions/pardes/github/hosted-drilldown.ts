@@ -215,8 +215,12 @@ const UNSAFE_DIRECTIONAL_PATTERN = new RegExp(
 );
 const AUTHORIZATION_FIELD_PATTERN =
   /(^|[^a-zA-Z0-9_-])(["']?)(authorization)\2(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gim;
+const ESCAPED_SECRET_ASSIGNMENT_PATTERN =
+  /((?:\\+["']))((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:authorization|password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))((?:\\+["'])\s*[:=]\s*)((?:\\+["']))[^\r\n]*?((?:\\+["']))(?=\s*[,}\]])/gim;
 const SECRET_ASSIGNMENT_PATTERN =
   /(^|[^a-zA-Z0-9_-])(["']?)((?:[a-zA-Z][a-zA-Z0-9]*[_-])*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key))\2(\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|Bearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}|[^\s,;]+)/gim;
+const COMPACT_JWT_PATTERN = /\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*(?![A-Za-z0-9_-])/g;
+const ESCAPED_SECRET_REDACTION_MAX_PASSES = 3;
 const SAFE_DISCUSSION_AUTHOR_PATTERN = /^[a-zA-Z0-9-]+(?:\[bot\])?$/;
 
 function escapedCodePoint(value: string): string {
@@ -224,20 +228,31 @@ function escapedCodePoint(value: string): string {
   return codePoint === undefined ? '' : `\\u${codePoint.toString(16).padStart(4, '0')}`;
 }
 
+function redactEscapedSecretAssignments(source: string): string {
+  let redacted = source;
+  for (let pass = 0; pass < ESCAPED_SECRET_REDACTION_MAX_PASSES; pass += 1) {
+    const next = redacted.replace(ESCAPED_SECRET_ASSIGNMENT_PATTERN, '$1$2$3$4[REDACTED]$5');
+    if (next === redacted) return redacted;
+    redacted = next;
+  }
+  return redacted;
+}
+
 function redactHostedExcerpt(source: string): string {
-  return source
+  const structural = source
     .replace(ANSI_ESCAPE_PATTERN, '')
     .replace(TERMINAL_CONTROL_PATTERN, '')
     .replace(UNSAFE_DIRECTIONAL_PATTERN, escapedCodePoint)
     .replace(/-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g, '[REDACTED PEM]')
     .replace(AUTHORIZATION_FIELD_PATTERN, '$1$2$3$2$4[REDACTED]')
-    .replace(SECRET_ASSIGNMENT_PATTERN, '$1$2$3$2$4[REDACTED]')
+    .replace(SECRET_ASSIGNMENT_PATTERN, '$1$2$3$2$4[REDACTED]');
+  return redactEscapedSecretAssignments(structural)
     .replace(
       /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/g,
       '[REDACTED TOKEN]',
     )
     .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '[REDACTED AWS KEY]')
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, '[REDACTED JWT]')
+    .replace(COMPACT_JWT_PATTERN, '[REDACTED JWT]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}/gi, 'Bearer [REDACTED]');
 }
 

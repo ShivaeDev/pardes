@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
@@ -17,6 +18,17 @@ const RATE_LIMIT = {
   remaining: 4_999,
   resetAt: '2099-01-15T08:00:00Z',
 };
+
+function compactJwt(signature: 'signed' | 'unsecured'): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from('{}').toString('base64url');
+  const unsigned = `${header}.${payload}`;
+  return `${unsigned}.${
+    signature === 'unsecured'
+      ? ''
+      : createHmac('sha256', 'fixture-material').update(unsigned).digest('base64url')
+  }`;
+}
 
 function association(
   overrides: Partial<{ readonly url: string; readonly lastPushedHeadSha: string }> = {},
@@ -206,10 +218,11 @@ describe('GitHub hosted drill-down service', () => {
   test('applies shared authorization and quoted-key redaction before CI excerpt pagination', async () => {
     const authorization = `Author${'ization'}`;
     const longCredential = 'x'.repeat(400);
+    const signedShortJwt = compactJwt('signed');
     const fixture = scriptedRunner([
       checksResult(),
       result(
-        `${authorization}: Basic ${longCredential}\n${JSON.stringify({ authorization: 'Basic json-auth-tail', client_secret: 'json-ci-secret', password: 'json ci tail' })}\nvisible`,
+        `${authorization}: Basic ${longCredential}\n${JSON.stringify({ authorization: 'Basic json-auth-tail', client_secret: 'json-ci-secret', password: 'json ci tail' })}\n${signedShortJwt}\nvisible`,
       ),
     ]);
 
@@ -227,12 +240,14 @@ describe('GitHub hosted drill-down service', () => {
     expect(excerpt.excerpt).toContain('"authorization":[REDACTED]');
     expect(excerpt.excerpt).toContain('"client_secret":[REDACTED]');
     expect(excerpt.excerpt).toContain('"password":[REDACTED]');
+    expect(excerpt.excerpt).toContain('[REDACTED JWT]');
     expect(excerpt.excerpt).toContain('visible');
     expect(excerpt.hasMore).toBe(false);
     expect(excerpt.excerpt).not.toContain(longCredential);
     expect(excerpt.excerpt).not.toContain('json-auth-tail');
     expect(excerpt.excerpt).not.toContain('json-ci-secret');
     expect(excerpt.excerpt).not.toContain('json ci tail');
+    expect(excerpt.excerpt).not.toContain(signedShortJwt);
   });
 
   test('rejects an arbitrary run/job before requesting a hosted log body', async () => {
@@ -260,12 +275,27 @@ describe('GitHub hosted drill-down service', () => {
     const authorization = `Author${'ization'}`;
     const authorizationLower = authorization.toLowerCase();
     const quotedYamlKey = `'api_${'key'}': 'yaml-tail-marker'`;
+    const nestedSecret = ['escaped', 'json', 'tail'].join('-');
+    const nestedToken = ['escaped', 'token', 'tail'].join('-');
+    const deeplyNestedSecret = ['deeply', 'escaped', 'json', 'tail'].join('-');
+    const deeplyNestedToken = ['deeply', 'escaped', 'token', 'tail'].join('-');
+    const nested = JSON.stringify({
+      message: JSON.stringify({ client_secret: nestedSecret, token: nestedToken }),
+    });
+    const deeplyNested = JSON.stringify({
+      message: JSON.stringify({
+        message: JSON.stringify({ client_secret: deeplyNestedSecret, token: deeplyNestedToken }),
+      }),
+    });
+    const signedShortJwt = compactJwt('signed');
+    // Unsecured compact JWTs carry an empty signature; redact conservatively rather than project them.
+    const unsecuredJwt = compactJwt('unsecured');
     const secret = 'github_pat_abcdefghijklmnop';
     const temporaryAwsKey = `ASIA${'A'.repeat(16)}`;
     const items = Array.from({ length: 10 }, (_, index) => ({
       body:
         index === 0
-          ? `client_secret=do-not-leak password="alpha beta" api_key='gamma delta' token=${secret} aws=${temporaryAwsKey} marker\u061cleft\n${JSON.stringify({ client_secret: 'json-do-not-leak', password: 'json alpha beta', token: 'generic-json-token' })}\n${quotedYamlKey}\n${authorization}: Basic basic-tail-marker\n${authorizationLower}=token opaque-tail-marker\n${authorizationLower}: Digest username="admin", response="digest-tail-marker"\n${authorization}: Bearer bearer-tail-marker\n${authorization}: Custom unknown-tail-marker\n${'x'.repeat(5_000)}`
+          ? `client_secret=do-not-leak password="alpha beta" api_key='gamma delta' token=${secret} aws=${temporaryAwsKey} marker\u061cleft\n${JSON.stringify({ client_secret: 'json-do-not-leak', password: 'json alpha beta', token: 'generic-json-token' })}\n${quotedYamlKey}\n${nested}\n${deeplyNested}\n${signedShortJwt}\n${unsecuredJwt}\n${authorization}: Basic basic-tail-marker\n${authorizationLower}=token opaque-tail-marker\n${authorizationLower}: Digest username="admin", response="digest-tail-marker"\n${authorization}: Bearer bearer-tail-marker\n${authorization}: Custom unknown-tail-marker\n${'x'.repeat(5_000)}`
           : `body-${index}`,
       id: index + 1,
       user: index === 0 ? { login: 'alice' } : index === 1 ? { login: 'evil\u202e' } : null,
@@ -317,6 +347,13 @@ describe('GitHub hosted drill-down service', () => {
     expect(page.items[0]?.excerpt).not.toContain('json-do-not-leak');
     expect(page.items[0]?.excerpt).not.toContain('json alpha beta');
     expect(page.items[0]?.excerpt).not.toContain('generic-json-token');
+    expect(page.items[0]?.excerpt).not.toContain(nestedSecret);
+    expect(page.items[0]?.excerpt).not.toContain(nestedToken);
+    expect(page.items[0]?.excerpt).not.toContain(deeplyNestedSecret);
+    expect(page.items[0]?.excerpt).not.toContain(deeplyNestedToken);
+    expect(page.items[0]?.excerpt).not.toContain(signedShortJwt);
+    expect(page.items[0]?.excerpt).not.toContain(unsecuredJwt);
+    expect(page.items[0]?.excerpt.match(/\[REDACTED JWT\]/g)).toHaveLength(2);
     expect(page.items[0]?.excerpt).not.toContain('basic-tail-marker');
     expect(page.items[0]?.excerpt).not.toContain('yaml-tail-marker');
     expect(page.items[0]?.excerpt).not.toContain('opaque-tail-marker');

@@ -70,7 +70,8 @@ function git(root: string, args: string[]): string {
 function snapshotRepository(): { after: string; before: string; root: string } {
   const root = join(tmpdir(), `pardes-classifier-repository-${crypto.randomUUID()}`);
   mkdirSync(join(root, 'docs'), { recursive: true });
-  git(root, ['init', '--quiet']);
+  // GitHub push SHAs currently identify SHA-1 objects; keep this fixture on that contract.
+  git(root, ['init', '--quiet', '--object-format=sha1']);
   git(root, ['config', 'user.name', 'test']);
   git(root, ['config', 'user.email', 'test@example.com']);
   writeFileSync(join(root, 'README.md'), 'before\n');

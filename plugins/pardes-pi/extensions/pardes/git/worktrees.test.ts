@@ -320,7 +320,7 @@ describe('managed worktree service', () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
-    const service = makeManagedWorktreeService({ provenanceGitMaxBufferBytes: 64 });
+    const service = makeManagedWorktreeService({ provenanceGitMaxBufferBytes: 65 });
     const lease = await Effect.runPromise(
       service.create({
         agentId: 'agent-dirty-bound',

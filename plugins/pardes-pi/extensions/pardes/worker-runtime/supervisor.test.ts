@@ -747,11 +747,13 @@ describe('worker supervisor', () => {
     });
 
     await Effect.runPromise(supervisor.spawn(spawnInput(fixture, 'activity-fallback')));
-    await eventually(
-      async () =>
-        (await Effect.runPromise(supervisor.status('agent-fixture'))).recentActivityLines
-          ?.length === 2,
-    );
+    await eventually(async () => {
+      const runtime = await Effect.runPromise(supervisor.status('agent-fixture'));
+      return (
+        runtime.status === 'idle' &&
+        runtime.recentActivityLines?.[1] === 'streamed visible response'
+      );
+    });
     const activity =
       (await Effect.runPromise(supervisor.status('agent-fixture'))).recentActivityLines ?? [];
 

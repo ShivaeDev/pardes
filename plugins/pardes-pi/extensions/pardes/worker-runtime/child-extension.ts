@@ -23,6 +23,7 @@ const PATH_PARAMETERS: Readonly<Record<string, ReadonlyArray<string>>> = {
 };
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const VERIFIER_OUTPUT_MAX_CHARS = 12_000;
+const VERIFIER_GIT_TIMEOUT_MS = 10_000;
 const GIT_EXPLICIT_CWD_UNSAFE_ENVIRONMENT_VARIABLES = [
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   'GIT_ATTR_SOURCE',
@@ -127,6 +128,7 @@ function git(root: string, args: ReadonlyArray<string>): Promise<string> {
         encoding: 'utf8',
         env: gitEnvironmentForExplicitCwd(),
         maxBuffer: 1024 * 1024,
+        timeout: VERIFIER_GIT_TIMEOUT_MS,
       },
       (error, stdout, stderr) => {
         if (error) {

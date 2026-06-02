@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
   copyLocalGitRepositoryFixture,
   copyRemoteGitRepositoryFixture,
@@ -15,10 +15,25 @@ import type { RepoState } from './schemas.ts';
 import type { GitResult } from './transport.ts';
 
 const temporaryDirectories: string[] = [];
+const inheritedGitProtocolEnvironment = {
+  allow: process.env.GIT_ALLOW_PROTOCOL,
+  fromUser: process.env.GIT_PROTOCOL_FROM_USER,
+};
+
+beforeEach(() => {
+  // These tests intentionally use controlled local file remotes through production Git transport.
+  delete process.env.GIT_ALLOW_PROTOCOL;
+  delete process.env.GIT_PROTOCOL_FROM_USER;
+});
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0))
     rmSync(directory, { force: true, recursive: true });
+  if (inheritedGitProtocolEnvironment.allow === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+  else process.env.GIT_ALLOW_PROTOCOL = inheritedGitProtocolEnvironment.allow;
+  if (inheritedGitProtocolEnvironment.fromUser === undefined)
+    delete process.env.GIT_PROTOCOL_FROM_USER;
+  else process.env.GIT_PROTOCOL_FROM_USER = inheritedGitProtocolEnvironment.fromUser;
 });
 
 function git(cwd: string, ...args: string[]): string {

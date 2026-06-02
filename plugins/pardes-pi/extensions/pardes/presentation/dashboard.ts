@@ -1,3 +1,4 @@
+import type { GitHubRateLimitCompactStatus } from '../github/index.ts';
 import type {
   AgentRecord,
   ManagerState,
@@ -34,6 +35,23 @@ function summarize(state: ManagerState): {
 
 function compactNumber(value: number): string {
   return Intl.NumberFormat('en', { maximumFractionDigits: 1, notation: 'compact' }).format(value);
+}
+
+export function githubRateStatusToken(status: GitHubRateLimitCompactStatus | undefined): string {
+  if (status === undefined) return '';
+  const remaining =
+    status.effectiveRemaining === undefined ? '…' : String(status.effectiveRemaining);
+  const marker =
+    status.throttle === 'normal'
+      ? ''
+      : status.throttle === 'moderate'
+        ? '~'
+        : status.throttle === 'aggressive'
+          ? '!'
+          : status.throttle === 'paused'
+            ? '⏸'
+            : '?';
+  return `GH:${remaining}${marker}`;
 }
 
 function elapsed(durationMs: number): string {
@@ -264,6 +282,7 @@ export function renderCompactWidgetLines(
   now: number,
   palette: DashboardPalette,
   managerContext = managerContextSummary(undefined),
+  githubRateStatus?: GitHubRateLimitCompactStatus,
 ): string[] {
   const counts = summarize(state);
   const agents = Object.values(state.agents);
@@ -271,7 +290,7 @@ export function renderCompactWidgetLines(
   const lines = [
     palette.accent(`pardes ${state.managerId.slice(0, 8)}`) +
       palette.dim(
-        ` · ${managerContext} · ${statuses.running} running · ${statuses.idle} idle${statuses.warnings > 0 ? ` · ${statuses.warnings} warning${statuses.warnings === 1 ? '' : 's'}` : ''} · ${inboxSummary(state, now)}`,
+        ` · ${managerContext}${githubRateStatus === undefined ? '' : ` · ${githubRateStatusToken(githubRateStatus)}`} · ${statuses.running} running · ${statuses.idle} idle${statuses.warnings > 0 ? ` · ${statuses.warnings} warning${statuses.warnings === 1 ? '' : 's'}` : ''} · ${inboxSummary(state, now)}`,
       ),
     palette.separator(DASHBOARD_SEPARATOR),
   ];
@@ -340,8 +359,16 @@ export function compactWidgetLines(
   state: ManagerState,
   runtimes: ReadonlyMap<string, WorkerRuntimeSnapshot> = new Map(),
   now = Date.now(),
+  githubRateStatus?: GitHubRateLimitCompactStatus,
 ): string[] {
-  return renderCompactWidgetLines(state, runtimes, now, PLAIN_DASHBOARD_PALETTE);
+  return renderCompactWidgetLines(
+    state,
+    runtimes,
+    now,
+    PLAIN_DASHBOARD_PALETTE,
+    managerContextSummary(undefined),
+    githubRateStatus,
+  );
 }
 
 export function dashboardSummary(

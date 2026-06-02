@@ -14,6 +14,7 @@ export {
   compactWidgetLines,
   dashboardLines,
   dashboardSummary,
+  githubRateStatusToken,
   renderCompactWidgetLines,
   renderDashboardLines,
 } from './dashboard.ts';

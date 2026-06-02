@@ -68,6 +68,7 @@ export {
   type GitHubRequestReservation,
   type GitHubWatcherRateLimitStatus,
   type GitHubWatcherThrottleTier,
+  githubComRepositorySelector,
   MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';

@@ -23,6 +23,7 @@ import {
   type GitHubRepositoryIdentity,
   type GitHubWatcherRateLimitStatus,
   type GitHubWatcherThrottleTier,
+  githubComRepositorySelector,
   makeGitHubHostedMetadataAdapter,
 } from './hosted-metadata.ts';
 import {
@@ -380,7 +381,15 @@ export function makeGitHubWatcherService(
     const viewed = yield* hostedMetadata.accountReservedOpaqueRequest(
       'graphql',
       watcherCliReservationId,
-      run(cwd, ['pr', 'view', identifier, '--json', WATCHER_JSON_FIELDS, '--repo', route.slug]),
+      run(cwd, [
+        'pr',
+        'view',
+        identifier,
+        '--json',
+        WATCHER_JSON_FIELDS,
+        '--repo',
+        githubComRepositorySelector(route),
+      ]),
     );
     const decoded = yield* decodeGitHubJson(
       'watch pull request',

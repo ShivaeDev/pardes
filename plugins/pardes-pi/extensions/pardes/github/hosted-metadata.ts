@@ -51,6 +51,11 @@ export interface GitHubRepositoryIdentity {
   readonly slug: string;
 }
 
+/** Keep proved GitHub.com PR traffic fixed even when the ambient gh host targets an enterprise instance. */
+export function githubComRepositorySelector(route: GitHubRepositoryIdentity): string {
+  return `${GITHUB_HOSTED_METADATA_HOSTNAME}/${route.slug}`;
+}
+
 export type GitHubWatcherThrottleTier =
   | 'normal'
   | 'moderate'

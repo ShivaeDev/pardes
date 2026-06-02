@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest';
 import {
   GITHUB_RATE_LIMIT_FALLBACK_MAX_AGE_MILLIS,
   GitHubCommandError,
+  githubComRepositorySelector,
   MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
   makeGitHubHostedMetadataAdapter,
 } from './index.ts';
@@ -135,6 +136,24 @@ describe('GitHub hosted metadata adapter', () => {
       repo: 'project',
       slug: 'acme/project',
     });
+  });
+
+  test('host-qualifies proved PR selectors despite an alternate ambient GH_HOST', () => {
+    const previous = process.env.GH_HOST;
+    process.env.GH_HOST = 'github.enterprise.test';
+    try {
+      expect(
+        githubComRepositorySelector({
+          owner: 'acme',
+          pushTarget: 'https://github.com/acme/project.git',
+          repo: 'project',
+          slug: 'acme/project',
+        }),
+      ).toBe('github.com/acme/project');
+    } finally {
+      if (previous === undefined) delete process.env.GH_HOST;
+      else process.env.GH_HOST = previous;
+    }
   });
 
   test('rejects a non-github.com origin before fallback metadata requests', async () => {

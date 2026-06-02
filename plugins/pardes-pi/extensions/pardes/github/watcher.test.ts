@@ -167,7 +167,7 @@ function observation(overrides: Partial<PullRequestObservation> = {}): PullReque
 }
 
 describe('GitHub watcher service', () => {
-  test('invokes gh with argv only and projects bounded provenance-labelled discussion metadata without requesting bodies', async () => {
+  test('host-qualifies watcher reads despite alternate GH_HOST and projects body-free metadata', async () => {
     const oversizedPreview = `Please inspect ${'x'.repeat(300)}`;
     const fixture = scriptedRunner([
       result(
@@ -212,7 +212,14 @@ describe('GitHub watcher service', () => {
     const service = makeGitHubWatcherService({ runner: fixture.runner });
     const received = callbacks([pullRequest({ lastPushedHeadSha: HEAD_SHA })]);
 
-    await Effect.runPromise(service.poll(received.callbacks));
+    const previousGitHubHost = process.env.GH_HOST;
+    process.env.GH_HOST = 'github.enterprise.test';
+    try {
+      await Effect.runPromise(service.poll(received.callbacks));
+    } finally {
+      if (previousGitHubHost === undefined) delete process.env.GH_HOST;
+      else process.env.GH_HOST = previousGitHubHost;
+    }
 
     expect(received.failures).toEqual([]);
     const projectedObservation = {
@@ -253,7 +260,7 @@ describe('GitHub watcher service', () => {
         '--json',
         'number,headRefOid,state,mergeable,reviewDecision,statusCheckRollup',
         '--repo',
-        'acme/project',
+        'github.com/acme/project',
       ],
       command: 'gh',
       cwd: '/tmp/project',

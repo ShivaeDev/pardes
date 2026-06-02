@@ -22,7 +22,9 @@ import {
 } from './transport.ts';
 
 function withoutBoundRepoArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {
-  return args.at(-2) === '--repo' && args.at(-1) === 'acme/project' ? args.slice(0, -2) : args;
+  return args.at(-2) === '--repo' && args.at(-1) === 'github.com/acme/project'
+    ? args.slice(0, -2)
+    : args;
 }
 
 function withoutBoundRepo(
@@ -446,7 +448,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(1);
   });
 
-  test('pushes exactly the audited SHA before creating a verified ready-for-review PR', async () => {
+  test('pushes the audited SHA and host-qualifies publication despite alternate GH_HOST', async () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
@@ -455,7 +457,16 @@ describe('GitHub publication boundary', () => {
     ]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
 
-    const published = await Effect.runPromise(service.publish(input));
+    const published = await (async () => {
+      const previousGitHubHost = process.env.GH_HOST;
+      process.env.GH_HOST = 'github.enterprise.test';
+      try {
+        return await Effect.runPromise(service.publish(input));
+      } finally {
+        if (previousGitHubHost === undefined) delete process.env.GH_HOST;
+        else process.env.GH_HOST = previousGitHubHost;
+      }
+    })();
 
     expect(published).toEqual({
       action: 'created',
@@ -481,7 +492,7 @@ describe('GitHub publication boundary', () => {
     expect(
       fixture.invocations
         .filter(({ args, command }) => command === 'gh' && args[0] === 'pr')
-        .every(({ args }) => args.at(-2) === '--repo' && args.at(-1) === 'acme/project'),
+        .every(({ args }) => args.at(-2) === '--repo' && args.at(-1) === 'github.com/acme/project'),
     ).toBe(true);
     expect(withoutBoundRepo(fixture.invocations[1])).toEqual({
       args: [

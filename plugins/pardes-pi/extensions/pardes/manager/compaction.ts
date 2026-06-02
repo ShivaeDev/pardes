@@ -261,7 +261,7 @@ function projectReviewGate(gate: PullRequestRecord): ManagerCompactionReviewGate
     headDiverged: gate.headDivergedAt !== undefined,
     id: boundInline(gate.id, MAX_ID_CHARS),
     status: 'open',
-    watcherFailed: gate.watcherFailedAt !== undefined,
+    watcherFailed: gate.watcherFailedAt !== undefined || gate.watcherFailure !== undefined,
     workstreamId: boundInline(gate.workstreamId, MAX_ID_CHARS),
     ...(paginationGaps.length === 0
       ? {}

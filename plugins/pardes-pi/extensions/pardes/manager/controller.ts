@@ -491,6 +491,9 @@ export class ManagerController {
             ? {}
             : { lastPushedHeadSha: pullRequest.lastPushedHeadSha }),
           ...(pullRequest.headBranch === undefined ? {} : { headBranch: pullRequest.headBranch }),
+          ...(pullRequest.watcherFailure === undefined
+            ? {}
+            : { watcherFailure: pullRequest.watcherFailure }),
         })),
     });
   });

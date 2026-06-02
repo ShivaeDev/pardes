@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Cause, Clock, Context, Effect, Exit, Semaphore } from 'effect';
 import {
+  classifyGitHubWatcherFailure,
   derivePullRequestTransitions,
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
@@ -650,7 +651,8 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       ) ||
       known.number !== nextObservation.number ||
       known.status !== nextObservation.status ||
-      ((complete || nextObservation.status !== 'open') && known.watcherFailedAt !== undefined) ||
+      ((complete || nextObservation.status !== 'open') &&
+        (known.watcherFailedAt !== undefined || known.watcherFailure !== undefined)) ||
       known.headDivergedAt !== undefined;
     if (!changed) {
       // A repeated terminal observation is also a bounded recovery edge. The
@@ -707,7 +709,11 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           nextDiscussionPaginationGaps,
         );
       const { headDivergedAt: _headDivergedAt, ...withoutHeadDivergence } = pullRequest;
-      const { watcherFailedAt: _watcherFailedAt, ...withoutWatcherFailure } = withoutHeadDivergence;
+      const {
+        watcherFailedAt: _watcherFailedAt,
+        watcherFailure: _watcherFailure,
+        ...withoutWatcherFailure
+      } = withoutHeadDivergence;
       const watcherCleared =
         complete || nextObservation.status !== 'open'
           ? withoutWatcherFailure
@@ -787,19 +793,21 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
   const handlePullRequestWatcherFailure = Effect.fnUntraced(function* (event: {
     readonly pullRequestId: string;
     readonly expectedHeadSha?: string;
+    readonly error: unknown;
   }) {
+    const diagnostic = classifyGitHubWatcherFailure(event.error);
     const known = namespace.state.pullRequests[event.pullRequestId];
     if (
       !known ||
       !watcherEventMatchesAssociation(known, event.expectedHeadSha) ||
       known.status !== 'open' ||
-      known.watcherFailedAt !== undefined
+      (known.watcherFailedAt !== undefined && known.watcherFailure?.kind === diagnostic.kind)
     )
       return;
     const timestamp = yield* nowIso;
     const attention = makeEvent(
       'watcher_failed',
-      `${pullRequestLabel(known)} watcher failed; inspect GitHub CLI connectivity and authentication.`,
+      `${pullRequestLabel(known)} watcher failed [${diagnostic.kind}]: ${diagnostic.summary} Raw CLI diagnostics omitted.`,
       timestamp,
       pullRequestEventAssociation(known),
     );
@@ -809,7 +817,8 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
         !pullRequest ||
         !watcherEventMatchesAssociation(pullRequest, event.expectedHeadSha) ||
         pullRequest.status !== 'open' ||
-        pullRequest.watcherFailedAt !== undefined
+        (pullRequest.watcherFailedAt !== undefined &&
+          pullRequest.watcherFailure?.kind === diagnostic.kind)
       )
         return Effect.succeed([false, state] as const);
       return Effect.succeed([
@@ -819,7 +828,12 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           inbox: [...state.inbox, attention],
           pullRequests: {
             ...state.pullRequests,
-            [pullRequest.id]: { ...pullRequest, updatedAt: timestamp, watcherFailedAt: timestamp },
+            [pullRequest.id]: {
+              ...pullRequest,
+              updatedAt: timestamp,
+              watcherFailedAt: timestamp,
+              watcherFailure: diagnostic,
+            },
           },
         },
       ] as const);

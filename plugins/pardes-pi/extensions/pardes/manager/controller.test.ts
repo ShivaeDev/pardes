@@ -406,14 +406,14 @@ function manualGithubWatcher() {
           })
         : Effect.die('GitHub watcher fixture has no active audited association');
     },
-    fail: (pullRequestId: string, cwd: string) =>
+    fail: (pullRequestId: string, cwd: string, cause: unknown = 'fixture outage') =>
       callbacks
         ? callbacks.onFailure({
             pullRequestId,
             ...generation(pullRequestId),
             error: new GitHubCommandError({
               args: ['pr', 'view'],
-              cause: 'fixture outage',
+              cause,
               command: 'gh',
               cwd,
             }),
@@ -6199,14 +6199,27 @@ describe('manager controller', () => {
     );
     await Effect.runPromise(watcher.fail(pullRequestId, repo));
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeDefined();
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
+      kind: 'command_failed',
+      summary: 'GitHub CLI command failed; check gh connectivity.',
+    });
     expect(
       controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
     ).toHaveLength(1);
+    expect(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed')?.summary,
+    ).toContain(
+      'watcher failed [command_failed]: GitHub CLI command failed; check gh connectivity.',
+    );
+    expect(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed')?.summary,
+    ).not.toContain('fixture outage');
     expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
     expect(fixture.messages).toHaveLength(1);
 
     await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest({ ci: 'failing' })));
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeUndefined();
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toBeUndefined();
     expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
     await Effect.runPromise(watcher.fail(pullRequestId, repo));
 
@@ -6219,6 +6232,7 @@ describe('manager controller', () => {
       'utf8',
     );
     expect(eventLog.match(/"type":"watcher_failed"/g)).toHaveLength(2);
+    expect(eventLog).not.toContain('fixture outage');
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 

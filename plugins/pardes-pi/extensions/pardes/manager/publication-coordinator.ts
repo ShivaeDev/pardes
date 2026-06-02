@@ -341,6 +341,9 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         ...(currentPullRequest?.watcherFailedAt === undefined
           ? {}
           : { watcherFailedAt: currentPullRequest.watcherFailedAt }),
+        ...(currentPullRequest?.watcherFailure === undefined
+          ? {}
+          : { watcherFailure: currentPullRequest.watcherFailure }),
         createdAt: currentPullRequest?.createdAt ?? timestamp,
         updatedAt: timestamp,
       };

@@ -1,4 +1,5 @@
 import { Schema } from 'effect';
+import { GitHubWatcherFailureDiagnosticSchema } from './watcher-diagnostics.ts';
 
 export const PULL_REQUEST_TITLE_MAX_LENGTH = 256;
 export const PULL_REQUEST_BODY_MAX_LENGTH = 10_000;
@@ -134,6 +135,7 @@ export const GitHubIntegrationHealthAssociationSchema = Schema.Struct({
   lastPushedHeadSha: Schema.optionalKey(FullCommitShaSchema),
   number: Schema.optionalKey(PositiveIntegerSchema),
   url: PullRequestUrlSchema,
+  watcherFailure: Schema.optionalKey(GitHubWatcherFailureDiagnosticSchema),
 });
 
 export const GitHubAdvertisedDefaultBranchGraphQLSchema = Schema.Struct({

@@ -8,6 +8,7 @@ import {
 import {
   GitHubDiscussionCursorSchema,
   GitHubDiscussionPaginationGapsSchema,
+  GitHubWatcherFailureDiagnosticSchema,
   OpaquePublishedReviewBranchSchema,
   PersistedPublishedReviewBranchSchema,
 } from '../github/index.ts';
@@ -258,6 +259,7 @@ export const PullRequestRecordSchema = Schema.Struct({
   updatedAt: NonEmptyString,
   url: NonEmptyString,
   watcherFailedAt: Schema.optionalKey(NonEmptyString),
+  watcherFailure: Schema.optionalKey(GitHubWatcherFailureDiagnosticSchema),
   workstreamId: NonEmptyString,
 });
 export type PullRequestRecord = typeof PullRequestRecordSchema.Type;

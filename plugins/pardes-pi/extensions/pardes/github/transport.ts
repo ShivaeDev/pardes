@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { Effect } from 'effect';
 import { GitHubCommandError } from './errors.ts';
+import { githubCommandFailureDiagnosticHint } from './watcher-diagnostics.ts';
 
 /** Last-resort process-ingestion circuit breaker; adapters should still request narrow server-side fields. */
 export const GITHUB_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
@@ -21,6 +22,13 @@ export interface GitHubCommandRunnerShape {
   readonly run: (invocation: ProcessInvocation) => Effect.Effect<ProcessResult, GitHubCommandError>;
 }
 
+class GitHubProcessFailure {
+  constructor(
+    readonly error: unknown,
+    readonly diagnosticHint: GitHubCommandError['diagnosticHint'],
+  ) {}
+}
+
 export interface GitHubCliShape {
   readonly run: (
     cwd: string,
@@ -33,7 +41,16 @@ export function makeExecFileGitHubCommandRunner(): GitHubCommandRunnerShape {
   return {
     run: ({ command, args, cwd }) =>
       Effect.tryPromise({
-        catch: (cause) => new GitHubCommandError({ args, cause, command, cwd }),
+        catch: (cause) =>
+          new GitHubCommandError({
+            args,
+            cause: cause instanceof GitHubProcessFailure ? cause.error : cause,
+            command,
+            cwd,
+            ...(cause instanceof GitHubProcessFailure && cause.diagnosticHint !== undefined
+              ? { diagnosticHint: cause.diagnosticHint }
+              : {}),
+          }),
         try: (signal) =>
           new Promise<ProcessResult>((resolve, reject) => {
             execFile(
@@ -42,7 +59,9 @@ export function makeExecFileGitHubCommandRunner(): GitHubCommandRunnerShape {
               { cwd, encoding: 'utf8', maxBuffer: GITHUB_COMMAND_MAX_BUFFER_BYTES, signal },
               (error, stdout, stderr) => {
                 if (error) {
-                  reject(error);
+                  reject(
+                    new GitHubProcessFailure(error, githubCommandFailureDiagnosticHint(stderr)),
+                  );
                   return;
                 }
                 resolve({ stderr, stdout });

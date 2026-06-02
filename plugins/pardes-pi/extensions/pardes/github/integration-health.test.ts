@@ -12,6 +12,10 @@ const MAIN_SHA = 'a'.repeat(40);
 const AUDITED_PR_SHA = 'b'.repeat(40);
 const OBSERVED_PR_SHA = 'c'.repeat(40);
 const OLD_CHECK_SHA = 'd'.repeat(40);
+const AUTH_WATCHER_FAILURE = {
+  kind: 'authentication_likely' as const,
+  summary: 'GitHub CLI authentication likely failed; run gh auth status.' as const,
+};
 
 function defaultBranchResult(sha = MAIN_SHA) {
   return result(
@@ -141,7 +145,7 @@ describe('GitHub integration-health inspection', () => {
     const inspection = await Effect.runPromise(
       makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
         cwd: '/tmp/project',
-        pullRequests: [association()],
+        pullRequests: [{ ...association(), watcherFailure: AUTH_WATCHER_FAILURE }],
       }),
     );
 
@@ -183,6 +187,7 @@ describe('GitHub integration-health inspection', () => {
           observedHeadSha: AUDITED_PR_SHA,
           pullRequestHead: 'current',
           sharedFailingWorkflowCount: 1,
+          watcherFailure: AUTH_WATCHER_FAILURE,
         },
       ],
     });

@@ -277,7 +277,8 @@ function discussionPaginationGapMetadata(pullRequest: PullRequestRecord): string
 
 function reviewWarningMetadata(pullRequest: PullRequestRecord): ReadonlyArray<string> {
   const warnings: string[] = [];
-  if (pullRequest.watcherFailedAt) warnings.push('watcher');
+  if (pullRequest.watcherFailure) warnings.push(`watcher:${pullRequest.watcherFailure.kind}`);
+  else if (pullRequest.watcherFailedAt) warnings.push('watcher');
   if (pullRequest.headDivergedAt) warnings.push('remote-head');
   const paginationGap = discussionPaginationGapMetadata(pullRequest);
   if (paginationGap) warnings.push(paginationGap);
@@ -295,7 +296,7 @@ export function reviewLines(state: ManagerState, filter: ReviewFilter, maxRows?:
   });
   const lines = [
     `review gates: ${openCount} open · ${attentionCount} attention · ${pullRequests.length} total (${matching.length} ${filter})`,
-    ...matching.map((pullRequest) => {
+    ...matching.flatMap((pullRequest) => {
       const label = pullRequest.number === undefined ? pullRequest.id : `#${pullRequest.number}`;
       const draft = pullRequest.draft ? 'draft' : pullRequest.status;
       const observation = pullRequest.observation;
@@ -303,7 +304,14 @@ export function reviewLines(state: ManagerState, filter: ReviewFilter, maxRows?:
         ? `ci:${observation.ci} · review:${observation.reviewDecision} · merge:${observation.mergeable}`
         : 'observation:none';
       const warnings = reviewWarningMetadata(pullRequest);
-      return `${label} [${draft}] ${pullRequest.workstreamId} · ${pullRequest.agentId} · ${hints}${warnings.length === 0 ? '' : ` · ⚠ ${warnings.join(',')}`}`;
+      return [
+        `${label} [${draft}] ${pullRequest.workstreamId} · ${pullRequest.agentId} · ${hints}${warnings.length === 0 ? '' : ` · ⚠ ${warnings.join(',')}`}`,
+        ...(pullRequest.watcherFailure === undefined
+          ? []
+          : [
+              `↳ ${label} watcher diagnosis [${pullRequest.watcherFailure.kind}]: ${pullRequest.watcherFailure.summary}`,
+            ]),
+      ];
     }),
   ];
   return boundedRows(lines, maxRows);
@@ -369,7 +377,9 @@ function compositionEvidence(pullRequest: PullRequestRecord): CompositionEvidenc
   const paths = uniqueSortedPaths(pullRequest.publishedChangedPaths);
   const reasons = [
     ...(pullRequest.headDivergedAt === undefined ? [] : ['remote-head']),
-    ...(pullRequest.watcherFailedAt === undefined ? [] : ['watcher']),
+    ...(pullRequest.watcherFailedAt === undefined && pullRequest.watcherFailure === undefined
+      ? []
+      : ['watcher']),
   ];
   return reasons.length === 0
     ? { paths, pullRequest, status: 'known' }
@@ -703,7 +713,7 @@ export function githubIntegrationHealthLines(
     [
       `github integration health: opt-in read-only hosted metadata · ${plural(inspection.inspectedPullRequestCount, 'review gate')} inspected${inspection.omittedPullRequestCount === 0 ? '' : ` · ${inspection.omittedPullRequestCount} omitted`}`,
       defaultBranch,
-      ...inspection.pullRequests.map((pullRequest) => {
+      ...inspection.pullRequests.flatMap((pullRequest) => {
         const label =
           pullRequest.number === undefined
             ? compactText(pullRequest.id, 42)
@@ -711,7 +721,14 @@ export function githubIntegrationHealthLines(
         const sharedFailure = canRenderSharedFailureHint(inspection, pullRequest)
           ? ` · likely-main-shared-failures:${pullRequest.sharedFailingWorkflowCount}`
           : '';
-        return `${label} · audited:${shortSha(pullRequest.auditedHeadSha)} · observed:${shortSha(pullRequest.observedHeadSha)} [${pullRequest.pullRequestHead}] · hosted:${hostedChecksLabel(pullRequest.hostedChecks)}${sharedFailure}`;
+        return [
+          `${label} · audited:${shortSha(pullRequest.auditedHeadSha)} · observed:${shortSha(pullRequest.observedHeadSha)} [${pullRequest.pullRequestHead}] · hosted:${hostedChecksLabel(pullRequest.hostedChecks)}${sharedFailure}`,
+          ...(pullRequest.watcherFailure === undefined
+            ? []
+            : [
+                `↳ ${label} watcher diagnosis [${pullRequest.watcherFailure.kind}]: ${pullRequest.watcherFailure.summary}`,
+              ]),
+        ];
       }),
       `bounds: first ${inspection.bounds.maxPullRequests} open review gates · first ${inspection.bounds.maxHostedChecksPerRef} server-selected hosted checks per ref · no logs, bodies, fetch, or pull`,
     ],

@@ -649,8 +649,8 @@ describe('Pardes model-visible tools', () => {
           pullRequestHead: 'current',
           sharedFailingWorkflowCount: 1,
           watcherFailure: {
-            kind: 'rate_limit_likely',
-            summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
+            kind: 'authentication_likely',
+            summary: 'GitHub CLI authentication likely failed; run gh auth status.',
           },
         },
       ],
@@ -683,7 +683,7 @@ describe('Pardes model-visible tools', () => {
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
         'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
-        '↳ #42 watcher diagnosis [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later.',
+        '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
       ].join('\n'),
     );
@@ -1400,8 +1400,8 @@ describe('Pardes model-visible tools', () => {
       url: 'https://github.test/acme/project/pull/42',
       watcherFailedAt: createdAt,
       watcherFailure: {
-        kind: 'rate_limit_likely',
-        summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
+        kind: 'authentication_likely',
+        summary: 'GitHub CLI authentication likely failed; run gh auth status.',
       },
       workstreamId: active.id,
     };
@@ -1428,13 +1428,13 @@ describe('Pardes model-visible tools', () => {
     );
 
     expect(summary.content[0]?.text).toContain(
-      '! review #42 [open] · ws-active · agent-watcher · ⚠ watcher:rate_limit_likely',
+      '! review #42 [open] · ws-active · agent-watcher · ⚠ watcher:authentication_likely',
     );
     expect(reviews.content[0]?.text).toContain(
-      '#42 [open] ws-active · agent-watcher · observation:none · ⚠ watcher:rate_limit_likely',
+      '#42 [open] ws-active · agent-watcher · observation:none · ⚠ watcher:authentication_likely',
     );
     expect(reviews.content[0]?.text).toContain(
-      '↳ #42 watcher diagnosis [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later.',
+      '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
     );
     expect(`${summary.content[0]?.text}\n${reviews.content[0]?.text}`).not.toContain('stderr');
   });
@@ -2216,7 +2216,7 @@ describe('Pardes model-visible tools', () => {
         id: 'event-watcher',
         pullRequestId: 'pr-42',
         summary:
-          '#42 watcher failed [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later. Raw CLI diagnostics omitted.',
+          '#42 watcher failed [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
         type: 'watcher_failed',
       },
     };
@@ -2289,7 +2289,7 @@ describe('Pardes model-visible tools', () => {
     );
     expect(watcher.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`);
     expect(watcher.content[0]?.text).toContain(
-      'GitHub API rate limit likely affected watcher inspection; retry later. Raw CLI diagnostics omitted.',
+      'GitHub CLI authentication likely failed; run gh auth status. Raw CLI diagnostics omitted.',
     );
     expect(watcher.content[0]?.text).not.toContain('stderr');
     expect(watcher.details).toMatchObject({

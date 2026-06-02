@@ -6179,7 +6179,7 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
-  test('keeps watcher failures separate from CI failures and deduplicated until a complete successful poll', async () => {
+  test('keeps rate-limit symptoms quiet, deduplicates pending auth failures, and rearms auth warning after acknowledgement', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -6196,77 +6196,65 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.activate(fixture.ctx));
     const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
     const pullRequestId = published.pullRequest.id;
+    const stateDir = activationStateDir(fixture.entries);
 
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    await Effect.runPromise(
-      watcher.observeLifecycle(pullRequestId, observedPullRequest({ ci: 'failing' })),
-    );
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
-    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
-      kind: 'authentication_likely',
-      summary: 'GitHub CLI authentication likely failed; run gh auth status.',
-    });
+    const initialRevision = controller.snapshot()?.revision;
     await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
-    const escalatedRevision = controller.snapshot()?.revision;
+    expect(controller.snapshot()?.revision).toBe(initialRevision);
+    expect(controller.snapshot()?.pullRequests[pullRequestId]).not.toHaveProperty('watcherFailure');
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed')).toEqual(
+      [],
+    );
+    expect(fixture.messages).toEqual([]);
+
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    const revisionAfterAuth = controller.snapshot()?.revision;
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    expect(controller.snapshot()?.revision).toBe(revisionAfterAuth);
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeDefined();
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
-      kind: 'rate_limit_likely',
-      summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
+      kind: 'authentication_likely',
+      summary: 'GitHub CLI authentication likely failed; run gh auth status.',
     });
-    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
-    await Effect.runPromise(watcher.fail(pullRequestId, repo));
-    expect(controller.snapshot()?.revision).toBe(escalatedRevision);
-    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
-      kind: 'rate_limit_likely',
-      summary: 'GitHub API rate limit likely affected watcher inspection; retry later.',
-    });
-    expect(
-      controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
-    ).toHaveLength(1);
-    expect(
-      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed')?.summary,
-    ).toContain(
-      'watcher failed [rate_limit_likely]: GitHub API rate limit likely affected watcher inspection; retry later.',
+    const firstWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
     );
-    expect(
-      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed')?.summary,
-    ).not.toContain('fixture outage');
-    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
+    expect(firstWarning.summary).toContain(
+      'watcher failed [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
+    );
     expect(fixture.messages).toHaveLength(1);
-    expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
-      'watcher failed [command_failed]',
-    );
-    expect(JSON.stringify(fixture.messages[0]?.message)).not.toContain('rate_limit_likely');
-    const eventLogBeforeClear = readFileSync(
-      join(activationStateDir(fixture.entries), 'events.jsonl'),
-      'utf8',
-    );
-    expect(eventLogBeforeClear.match(/"type":"watcher_failed"/g)).toHaveLength(1);
-    expect(eventLogBeforeClear).not.toContain('authentication_likely');
-    expect(eventLogBeforeClear).not.toContain('rate_limit_likely');
+    expect(
+      readFileSync(join(stateDir, 'events.jsonl'), 'utf8').match(/"type":"watcher_failed"/g),
+    ).toHaveLength(1);
 
-    await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest({ ci: 'failing' })));
-    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeUndefined();
-    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toBeUndefined();
-    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'ci_failed')).toHaveLength(1);
-    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
-
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { statusCode: 429 }));
+    expect(controller.snapshot()?.revision).toBe(revisionAfterAuth);
     expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toEqual({
       kind: 'authentication_likely',
       summary: 'GitHub CLI authentication likely failed; run gh auth status.',
     });
-    expect(
-      controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed'),
-    ).toHaveLength(2);
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed')).toEqual([
+      firstWarning,
+    ]);
     expect(fixture.messages).toHaveLength(1);
-    const eventLog = readFileSync(
-      join(activationStateDir(fixture.entries), 'events.jsonl'),
-      'utf8',
+
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: firstWarning.id }));
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'watcher_failed')).toEqual(
+      [],
     );
-    expect(eventLog.match(/"type":"watcher_failed"/g)).toHaveLength(2);
-    expect(eventLog).not.toContain('fixture outage');
+    await Effect.runPromise(watcher.fail(pullRequestId, repo, { status: 401 }));
+    const secondWarning = requiredValue(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'watcher_failed'),
+    );
+    expect(secondWarning.id).not.toBe(firstWarning.id);
+    expect(secondWarning.summary).toBe(firstWarning.summary);
+    expect(
+      readFileSync(join(stateDir, 'events.jsonl'), 'utf8').match(/"type":"watcher_failed"/g),
+    ).toHaveLength(2);
+
+    await Effect.runPromise(watcher.observe(pullRequestId, observedPullRequest()));
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailedAt).toBeUndefined();
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.watcherFailure).toBeUndefined();
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 

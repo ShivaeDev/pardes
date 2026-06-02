@@ -16,18 +16,6 @@ export const GITHUB_WATCHER_FAILURE_SUMMARIES = {
 
 export type GitHubWatcherFailureKind = keyof typeof GITHUB_WATCHER_FAILURE_SUMMARIES;
 
-/** Bounded monotonic escalation policy for one unresolved watcher outage. */
-export const GITHUB_WATCHER_FAILURE_RANKS = {
-  association_invalid: 2,
-  authentication_likely: 3,
-  command_failed: 1,
-  command_timed_out: 2,
-  metadata_invalid: 2,
-  rate_limit_likely: 4,
-  unexpected_error: 0,
-  unexpected_typed_error: 0,
-} as const satisfies Readonly<Record<GitHubWatcherFailureKind, number>>;
-
 /** Canonical durable watcher diagnosis. Raw CLI diagnostics never cross this boundary. */
 export const GitHubWatcherFailureDiagnosticSchema = Schema.Union([
   Schema.Struct({
@@ -128,16 +116,6 @@ export function githubCommandFailureDiagnosticHint(
   )
     return 'authentication_likely';
   return undefined;
-}
-
-export function isGitHubWatcherFailureEscalation(
-  previous: GitHubWatcherFailureDiagnostic | undefined,
-  next: GitHubWatcherFailureDiagnostic,
-): boolean {
-  return (
-    previous === undefined ||
-    GITHUB_WATCHER_FAILURE_RANKS[next.kind] > GITHUB_WATCHER_FAILURE_RANKS[previous.kind]
-  );
 }
 
 function commandFailureKind(error: GitHubCommandError): GitHubWatcherFailureKind {

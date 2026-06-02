@@ -6,7 +6,6 @@ import {
   type GitHubDiscussionCursor,
   type GitHubDiscussionSurface,
   type GitHubWatcherCallbacks,
-  isGitHubWatcherFailureEscalation,
   type PullRequestDiscussionFeedback,
   type PullRequestDiscussionPageCap,
   type PullRequestDiscussionSnapshot,
@@ -67,22 +66,16 @@ function makeEvent(
   return { createdAt, id: randomUUID(), summary, type, ...association };
 }
 
-function updatePendingWatcherFailureAttention(
+function hasPendingWatcherFailureAttention(
   inbox: ReadonlyArray<ManagerEvent>,
-  pullRequest: PullRequestRecord,
-  summary: string,
-): ReadonlyArray<ManagerEvent> {
-  if (pullRequest.watcherFailedAt === undefined) return inbox;
-  for (let index = inbox.length - 1; index >= 0; index--) {
-    const event = inbox[index];
-    if (
-      event?.type === 'watcher_failed' &&
-      event.pullRequestId === pullRequest.id &&
-      event.createdAt === pullRequest.watcherFailedAt
-    )
-      return inbox.map((row, rowIndex) => (rowIndex === index ? { ...row, summary } : row));
-  }
-  return inbox;
+  attention: ManagerEvent,
+): boolean {
+  return inbox.some(
+    (event) =>
+      event.type === 'watcher_failed' &&
+      event.pullRequestId === attention.pullRequestId &&
+      event.summary === attention.summary,
+  );
 }
 
 function pullRequestObservationsEqual(
@@ -827,11 +820,9 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     )
       return;
     const diagnostic = classifyGitHubWatcherFailure(event.error);
-    if (
-      known.watcherFailedAt !== undefined &&
-      !isGitHubWatcherFailureEscalation(known.watcherFailure, diagnostic)
-    )
-      return;
+    // Rate-budget software owns quiet throttling, recovery, and budget-health
+    // projection. A likely rate-limit symptom is not PR attention.
+    if (diagnostic.kind === 'rate_limit_likely') return;
     const timestamp = yield* nowIso;
     const attention = makeEvent(
       'watcher_failed',
@@ -844,21 +835,17 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       if (
         !pullRequest ||
         !watcherEventMatchesAssociation(pullRequest, event.expectedHeadSha) ||
-        pullRequest.status !== 'open' ||
-        (pullRequest.watcherFailedAt !== undefined &&
-          !isGitHubWatcherFailureEscalation(pullRequest.watcherFailure, diagnostic))
+        pullRequest.status !== 'open'
       )
         return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
-      const enqueued = pullRequest.watcherFailedAt === undefined;
+      const enqueued = !hasPendingWatcherFailureAttention(state.inbox, attention);
+      const changed = enqueued || pullRequest.watcherFailure?.kind !== diagnostic.kind;
+      if (!changed) return Effect.succeed([{ changed: false, enqueued: false }, state] as const);
       return Effect.succeed([
         { changed: true, enqueued },
         {
           ...state,
-          // An already-delivered wake remains bounded onset evidence. Current
-          // inbox drill-down and review/health projections carry escalation.
-          inbox: enqueued
-            ? [...state.inbox, attention]
-            : updatePendingWatcherFailureAttention(state.inbox, pullRequest, attention.summary),
+          inbox: enqueued ? [...state.inbox, attention] : state.inbox,
           pullRequests: {
             ...state.pullRequests,
             [pullRequest.id]: {

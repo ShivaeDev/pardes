@@ -82,10 +82,8 @@ export {
 export {
   classifyGitHubWatcherFailure,
   GITHUB_WATCHER_DIAGNOSTIC_SCAN_MAX_CHARS,
-  GITHUB_WATCHER_FAILURE_RANKS,
   GITHUB_WATCHER_FAILURE_SUMMARIES,
   type GitHubWatcherFailureDiagnostic,
   GitHubWatcherFailureDiagnosticSchema,
   type GitHubWatcherFailureKind,
-  isGitHubWatcherFailureEscalation,
 } from './watcher-diagnostics.ts';

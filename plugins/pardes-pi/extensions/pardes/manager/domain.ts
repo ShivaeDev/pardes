@@ -311,6 +311,8 @@ export type InboxHandoff = typeof InboxHandoffSchema.Type;
 
 export const ManagerStateSchema = Schema.Struct({
   agents: Schema.Record(Schema.String, AgentRecordSchema),
+  /** Durable dedupe marker for one controller-scoped GitHub.com rate-metadata warning. */
+  githubRateMetadataUnavailableAt: Schema.optionalKey(NonEmptyString),
   inbox: Schema.Array(ManagerEventSchema),
   inboxHandoff: Schema.optionalKey(InboxHandoffSchema),
   inboxWake: Schema.optionalKey(InboxWakeSchema),

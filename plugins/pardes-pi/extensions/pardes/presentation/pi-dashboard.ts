@@ -7,6 +7,7 @@ import {
   type TUI,
   truncateToWidth,
 } from '@earendil-works/pi-tui';
+import type { GitHubRateLimitCompactStatus } from '../github/index.ts';
 import type { ManagerCompactionSafetySnapshot, ManagerState } from '../manager/index.ts';
 import type { WorkerRuntimeSnapshot } from '../worker-runtime/index.ts';
 import {
@@ -18,6 +19,7 @@ import {
   compactWidgetLines,
   dashboardLines,
   dashboardSummary,
+  githubRateStatusToken,
   renderCompactWidgetLines,
   renderDashboardLines,
 } from './dashboard.ts';
@@ -51,6 +53,7 @@ function dashboardWidgetFactory(
   ctx: ExtensionContext,
   state: ManagerState,
   runtimes: ReadonlyMap<string, WorkerRuntimeSnapshot>,
+  githubRateStatus?: GitHubRateLimitCompactStatus,
 ): DashboardWidgetFactory {
   const factory = ((_tui: TUI, theme: Theme) => ({
     invalidate: () => {},
@@ -61,10 +64,12 @@ function dashboardWidgetFactory(
         Date.now(),
         themePalette(theme),
         managerContextSummary(ctx.getContextUsage()),
+        githubRateStatus,
       ).map((line) => truncateToWidth(line, width)),
   })) as DashboardWidgetFactory;
   // Preserve a plain projection for simple headless adapters that inspect widget text without instantiating its component.
-  factory.join = (separator?: string) => compactWidgetLines(state, runtimes).join(separator);
+  factory.join = (separator?: string) =>
+    compactWidgetLines(state, runtimes, Date.now(), githubRateStatus).join(separator);
   return factory;
 }
 
@@ -128,6 +133,7 @@ export interface ManagerPresentation {
     state: ManagerState,
     runtimes?: ReadonlyMap<string, WorkerRuntimeSnapshot>,
     compactionSafety?: ManagerCompactionSafetySnapshot,
+    githubRateStatus?: GitHubRateLimitCompactStatus,
   ) => void;
   readonly clearDashboard: (ctx: ExtensionContext) => void;
   readonly toggleBridgeMonitor: (
@@ -228,7 +234,7 @@ export function makeManagerPresentation(): ManagerPresentation {
       return monitorState.manuallyHidden ? 'hidden' : 'shown';
     },
 
-    updateDashboard(ctx, state, runtimes = new Map(), compactionSafety) {
+    updateDashboard(ctx, state, runtimes = new Map(), compactionSafety, githubRateStatus) {
       const { counts, statuses } = dashboardSummary(state, runtimes);
       const warning = statuses.warnings > 0 ? ` warn:${statuses.warnings}` : '';
       const compaction =
@@ -239,7 +245,9 @@ export function makeManagerPresentation(): ManagerPresentation {
             : compactionSafety.phase === 'succeeded_unsettled'
               ? ' cmp:ok/resume'
               : ' cmp:abort/expiry';
-      const status = `pardes:${state.managerId.slice(0, 8)} run:${statuses.running} idle:${statuses.idle}${warning} inbox:${state.inbox.length}${compaction}`;
+      const githubRate =
+        githubRateStatus === undefined ? '' : ` ${githubRateStatusToken(githubRateStatus)}`;
+      const status = `pardes:${state.managerId.slice(0, 8)} run:${statuses.running} idle:${statuses.idle}${warning} inbox:${state.inbox.length}${compaction}${githubRate}`;
       ctx.ui.setStatus(
         STATUS_KEY,
         ctx.ui.theme.fg(
@@ -247,7 +255,7 @@ export function makeManagerPresentation(): ManagerPresentation {
           status,
         ),
       );
-      ctx.ui.setWidget(WIDGET_KEY, dashboardWidgetFactory(ctx, state, runtimes), {
+      ctx.ui.setWidget(WIDGET_KEY, dashboardWidgetFactory(ctx, state, runtimes, githubRateStatus), {
         placement: 'belowEditor',
       });
       ctx.ui.setTitle(

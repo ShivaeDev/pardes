@@ -35,6 +35,11 @@ export function reviewLines(state: ManagerState, filter: ReviewFilter, maxRows?:
   });
   const lines = [
     `review gates: ${openCount} open · ${attentionCount} attention · ${pullRequests.length} total (${matching.length} ${filter})`,
+    ...(state.githubRateMetadataUnavailableAt === undefined
+      ? []
+      : [
+          'global GitHub warning [external-metadata]: rate metadata unavailable or invalid · watcher polling deferred',
+        ]),
     ...matching.flatMap((pullRequest) => {
       const label = pullRequest.number === undefined ? pullRequest.id : `#${pullRequest.number}`;
       const draft = pullRequest.draft ? 'draft' : pullRequest.status;

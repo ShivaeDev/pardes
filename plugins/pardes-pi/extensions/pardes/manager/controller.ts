@@ -7,9 +7,11 @@ import {
   makeManagedWorktreeService,
 } from '../git/index.ts';
 import {
+  type GitHubHostedMetadataShape,
   type GitHubIntegrationHealthShape,
   type GitHubPublicationShape,
   type GitHubWatcherShape,
+  makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
   makeGitHubPublicationService,
   makeGitHubWatcherService,
@@ -340,6 +342,7 @@ export class ManagerController {
   private latestContext: ExtensionContext | undefined;
   private readonly worktrees: ManagedWorktreeShape;
   private readonly github: GitHubPublicationShape;
+  private readonly githubHostedMetadata: GitHubHostedMetadataShape;
   private readonly githubWatcher: GitHubWatcherShape;
   private readonly githubIntegrationHealth: GitHubIntegrationHealthShape;
   private readonly githubRateLimitSymptomOwnership: GitHubRateLimitSymptomOwnershipPort | undefined;
@@ -366,10 +369,18 @@ export class ManagerController {
     options: ManagerControllerOptions = {},
   ) {
     this.worktrees = options.worktrees ?? makeManagedWorktreeService();
-    this.github = options.github ?? makeGitHubPublicationService();
-    this.githubWatcher = options.githubWatcher ?? makeGitHubWatcherService();
+    // One fresh controller owns one repository-pinned GitHub.com context. Ambient `gh`
+    // credential switches cannot be proved here: callers must reload the manager first so a
+    // fresh controller naturally drops this bounded hosted-metadata cache and debt ledger.
+    const githubHostedMetadata = makeGitHubHostedMetadataAdapter();
+    this.githubHostedMetadata = githubHostedMetadata;
+    this.github =
+      options.github ?? makeGitHubPublicationService({ hostedMetadata: githubHostedMetadata });
+    this.githubWatcher =
+      options.githubWatcher ?? makeGitHubWatcherService({ hostedMetadata: githubHostedMetadata });
     this.githubIntegrationHealth =
-      options.githubIntegrationHealth ?? makeGitHubIntegrationHealthService();
+      options.githubIntegrationHealth ??
+      makeGitHubIntegrationHealthService({ hostedMetadata: githubHostedMetadata });
     this.githubRateLimitSymptomOwnership = options.githubRateLimitSymptomOwnership;
     this.presentation = options.presentation ?? makeManagerPresentation();
     this.compactionSafetyScheduler =
@@ -591,6 +602,7 @@ export class ManagerController {
         this.active.state,
         this.liveRuntimes,
         this.compactionSafety,
+        this.githubHostedMetadata.compactStatusUnsafe(),
       );
     else this.presentation.clearDashboard(ctx);
   }
@@ -1019,6 +1031,15 @@ export class ManagerController {
       return yield* new ManagerAlreadyActiveError({ managerId: this.active.state.managerId });
     this.clearCompactionSafety();
     const repo = yield* discoverRepository(ctx.cwd);
+    yield* this.githubHostedMetadata
+      .ensureControllerScope(repo.primaryCheckout)
+      .pipe(
+        Effect.mapError(() =>
+          invalidManagedState(
+            'loaded controller is pinned to another GitHub.com repository context; reload the manager extension to create a fresh controller',
+          ),
+        ),
+      );
     const managerId = randomUUID();
     const directory = managerDirectory(repo, managerId);
     const state = initialManagerState(managerId, repo);
@@ -1173,6 +1194,15 @@ export class ManagerController {
       return yield* invalidManagedState('manager activation namespace is invalid');
     }
     const repo = yield* discoverRepository(ctx.cwd);
+    yield* this.githubHostedMetadata
+      .ensureControllerScope(repo.primaryCheckout)
+      .pipe(
+        Effect.mapError(() =>
+          invalidManagedState(
+            'loaded controller is pinned to another GitHub.com repository context; reload the manager extension to create a fresh controller',
+          ),
+        ),
+      );
     if (activation.stateDir !== managerDirectory(repo, activation.managerId)) {
       return yield* invalidManagedState(
         'manager state directory does not match its activation namespace',

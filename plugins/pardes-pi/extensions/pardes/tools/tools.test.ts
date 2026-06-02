@@ -706,6 +706,34 @@ describe('Pardes model-visible tools', () => {
           },
         },
       ],
+      rateLimit: {
+        credentialContext: 'github_com_controller_lifetime',
+        fallback: 'available',
+        graphql: {
+          availability: 'available',
+          limit: 5_000,
+          pressure: 'near_exhaustion',
+          remaining: 100,
+          resetAt: '2026-06-01T01:00:00Z',
+          source: 'graphql',
+        },
+        observation: 'bounded_hosted_rate_budget',
+        rest: {
+          availability: 'available',
+          limit: 5_000,
+          pressure: 'ready',
+          remaining: 4_000,
+          resetAt: '2026-06-01T01:00:00Z',
+          source: 'rest_fallback',
+        },
+        watcherPolling: {
+          effectiveRemaining: 100,
+          reason: 'proactive_throttle',
+          status: 'deferred',
+          tier: 'paused',
+          until: '2026-06-01T01:00:00Z',
+        },
+      },
     };
     let inspections = 0;
     const manager = {
@@ -734,6 +762,9 @@ describe('Pardes model-visible tools', () => {
       [
         'github integration health: opt-in read-only hosted metadata · 1 review gate inspected',
         'default branch main · advertised:aaaaaaaaaaaa · hosted:aaaaaaaaaaaa [current/complete] · ci:failing · checks:2 · fail:1',
+        'rate scope: GitHub.com repository pinned/controller lifetime · caller must not switch gh credentials in place · reload manager first for fresh cache',
+        'rate budget: graphql:100/5000 [near_exhaustion/graphql] · reset:2026-06-01T01:00:00Z',
+        'rate fallback: rest:4000/5000 [ready/rest_fallback] · reset:2026-06-01T01:00:00Z · endpoint:available · watcher-last-disposition:deferred(proactive_throttle)',
         '#42 · audited:bbbbbbbbbbbb · observed:bbbbbbbbbbbb [current] · hosted:cccccccccccc [current/complete] · ci:failing · checks:1 · fail:1 · likely-main-shared-failures:1',
         '↳ #42 watcher diagnosis [authentication_likely]: GitHub CLI authentication likely failed; run gh auth status.',
         'bounds: first 12 open review gates · first 50 server-selected hosted checks per ref · no logs, bodies, fetch, or pull',
@@ -1214,6 +1245,7 @@ describe('Pardes model-visible tools', () => {
     ];
     const state = {
       ...base,
+      githubRateMetadataUnavailableAt: createdAt,
       inbox: [
         ...inbox,
         {
@@ -1245,6 +1277,9 @@ describe('Pardes model-visible tools', () => {
     );
     expect(reviews.content[0]?.text).toContain(
       'review gates: 2 open · 1 attention · 2 total (1 attention)',
+    );
+    expect(reviews.content[0]?.text).toContain(
+      'global GitHub warning [external-metadata]: rate metadata unavailable or invalid · watcher polling deferred',
     );
     expect(reviews.content[0]?.text).toContain('#42 [open]');
     expect(reviews.content[0]?.text).not.toContain('#41 [open]');
@@ -2266,6 +2301,12 @@ describe('Pardes model-visible tools', () => {
         type: 'discussion_feedback',
         workstreamId: 'ws-1',
       },
+      'event-global-metadata': {
+        createdAt,
+        id: 'event-global-metadata',
+        summary: 'GitHub.com watcher rate metadata is unavailable or invalid.',
+        type: 'github_rate_metadata_unavailable',
+      },
       'event-hostile': {
         createdAt,
         id: 'event-hostile',
@@ -2406,6 +2447,21 @@ describe('Pardes model-visible tools', () => {
     expect(metadata.details).toMatchObject({
       eventId: 'event-metadata',
       pullRequestId: 'pr-42',
+      trust: 'external_metadata',
+    });
+
+    const globalMetadata = await inboxGet.execute(
+      'call-global-metadata',
+      { eventId: 'event-global-metadata' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(globalMetadata.content[0]?.text).toContain(
+      `[${INBOX_EVENT_EXTERNAL_METADATA_TRUST_LABEL}]`,
+    );
+    expect(globalMetadata.details).toMatchObject({
+      eventId: 'event-global-metadata',
       trust: 'external_metadata',
     });
 

@@ -5,13 +5,36 @@ import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { initialManagerState, ManagerStateSchema } from '../manager/index.ts';
 import { runGitFixture } from '../test-support.ts';
-import { GitHubCommandError, makeGitHubPublicationService } from './index.ts';
+import {
+  GitHubCommandError,
+  makeGitHubHostedMetadataAdapter,
+  makeGitHubPublicationService,
+} from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
 import {
   type GitHubCommandRunnerShape,
   makeExecFileGitHubCommandRunner,
+  type ProcessInvocation,
   type ProcessResult,
 } from './transport.ts';
+
+function withoutBoundRepoArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {
+  return args.at(-2) === '--repo' && args.at(-1) === 'acme/project' ? args.slice(0, -2) : args;
+}
+
+function withoutBoundRepo(
+  invocation: ProcessInvocation | undefined,
+): ProcessInvocation | undefined {
+  return invocation === undefined
+    ? undefined
+    : { ...invocation, args: withoutBoundRepoArgs(invocation.args) };
+}
+
+function withoutBoundRepos(
+  invocations: ReadonlyArray<ProcessInvocation>,
+): ReadonlyArray<ProcessInvocation> {
+  return invocations.map(withoutBoundRepo) as ReadonlyArray<ProcessInvocation>;
+}
 
 function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -24,7 +47,7 @@ function pullRequest(overrides: Partial<Record<string, unknown>> = {}) {
     number: 42,
     state: 'OPEN',
     title: 'Publish the bounded slice',
-    url: 'https://github.test/acme/project/pull/42',
+    url: 'https://github.com/acme/project/pull/42',
     ...overrides,
   };
 }
@@ -60,6 +83,54 @@ describe('GitHub publication boundary', () => {
       'octouser/pardes/readable-branch-ux-12345678',
       'octouser/pardes/readable-branch-ux-12345678-87654321',
     ]);
+  });
+
+  test('proves the fixed route before explicitly hosted actor lookup and retains conservative REST debt', async () => {
+    const fixture = scriptedRunner([
+      result(
+        JSON.stringify({
+          resources: {
+            core: { limit: 5_000, remaining: 3_000, reset: 1_800_000_000 },
+            graphql: { limit: 5_000, remaining: 4_000, reset: 1_800_000_000 },
+          },
+        }),
+      ),
+      result('OctoUser\n'),
+      result(),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.succeed(1_700_000_000_000),
+      runner: fixture.runner,
+    });
+    const service = makeGitHubPublicationService({ hostedMetadata, runner: fixture.runner });
+    await Effect.runPromise(hostedMetadata.refreshFallback(input.cwd));
+
+    await Effect.runPromise(
+      service.publishedReviewBranchCandidates({
+        cwd: input.cwd,
+        disambiguator: 'agent-12345678',
+        fallbackDisambiguator: 'manager-87654321',
+        workstreamTitle: 'Readable Branch UX',
+      }),
+    );
+    const rateLimit = await Effect.runPromise(hostedMetadata.snapshot());
+
+    expect(fixture.invocations[1]?.args).toEqual([
+      'api',
+      'user',
+      '--hostname',
+      'github.com',
+      '--jq',
+      '.login',
+    ]);
+    expect(fixture.invocations[2]?.args).toEqual([
+      'ls-remote',
+      '--heads',
+      'git@github.com:acme/project.git',
+      'refs/heads/octouser',
+      'refs/heads/octouser/pardes',
+    ]);
+    expect(rateLimit.rest).toMatchObject({ remaining: 2_999, source: 'local_estimate' });
   });
 
   test('falls back to a sanitized Git config actor when the GitHub login response is not safe', async () => {
@@ -120,7 +191,7 @@ describe('GitHub publication boundary', () => {
         '--atomic',
         `--force-with-lease=refs/heads/${branch}:`,
         `--force-with-lease=refs/heads/${claim}:`,
-        'origin',
+        'git@github.com:acme/project.git',
         `${input.headSha}:refs/heads/${branch}`,
         `${input.headSha}:refs/heads/${claim}`,
       ],
@@ -146,7 +217,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations[1]?.args).toEqual([
       'push',
       `--force-with-lease=refs/heads/${claim}:${input.headSha}`,
-      'origin',
+      'git@github.com:acme/project.git',
       `:refs/heads/${claim}`,
     ]);
   });
@@ -160,7 +231,12 @@ describe('GitHub publication boundary', () => {
       readonly command: string;
       readonly cwd: string;
     }> = [];
-    const outputs: Array<ProcessResult | 'lost'> = [result(), 'lost', result(advertised)];
+    const outputs: Array<ProcessResult | 'lost'> = [
+      result('git@github.com:acme/project.git\n'),
+      result(),
+      'lost',
+      result(advertised),
+    ];
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
         invocations.push(invocation);
@@ -225,7 +301,19 @@ describe('GitHub publication boundary', () => {
       git('remote', 'add', 'origin', origin);
       const headSha = git('rev-parse', 'HEAD');
       git('push', 'origin', `${headSha}:refs/heads/${HUMAN_CLAIM}/child`);
-      const service = makeGitHubPublicationService({ runner: makeExecFileGitHubCommandRunner() });
+      const execRunner = makeExecFileGitHubCommandRunner();
+      const runner: GitHubCommandRunnerShape = {
+        run: (invocation) =>
+          invocation.command === 'git' && invocation.args.join(' ') === 'remote get-url origin'
+            ? Effect.succeed(result('git@github.com:acme/project.git\n'))
+            : execRunner.run({
+                ...invocation,
+                args: invocation.args.map((arg) =>
+                  arg === 'git@github.com:acme/project.git' ? 'origin' : arg,
+                ),
+              }),
+      };
+      const service = makeGitHubPublicationService({ runner });
 
       expect(
         await Effect.runPromise(
@@ -249,6 +337,7 @@ describe('GitHub publication boundary', () => {
   test('classifies an actor-root TOCTOU hierarchy conflict after failed atomic reservation', async () => {
     const branch = 'actor/pardes/readable-branch-ux';
     const outputs: Array<ProcessResult | 'race'> = [
+      result('git@github.com:acme/project.git\n'),
       result(),
       'race',
       result(`${input.headSha}\trefs/heads/actor\n`),
@@ -286,7 +375,7 @@ describe('GitHub publication boundary', () => {
         }),
       ),
     ).toBe('hierarchy_collision');
-    expect(invocations).toHaveLength(3);
+    expect(invocations).toHaveLength(4);
   });
 
   test('allows create-capable human publication only after mechanical remote reservation proof', async () => {
@@ -314,13 +403,13 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations[0]?.args).toEqual([
       'ls-remote',
       '--heads',
-      'origin',
+      'git@github.com:acme/project.git',
       `refs/heads/${headBranch}`,
       `refs/heads/${HUMAN_CLAIM}`,
     ]);
     expect(fixture.invocations[1]?.args).toEqual([
       'push',
-      'origin',
+      'git@github.com:acme/project.git',
       `${input.headSha}:refs/heads/${headBranch}`,
     ]);
   });
@@ -346,11 +435,11 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(1);
   });
 
-  test('pushes exactly the audited SHA with an explicit branch refspec before creating a ready-for-review PR', async () => {
+  test('pushes exactly the audited SHA to the proved immutable remote target before creating a ready-for-review PR', async () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
-      result('https://github.test/acme/project/pull/42\n'),
+      result('https://github.com/acme/project/pull/42\n'),
       result(JSON.stringify(pullRequest())),
       result(),
     ]);
@@ -368,15 +457,24 @@ describe('GitHub publication boundary', () => {
       openedInBrowser: true,
       status: 'open',
       title: input.title,
-      url: 'https://github.test/acme/project/pull/42',
+      url: 'https://github.com/acme/project/pull/42',
     });
     expect(fixture.invocations[0]).toEqual({
-      args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+      args: [
+        'push',
+        'git@github.com:acme/project.git',
+        `${input.headSha}:refs/heads/${input.headBranch}`,
+      ],
       command: 'git',
       cwd: input.cwd,
     });
     expect(fixture.invocations[0]?.args).not.toContain('--force');
-    expect(fixture.invocations[1]).toEqual({
+    expect(
+      fixture.invocations
+        .filter(({ args, command }) => command === 'gh' && args[0] === 'pr')
+        .every(({ args }) => args.at(-2) === '--repo' && args.at(-1) === 'acme/project'),
+    ).toBe(true);
+    expect(withoutBoundRepo(fixture.invocations[1])).toEqual({
       args: [
         'pr',
         'list',
@@ -394,7 +492,7 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
-    expect(fixture.invocations[2]).toEqual({
+    expect(withoutBoundRepo(fixture.invocations[2])).toEqual({
       args: [
         'pr',
         'create',
@@ -410,18 +508,59 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
-    expect(fixture.invocations[3]?.args).toEqual([
+    expect(withoutBoundRepoArgs(fixture.invocations[3]?.args ?? [])).toEqual([
       'pr',
       'view',
       input.headBranch,
       '--json',
       'number,url,state,isDraft,headRefName,headRefOid,baseRefName',
     ]);
-    expect(fixture.invocations.at(-1)).toEqual({
+    expect(withoutBoundRepo(fixture.invocations.at(-1))).toEqual({
       args: ['pr', 'view', '42', '--web'],
       command: 'gh',
       cwd: input.cwd,
     });
+  });
+
+  test('retains completed CLI-only hosted spend conservatively without changing exact-SHA publication', async () => {
+    const fallback = scriptedRunner([
+      result(
+        JSON.stringify({
+          resources: {
+            core: { limit: 5_000, remaining: 3_000, reset: 1_800_000_000 },
+            graphql: { limit: 5_000, remaining: 4_000, reset: 1_800_000_000 },
+          },
+        }),
+      ),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.succeed(1_700_000_000_000),
+      runner: fallback.runner,
+    });
+    await Effect.runPromise(hostedMetadata.refreshFallback(input.cwd));
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result('https://github.com/acme/project/pull/42\n'),
+      result(JSON.stringify(pullRequest())),
+    ]);
+    const service = makeGitHubPublicationService({ hostedMetadata, runner: fixture.runner });
+
+    await Effect.runPromise(service.publish(input));
+    const rateLimit = await Effect.runPromise(hostedMetadata.snapshot());
+
+    expect(rateLimit.graphql).toMatchObject({ remaining: 3_985, source: 'local_estimate' });
+    expect(rateLimit.rest).toMatchObject({ remaining: 3_000, source: 'rest_fallback' });
+    expect(fixture.invocations[0]).toEqual({
+      args: [
+        'push',
+        'git@github.com:acme/project.git',
+        `${input.headSha}:refs/heads/${input.headBranch}`,
+      ],
+      command: 'git',
+      cwd: input.cwd,
+    });
+    expect(fixture.invocations[0]?.args).not.toContain('--force');
   });
 
   test('keeps schema-v1 opaque reservations publishable without force-pushing', async () => {
@@ -441,7 +580,7 @@ describe('GitHub publication boundary', () => {
     expect(published).toMatchObject({ action: 'created', headBranch: opaqueHeadBranch });
     expect(fixture.invocations[0]?.args).toEqual([
       'push',
-      'origin',
+      'git@github.com:acme/project.git',
       `${input.headSha}:refs/heads/${opaqueHeadBranch}`,
     ]);
     expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
@@ -465,7 +604,7 @@ describe('GitHub publication boundary', () => {
     expect(published).toMatchObject({ action: 'created', headBranch: nestedHeadBranch });
     expect(fixture.invocations[0]?.args).toEqual([
       'push',
-      'origin',
+      'git@github.com:acme/project.git',
       `${input.headSha}:refs/heads/${nestedHeadBranch}`,
     ]);
     expect(fixture.invocations.flatMap(({ args }) => args)).not.toContain('--force');
@@ -516,7 +655,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
       false,
     );
-    expect(fixture.invocations[2]).toEqual({
+    expect(withoutBoundRepo(fixture.invocations[2])).toEqual({
       args: [
         'pr',
         'edit',
@@ -531,7 +670,7 @@ describe('GitHub publication boundary', () => {
       command: 'gh',
       cwd: input.cwd,
     });
-    expect(fixture.invocations[1]?.args).toEqual([
+    expect(withoutBoundRepoArgs(fixture.invocations[1]?.args ?? [])).toEqual([
       'pr',
       'list',
       '--state',
@@ -545,7 +684,7 @@ describe('GitHub publication boundary', () => {
       '--json',
       'number,headRefName,baseRefName',
     ]);
-    expect(fixture.invocations[3]?.args).toEqual([
+    expect(withoutBoundRepoArgs(fixture.invocations[3]?.args ?? [])).toEqual([
       'pr',
       'view',
       '42',
@@ -621,7 +760,9 @@ describe('GitHub publication boundary', () => {
       result(),
       result(JSON.stringify([existing])),
       result(),
-      result(JSON.stringify(pullRequest({ number: 43 }))),
+      result(
+        JSON.stringify(pullRequest({ number: 43, url: 'https://github.com/acme/project/pull/43' })),
+      ),
     ]);
     const service = makeGitHubPublicationService({
       pushedHeadVerificationDelayMillis: 0,
@@ -770,6 +911,27 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toEqual([]);
   });
 
+  test('rejects a non-github.com repository origin before push or hosted publication requests', async () => {
+    const invocations: ProcessInvocation[] = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        invocations.push(invocation);
+        return Effect.succeed(result('git@github.enterprise.test:acme/project.git\n'));
+      },
+    };
+    const service = makeGitHubPublicationService({ runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+    expect(invocations).toEqual([
+      { args: ['remote', 'get-url', 'origin'], command: 'git', cwd: input.cwd },
+    ]);
+  });
+
   test('updates an exactly matching open pre-hardening review gate only after remote proof and without creating or force-pushing', async () => {
     const legacyHeadBranch = 'pardes/manager-1/agent-1';
     const fixture = scriptedRunner([
@@ -789,7 +951,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(published).toMatchObject({ action: 'updated', headBranch: legacyHeadBranch });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: [
           'pr',
@@ -802,7 +964,11 @@ describe('GitHub publication boundary', () => {
         cwd: input.cwd,
       },
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${legacyHeadBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${legacyHeadBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -857,7 +1023,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(failure._tag).toBe('GitHubResponseError');
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: [
           'pr',
@@ -891,7 +1057,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(failure._tag).toBe('GitHubResponseError');
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: [
           'pr',
@@ -924,14 +1090,18 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(synced).toEqual({ status: 'synced' });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
         cwd: input.cwd,
       },
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${input.headBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -971,7 +1141,11 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(4);
     expect(fixture.invocations.filter(({ command }) => command === 'git')).toEqual([
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${input.headBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${input.headBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -1138,14 +1312,18 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(synced).toEqual({ status: 'synced' });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
         cwd: input.cwd,
       },
       {
-        args: ['push', 'origin', `${input.headSha}:refs/heads/${legacyHeadBranch}`],
+        args: [
+          'push',
+          'git@github.com:acme/project.git',
+          `${input.headSha}:refs/heads/${legacyHeadBranch}`,
+        ],
         command: 'git',
         cwd: input.cwd,
       },
@@ -1171,7 +1349,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(synced).toEqual({ pullRequestStatus: 'merged', status: 'terminal' });
-    expect(fixture.invocations).toEqual([
+    expect(withoutBoundRepos(fixture.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
@@ -1214,7 +1392,7 @@ describe('GitHub publication boundary', () => {
     );
 
     expect(mismatchFailure._tag).toBe('GitHubResponseError');
-    expect(mismatch.invocations).toEqual([
+    expect(withoutBoundRepos(mismatch.invocations)).toEqual([
       {
         args: ['pr', 'view', '42', '--json', 'number,state,headRefName'],
         command: 'gh',
@@ -1223,8 +1401,42 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
+  test('rejects a same-host cross-repository final publication URL', async () => {
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ url: 'https://github.com/other/project/pull/42' }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for association URL',
+    });
+  });
+
+  test('rejects a same-repository final publication URL whose path number disagrees with metadata', async () => {
+    const fixture = scriptedRunner([
+      result(),
+      result('[]'),
+      result(),
+      result(JSON.stringify(pullRequest({ url: 'https://github.com/acme/project/pull/43' }))),
+    ]);
+    const service = makeGitHubPublicationService({ runner: fixture.runner });
+
+    const failure = await Effect.runPromise(service.publish(input).pipe(Effect.flip));
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'view pull request',
+    });
+  });
+
   test('rejects oversized final publication URLs instead of projecting them', async () => {
-    const oversizedUrl = `https://github.test/${'a'.repeat(2_048)}`;
+    const oversizedUrl = `https://github.com/${'a'.repeat(2_048)}`;
     const fixture = scriptedRunner([
       result(),
       result('[]'),
@@ -1244,7 +1456,7 @@ describe('GitHub publication boundary', () => {
   test('rejects option-like or newline payloads in final publication URLs instead of projecting them', async () => {
     for (const unsafeUrl of [
       '--repo=attacker/project',
-      'https://github.test/acme/project/pull/42\n--repo=attacker/project',
+      'https://github.com/acme/project/pull/42\n--repo=attacker/project',
     ]) {
       const fixture = scriptedRunner([
         result(),
@@ -1308,7 +1520,7 @@ describe('GitHub publication boundary', () => {
       id: 'pr-legacy',
       status: 'open' as const,
       updatedAt: '2026-06-01T00:00:00.000Z',
-      url: 'https://github.test/acme/project/pull/1',
+      url: 'https://github.com/acme/project/pull/1',
       workstreamId: 'ws-1',
     };
 

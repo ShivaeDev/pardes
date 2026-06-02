@@ -29,6 +29,7 @@ const GITHUB_METADATA_EVENT_TYPES = new Set([
   'merged',
   'closed_unmerged',
   'watcher_failed',
+  'github_rate_metadata_unavailable',
   'pull_request_head_diverged',
   'discussion_pagination_gap',
 ]);

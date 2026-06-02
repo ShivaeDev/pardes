@@ -77,6 +77,17 @@ Manager mode is opt-in. In an interactive Pi session:
 monitor show manager and attached-worker status without writing sampled
 telemetry into durable state.
 
+One loaded controller uses one fixed GitHub.com repository and caller-held
+credential context. After hosted GitHub work starts, repository changes are
+detected and fail safe. Ambient `gh` credential changes cannot be proved by the
+adapter: do not switch credentials in place. Reload the manager extension first
+to create a fresh controller before adopting another repository or credential
+context.
+
+GitHub budget tokens are transient last-render samples. Tier and outage changes
+refresh manager surfaces; Pardes does not run a background UI timer solely to
+refresh same-tier numeric counts.
+
 The manager-visible tools are grouped by purpose:
 
 ```text

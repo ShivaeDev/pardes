@@ -1,8 +1,10 @@
-import { Effect } from 'effect';
+import { Deferred, Effect, Fiber } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
   GITHUB_INTEGRATION_HEALTH_MAX_PULL_REQUESTS,
   GitHubCommandError,
+  MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS,
+  makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
 } from './index.ts';
 import { result, scriptedRunner } from './test-fixtures.ts';
@@ -12,6 +14,12 @@ const MAIN_SHA = 'a'.repeat(40);
 const AUDITED_PR_SHA = 'b'.repeat(40);
 const OBSERVED_PR_SHA = 'c'.repeat(40);
 const OLD_CHECK_SHA = 'd'.repeat(40);
+const RATE_LIMIT = {
+  cost: 1,
+  limit: 5_000,
+  remaining: 4_999,
+  resetAt: '2099-01-15T08:00:00Z',
+};
 const AUTH_WATCHER_FAILURE = {
   kind: 'authentication_likely' as const,
   summary: 'GitHub CLI authentication likely failed; run gh auth status.' as const,
@@ -20,7 +28,21 @@ const AUTH_WATCHER_FAILURE = {
 function defaultBranchResult(sha = MAIN_SHA) {
   return result(
     JSON.stringify({
-      data: { repository: { defaultBranchRef: { name: 'main', target: { oid: sha } } } },
+      data: {
+        rateLimit: RATE_LIMIT,
+        repository: { defaultBranchRef: { name: 'main', target: { oid: sha } } },
+      },
+    }),
+  );
+}
+
+function rateLimitFallbackResult() {
+  return result(
+    JSON.stringify({
+      resources: {
+        core: { limit: 5_000, remaining: 3_000, reset: 1_800_000_000 },
+        graphql: { limit: 5_000, remaining: 4_000, reset: 1_800_000_000 },
+      },
     }),
   );
 }
@@ -36,6 +58,7 @@ function hostedChecksResult(
   return result(
     JSON.stringify({
       data: {
+        rateLimit: RATE_LIMIT,
         repository: {
           object: {
             oid: options.sha ?? MAIN_SHA,
@@ -88,7 +111,7 @@ function association(
     id: 'pr-42',
     lastPushedHeadSha: AUDITED_PR_SHA,
     number: 42,
-    url: 'https://github.test/acme/project/pull/42',
+    url: 'https://github.com/acme/project/pull/42',
     ...overrides,
   };
 }
@@ -98,7 +121,9 @@ describe('GitHub integration-health inspection', () => {
     let invocations = 0;
     let interrupted = false;
     const runner: GitHubCommandRunnerShape = {
-      run: () => {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
         invocations += 1;
         return invocations === 1
           ? Effect.succeed(defaultBranchResult())
@@ -190,6 +215,25 @@ describe('GitHub integration-health inspection', () => {
           watcherFailure: AUTH_WATCHER_FAILURE,
         },
       ],
+      rateLimit: {
+        credentialContext: 'github_com_controller_lifetime',
+        fallback: 'not_requested',
+        graphql: {
+          availability: 'available',
+          limit: 5_000,
+          pressure: 'ready',
+          remaining: 4_999,
+          resetAt: '2099-01-15T08:00:00Z',
+          source: 'graphql',
+        },
+        observation: 'bounded_hosted_rate_budget',
+        rest: { availability: 'unavailable' },
+        watcherPolling: {
+          reason: 'rate_metadata_unavailable',
+          status: 'deferred',
+          tier: 'unavailable',
+        },
+      },
     });
     expect(fixture.invocations.map(({ command }) => command)).toEqual(['gh', 'gh', 'gh', 'gh']);
     expect(fixture.invocations.map(({ args }) => args.slice(0, 2))).toEqual([
@@ -200,7 +244,20 @@ describe('GitHub integration-health inspection', () => {
     ]);
     expect(fixture.invocations[1]?.args).toContain('expression=main');
     expect(fixture.invocations[1]?.args).toContain('limit=50');
+    expect(fixture.invocations[0]?.args).toContain('owner=acme');
+    expect(fixture.invocations[0]?.args).toContain('repo=project');
+    expect(
+      fixture.invocations
+        .filter(({ args }) => args[0] === 'api')
+        .every(({ args }) => args.includes('github.com')),
+    ).toBe(true);
     expect(fixture.invocations[1]?.args.join(' ')).toContain('pageInfo{hasNextPage}');
+    expect(fixture.invocations[0]?.args.join(' ')).toContain(
+      'rateLimit{cost limit remaining resetAt}',
+    );
+    expect(fixture.invocations[1]?.args.join(' ')).toContain(
+      'rateLimit{cost limit remaining resetAt}',
+    );
     expect(fixture.invocations[1]?.args.join(' ')).toContain('workflow{databaseId}');
     expect(fixture.invocations[2]?.args).toEqual([
       'pr',
@@ -208,6 +265,8 @@ describe('GitHub integration-health inspection', () => {
       '42',
       '--json',
       'number,headRefOid',
+      '--repo',
+      'acme/project',
     ]);
     expect(fixture.invocations[3]?.args).toContain(`expression=${association().headBranch}`);
     expect(fixture.invocations.flatMap(({ args }) => args).join(' ')).not.toContain('actions/runs');
@@ -361,10 +420,134 @@ describe('GitHub integration-health inspection', () => {
     expect(JSON.stringify(inspection)).not.toContain('private diagnostics');
   });
 
+  test('rejects same-host cross-repository association routes before mixing opt-in health metadata', async () => {
+    const fixture = scriptedRunner([]);
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association({ url: 'https://github.com/other/project/pull/42' })],
+      }),
+    );
+
+    expect(fixture.invocations).toEqual([]);
+    expect(inspection.defaultBranch).toEqual({
+      availability: 'unavailable',
+      issue: 'unsupported_route',
+    });
+    expect(inspection.pullRequests[0]).toMatchObject({
+      hostedChecks: { availability: 'unavailable', issue: 'unsupported_route' },
+      pullRequestHead: 'unavailable',
+    });
+  });
+
+  test('rejects a same-repository association whose URL path number disagrees with metadata', async () => {
+    const fixture = scriptedRunner([
+      result(
+        JSON.stringify({
+          data: {
+            rateLimit: RATE_LIMIT,
+            repository: { defaultBranchRef: null },
+          },
+        }),
+      ),
+    ]);
+    const inspection = await Effect.runPromise(
+      makeGitHubIntegrationHealthService({ runner: fixture.runner }).inspect({
+        cwd: '/tmp/project',
+        pullRequests: [association({ url: 'https://github.com/acme/project/pull/43' })],
+      }),
+    );
+
+    expect(fixture.invocations).toHaveLength(1);
+    expect(inspection.pullRequests[0]).toMatchObject({
+      hostedChecks: { availability: 'unavailable', issue: 'association_invalid' },
+      pullRequestHead: 'unavailable',
+    });
+  });
+
+  test('reserves opt-in health GraphQL spend before launch so watcher admission sees in-flight debt', async () => {
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        if (invocation.args[1] === 'graphql')
+          return Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never));
+        if (invocation.args[1] === 'rate_limit') return Effect.succeed(rateLimitFallbackResult());
+        return Effect.die(`Unexpected command: ${invocation.args.join(' ')}`);
+      },
+    };
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({ runner });
+    const service = makeGitHubIntegrationHealthService({ hostedMetadata, runner });
+    const fiber = Effect.runFork(service.inspect({ cwd: '/tmp/project', pullRequests: [] }));
+    await Effect.runPromise(Deferred.await(entered));
+
+    await Effect.runPromise(hostedMetadata.refreshFallback('/tmp/project'));
+    expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
+      graphql: { remaining: 3_995, source: 'local_estimate' },
+    });
+    await Effect.runPromise(Fiber.interrupt(fiber));
+  });
+
+  test('bounds repeated failed health GraphQL launches when forced fallback recovery also fails', async () => {
+    let fallbackRequests = 0;
+    let graphqlRequests = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        if (invocation.args[1] === 'graphql') graphqlRequests += 1;
+        else fallbackRequests += 1;
+        return Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }));
+      },
+    };
+    const service = makeGitHubIntegrationHealthService({ runner });
+
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS + 3; index += 1) {
+      const inspection = await Effect.runPromise(
+        service.inspect({ cwd: '/tmp/project', pullRequests: [] }),
+      );
+      expect(inspection.defaultBranch).toMatchObject({ availability: 'unavailable' });
+    }
+
+    expect(graphqlRequests).toBe(MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS);
+    expect(fallbackRequests).toBe(3);
+  });
+
+  test('recovers failed health GraphQL capacity through a bounded authoritative fallback retry', async () => {
+    let fallbackRequests = 0;
+    let graphqlRequests = 0;
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        if (invocation.args[1] === 'rate_limit') {
+          fallbackRequests += 1;
+          return Effect.succeed(rateLimitFallbackResult());
+        }
+        graphqlRequests += 1;
+        return Effect.fail(new GitHubCommandError({ ...invocation, cause: 'fixture outage' }));
+      },
+    };
+    const service = makeGitHubIntegrationHealthService({ runner });
+
+    for (let index = 0; index < MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS + 1; index += 1) {
+      const inspection = await Effect.runPromise(
+        service.inspect({ cwd: '/tmp/project', pullRequests: [] }),
+      );
+      expect(inspection.defaultBranch).toMatchObject({ availability: 'unavailable' });
+    }
+
+    expect(graphqlRequests).toBe(MAX_GITHUB_OUTSTANDING_REQUEST_RESERVATIONS + 1);
+    expect(fallbackRequests).toBe(1);
+  });
+
   test('continues bounded PR observation when default-branch metadata is unavailable', async () => {
     let invocationCount = 0;
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
         invocationCount += 1;
         if (invocationCount === 1)
           return Effect.fail(

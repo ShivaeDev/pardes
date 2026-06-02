@@ -28,6 +28,7 @@ import {
   type GitHubWatcherShape,
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
+  makeGitHubPublicationService,
   makeGitHubWatcherService,
   type PublishedPullRequest,
   type PublishedReviewBranchCandidatesInput,
@@ -512,6 +513,21 @@ function manualGithubWatcher() {
             ...generation(pullRequestId),
             complete: false,
             observation,
+          })
+        : Effect.die('GitHub watcher fixture is not active'),
+    proactiveThrottle: () =>
+      callbacks
+        ? callbacks.onThrottleDiagnostic({ status: 'proactive_throttle', tier: 'paused' })
+        : Effect.die('GitHub watcher fixture is not active'),
+    rateMetadataRecovered: () =>
+      callbacks
+        ? callbacks.onThrottleDiagnostic({ status: 'rate_metadata_recovered', tier: 'normal' })
+        : Effect.die('GitHub watcher fixture is not active'),
+    rateMetadataUnavailable: () =>
+      callbacks
+        ? callbacks.onThrottleDiagnostic({
+            status: 'rate_metadata_unavailable',
+            tier: 'unavailable',
           })
         : Effect.die('GitHub watcher fixture is not active'),
     reconciliations: () => reconciliations,
@@ -7487,6 +7503,56 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
+  test('persists one bounded global rate-metadata warning until typed watcher recovery clears and rearms it', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, { githubWatcher: watcher.watcher });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+
+    await Effect.runPromise(watcher.proactiveThrottle());
+    expect(controller.snapshot()).not.toHaveProperty('githubRateMetadataUnavailableAt');
+    expect(controller.snapshot()?.inbox).toEqual([]);
+    await Effect.runPromise(watcher.rateMetadataUnavailable());
+    await Effect.runPromise(watcher.rateMetadataUnavailable());
+    expect(controller.snapshot()?.githubRateMetadataUnavailableAt).toBeDefined();
+    expect(
+      controller
+        .snapshot()
+        ?.inbox.filter(({ type }) => type === 'github_rate_metadata_unavailable'),
+    ).toHaveLength(1);
+    expect(
+      controller.snapshot()?.inbox.find(({ type }) => type === 'github_rate_metadata_unavailable')
+        ?.summary,
+    ).toBe(
+      'GitHub.com watcher rate metadata is unavailable or invalid; polling is deferred until bounded metadata recovers.',
+    );
+    expect(managerInboxWakeups(fixture.messages)).toHaveLength(1);
+    expect(JSON.stringify(fixture.messages[0]?.message)).toContain(
+      'github_rate_metadata_unavailable: [GitHub metadata] GitHub.com watcher rate metadata is unavailable or invalid;',
+    );
+    expect(JSON.stringify(fixture.messages[0]?.message).length).toBeLessThan(1_200);
+
+    await Effect.runPromise(watcher.proactiveThrottle());
+    expect(controller.snapshot()?.githubRateMetadataUnavailableAt).toBeUndefined();
+    await Effect.runPromise(watcher.rateMetadataUnavailable());
+    expect(
+      controller
+        .snapshot()
+        ?.inbox.filter(({ type }) => type === 'github_rate_metadata_unavailable'),
+    ).toHaveLength(2);
+    const eventLog = readFileSync(
+      join(activationStateDir(fixture.entries), 'events.jsonl'),
+      'utf8',
+    );
+    expect(eventLog.match(/"type":"github_rate_metadata_unavailable"/g)).toHaveLength(2);
+    expect(eventLog.match(/"type":"github_rate_metadata_recovered"/g)).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('preserves newer terminal watcher projection and ignores a post-terminal discussion failure during PR metadata publication', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -7557,6 +7623,56 @@ describe('manager controller', () => {
     ).toHaveLength(0);
     expect(fixture.messages).toHaveLength(1);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('rejects unsupported-origin initial publication before readable-branch remote mutation', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      github: makeGitHubPublicationService(),
+      githubWatcher: manualGithubWatcher().watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'Unsupported origin',
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    writeFileSync(join(worktree, 'unsupported-origin.txt'), 'must not escape\n');
+    git(worktree, 'add', 'unsupported-origin.txt');
+    git(worktree, 'commit', '-m', 'unsupported origin fixture');
+    const before = git(repo, 'ls-remote', '--heads', 'origin');
+
+    const failure = await Effect.runPromise(
+      controller
+        .createPullRequest(
+          {
+            agentId: agent.id,
+            baseBranch: 'main',
+            body: 'Must fail before readable branch reservation.',
+            title: 'Reject unsupported origin',
+            workstreamId: workstream.id,
+          },
+          fixture.ctx,
+        )
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+    expect(git(repo, 'ls-remote', '--heads', 'origin')).toBe(before);
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
   });
 
   test('persists a published PR association only after a committed managed-worktree audit', async () => {

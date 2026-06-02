@@ -197,6 +197,9 @@ export const WorkerRpcWire = {
 } as const;
 
 /** Project one software-authored targeted-codec label without carrying rejected child payload text. */
-export function rpcPayloadDiagnostic(message: string): WorkerProtocolDiagnostic {
-  return workerProtocolDiagnostic('invalid_rpc_payload', message);
+export function rpcPayloadDiagnostic(
+  message: string,
+  originalChars?: number,
+): WorkerProtocolDiagnostic {
+  return workerProtocolDiagnostic('invalid_rpc_payload', message, originalChars);
 }

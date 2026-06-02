@@ -140,6 +140,21 @@ describe('manager event schema compatibility', () => {
     expect(Schema.decodeUnknownSync(ManagerEventSchema)(historical)).toEqual(historical);
     expect(Schema.decodeUnknownSync(ManagerEventSchema)(associated)).toEqual(associated);
   });
+
+  test('rejects incoherent restored report-preview omission metadata', () => {
+    const incoherent = {
+      createdAt,
+      id: 'event-incoherent',
+      reportId: 'report-123',
+      reportPreviewChars: { omittedChars: 0, originalChars: 1, shownChars: 999 },
+      reportPreviewOmissionReason: 'report_summary_preview_limit',
+      reportPreviewTruncated: false,
+      summary: 'Impossible counts.',
+      type: 'agent_report_completed',
+    };
+
+    expect(() => Schema.decodeUnknownSync(ManagerEventSchema)(incoherent)).toThrow();
+  });
 });
 
 describe('manager event text policy', () => {
@@ -426,7 +441,7 @@ describe('worker-event summary policy', () => {
         expected: {
           actionable: true,
           summary:
-            'agent-one emitted invalid RPC JSON: [invalid_rpc_payload] invalid json chars(original=0, shown=0, omitted=0).',
+            'agent-one emitted invalid RPC JSON: [legacy_adapter_text_omitted] Legacy protocol-error adapter text was omitted. chars(original=14, shown=0, omitted=14).',
           type: 'agent_protocol_error',
         },
       },
@@ -485,6 +500,19 @@ describe('worker-event summary policy', () => {
     expect(projected?.summary).toContain(
       '[omitted reason=report_summary_preview_limit originalChars=241 shownChars=240 omittedChars=1; durable report available via associated reportId and paginated report_get]',
     );
+  });
+
+  test('replaces legacy protocol-error adapter text with fixed count-only diagnostics', () => {
+    const projected = workerEventSummary({
+      agentId: 'agent-one',
+      message: 'token=private-protocol-secret',
+      type: 'protocol_error',
+    });
+
+    expect(projected?.summary).toContain('[legacy_adapter_text_omitted]');
+    expect(projected?.summary).toContain('chars(original=29, shown=0, omitted=29)');
+    expect(projected?.summary).not.toContain('private-protocol-secret');
+    expect(projected?.summary).not.toContain('token=');
   });
 
   test('makes progress persistence failures actionable and lets Git audit failure type win', () => {

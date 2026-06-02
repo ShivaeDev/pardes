@@ -127,7 +127,11 @@ export function makeVerificationEvidenceReconciler(
         attempt.reviewCheckout,
       )
       .pipe(Effect.exit);
-    if (Exit.isFailure(review) || review.value.headSha !== attempt.reviewedHeadSha) {
+    if (Exit.isFailure(review)) {
+      yield* markStale(verification, 'review_checkout_unverifiable');
+      return;
+    }
+    if (review.value.headSha !== attempt.reviewedHeadSha) {
       yield* markStale(verification, 'review_checkout_head_changed');
       return;
     }

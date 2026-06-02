@@ -127,10 +127,14 @@ export function makeWorkerSupervisor(
   const notifyProtocolError = (
     runtime: RetainedWorkerRuntime,
     diagnostic: WorkerProtocolDiagnostic | string,
+    originalChars?: number,
   ) => {
     notify({
       agentId: runtime.input.agentId,
-      diagnostic: typeof diagnostic === 'string' ? rpcPayloadDiagnostic(diagnostic) : diagnostic,
+      diagnostic:
+        typeof diagnostic === 'string'
+          ? rpcPayloadDiagnostic(diagnostic, originalChars)
+          : diagnostic,
       type: 'protocol_error',
       ...runtimeEventOwnership(runtime),
     });
@@ -167,7 +171,7 @@ export function makeWorkerSupervisor(
         void Effect.runPromise(runtime.session.close);
       },
       onProtocolError: (message) => notifyProtocolError(runtime, message),
-      onValue: (event) => onRpcEvent(runtime, event),
+      onValue: (event, record) => onRpcEvent(runtime, event, record),
     });
   };
 

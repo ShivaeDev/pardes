@@ -1,7 +1,8 @@
-import { Effect } from 'effect';
+import { Effect, Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
   type AgentReport,
+  AgentReportReferenceSchema,
   makeReporting,
   REPORT_DETAILS_MAX_CHARS,
   REPORT_EXCERPT_MAX_CHARS,
@@ -62,6 +63,34 @@ describe('durable reporting use case', () => {
     });
     expect(persisted.reference).not.toHaveProperty('summaryPreview');
     expect(reports.get(persisted.reportId)?.details).toBe(details);
+  });
+
+  test('rejects incoherent restored durable-pointer omission metadata', () => {
+    for (const metadata of [
+      {
+        summaryChars: { omittedChars: 0, originalChars: 1, shownChars: 999 },
+        summaryOmissionReason: 'report_summary_preview_limit',
+        summaryTruncated: false,
+      },
+      {
+        summaryChars: { omittedChars: 0, originalChars: 1, shownChars: 1 },
+        summaryOmissionReason: 'report_summary_preview_limit',
+        summaryTruncated: false,
+      },
+      {
+        summaryChars: { omittedChars: 1, originalChars: 2, shownChars: 1 },
+        summaryTruncated: false,
+      },
+    ]) {
+      expect(() =>
+        Schema.decodeUnknownSync(AgentReportReferenceSchema)({
+          createdAt,
+          reportId: 'report-incoherent',
+          status: 'completed',
+          ...metadata,
+        }),
+      ).toThrow();
+    }
   });
 
   test('keeps one consolidated verifier body lossless while manager retrieval remains explicitly excerpt-bounded', async () => {

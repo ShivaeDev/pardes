@@ -7,6 +7,7 @@ export {
   type WorkerDiagnosticCountAccuracy,
   type WorkerProtocolDiagnostic,
   type WorkerProtocolDiagnosticReason,
+  type WorkerRpcRecordMetadata,
   type WorkerStderrTail,
   type WorkerTextCounts,
   workerProtocolDiagnostic,

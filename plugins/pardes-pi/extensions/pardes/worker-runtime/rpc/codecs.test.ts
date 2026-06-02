@@ -1,6 +1,7 @@
 import { Effect, Exit, Option } from 'effect';
 import { describe, expect, test } from 'vitest';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../../reporting/index.ts';
+import { renderWorkerProtocolDiagnostic } from '../diagnostics.ts';
 import { rpcPayloadDiagnostic, WorkerRpcWire } from './codecs.ts';
 
 describe('worker RPC wire schema', () => {
@@ -83,11 +84,21 @@ describe('worker RPC wire schema', () => {
   });
 
   test('codes targeted payload failures without clipping software-authored labels', () => {
-    expect(rpcPayloadDiagnostic('Invalid text_delta RPC event')).toEqual({
+    const withoutFramingMetadata = rpcPayloadDiagnostic('Invalid text_delta RPC event');
+    expect(withoutFramingMetadata).toEqual({
+      countAccuracy: 'unknown',
+      message: 'Invalid text_delta RPC event',
+      reason: 'invalid_rpc_payload',
+      shownChars: 0,
+    });
+    expect(renderWorkerProtocolDiagnostic(withoutFramingMetadata)).toContain(
+      'chars(original=unknown, shown=0, omitted=unknown)',
+    );
+    expect(rpcPayloadDiagnostic('Invalid text_delta RPC event', 123)).toEqual({
       countAccuracy: 'exact',
       message: 'Invalid text_delta RPC event',
-      omittedChars: 0,
-      originalChars: 0,
+      omittedChars: 123,
+      originalChars: 123,
       reason: 'invalid_rpc_payload',
       shownChars: 0,
     });

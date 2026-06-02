@@ -3,6 +3,7 @@ import {
   appendWorkerStderrTail,
   emptyWorkerStderrTail,
   type WorkerProtocolDiagnostic,
+  type WorkerRpcRecordMetadata,
   type WorkerStderrTail,
   workerProtocolDiagnostic,
 } from '../diagnostics.ts';
@@ -17,7 +18,7 @@ import { attachWorkerRpcJsonl } from './jsonl.ts';
 import { makeWorkerRpcRequestCorrelator } from './requests.ts';
 
 export interface WorkerRpcSessionCallbacks {
-  readonly onValue: (event: unknown) => void;
+  readonly onValue: (event: unknown, record: WorkerRpcRecordMetadata) => void;
   readonly onProtocolError: (diagnostic: WorkerProtocolDiagnostic) => void;
   readonly onExit: (
     exitCode: number | null,
@@ -73,7 +74,7 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
       started = true;
       attachWorkerRpcJsonl(child.stdout, {
         onProtocolError: callbacks.onProtocolError,
-        onValue: (event) => {
+        onValue: (event, record) => {
           const envelope = WorkerRpcWire.decodeEnvelope(event);
           if (Option.isSome(envelope) && envelope.value.type === 'response') {
             if (rpcRequests.handleResponse(event) === 'invalid_uncorrelated_response') {
@@ -81,12 +82,13 @@ export function openWorkerRpcSession<Input extends WorkerProcessInput>(
                 workerProtocolDiagnostic(
                   'invalid_response',
                   'RPC response could not be correlated or decoded; response content was discarded.',
+                  record.originalChars,
                 ),
               );
             }
             return;
           }
-          callbacks.onValue(event);
+          callbacks.onValue(event, record);
         },
       });
       child.stderr.on('data', (chunk: Buffer | string) => {

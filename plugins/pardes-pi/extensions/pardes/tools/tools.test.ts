@@ -1730,7 +1730,14 @@ describe('Pardes model-visible tools', () => {
               deliveredAs: behavior === 'auto' ? ('followUp' as const) : behavior,
               requestedBehavior: behavior,
             },
-            runtime: runtime(),
+            runtime: runtime({
+              stderr: {
+                omittedChars: 0,
+                originalChars: 27,
+                shownChars: 27,
+                tail: 'token=private-stderr-secret',
+              },
+            }),
           };
         }),
     } as unknown as ManagerController;
@@ -1770,6 +1777,12 @@ describe('Pardes model-visible tools', () => {
       'Sent followUp message (auto-routed) to agent-12345678.',
     );
     expect(urgent.content[0]?.text).toBe('Sent steer message to agent-12345678.');
+    expect(automatic.details).toEqual({
+      agentId: 'agent-12345678',
+      delivery: { deliveredAs: 'followUp', requestedBehavior: 'auto' },
+    });
+    expect(JSON.stringify(automatic.details)).not.toContain('private-stderr-secret');
+    expect(JSON.stringify(automatic.details)).not.toContain('runtime');
   });
 
   test('supports bounded audit and runtime agent drill-downs without raw diagnostics', async () => {

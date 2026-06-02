@@ -5,9 +5,10 @@ export type WorkerProtocolDiagnosticReason =
   | 'line_length_breaker'
   | 'invalid_response'
   | 'invalid_rpc_payload'
+  | 'legacy_adapter_text_omitted'
   | 'runtime_process_error';
 
-export type WorkerDiagnosticCountAccuracy = 'exact' | 'lower_bound';
+export type WorkerDiagnosticCountAccuracy = 'exact' | 'lower_bound' | 'unknown';
 
 export interface WorkerTextCounts {
   readonly originalChars: number;
@@ -15,7 +16,14 @@ export interface WorkerTextCounts {
   readonly omittedChars: number;
 }
 
-export interface WorkerProtocolDiagnostic extends WorkerTextCounts {
+export interface WorkerRpcRecordMetadata {
+  readonly originalChars: number;
+}
+
+export interface WorkerProtocolDiagnostic {
+  readonly originalChars?: number;
+  readonly shownChars: 0;
+  readonly omittedChars?: number;
   readonly reason: WorkerProtocolDiagnosticReason;
   /** Fixed software-authored inert description. Never include child-authored record content. */
   readonly message: string;
@@ -31,14 +39,13 @@ export interface WorkerStderrTail extends WorkerTextCounts {
 export function workerProtocolDiagnostic(
   reason: WorkerProtocolDiagnosticReason,
   message: string,
-  originalChars = 0,
-  countAccuracy: WorkerDiagnosticCountAccuracy = 'exact',
+  originalChars?: number,
+  countAccuracy: WorkerDiagnosticCountAccuracy = originalChars === undefined ? 'unknown' : 'exact',
 ): WorkerProtocolDiagnostic {
   return {
     countAccuracy,
     message,
-    omittedChars: originalChars,
-    originalChars,
+    ...(originalChars === undefined ? {} : { omittedChars: originalChars, originalChars }),
     reason,
     shownChars: 0,
   };
@@ -46,13 +53,13 @@ export function workerProtocolDiagnostic(
 
 export function renderWorkerProtocolDiagnostic(diagnostic: WorkerProtocolDiagnostic): string {
   const original =
-    diagnostic.countAccuracy === 'lower_bound'
-      ? `>=${diagnostic.originalChars}`
-      : String(diagnostic.originalChars);
+    diagnostic.countAccuracy === 'unknown'
+      ? 'unknown'
+      : `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.originalChars)}`;
   const omitted =
-    diagnostic.countAccuracy === 'lower_bound'
-      ? `>=${diagnostic.omittedChars}`
-      : String(diagnostic.omittedChars);
+    diagnostic.countAccuracy === 'unknown'
+      ? 'unknown'
+      : `${diagnostic.countAccuracy === 'lower_bound' ? '>=' : ''}${String(diagnostic.omittedChars)}`;
   return `[${diagnostic.reason}] ${diagnostic.message} chars(original=${original}, shown=${diagnostic.shownChars}, omitted=${omitted}).`;
 }
 

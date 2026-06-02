@@ -1,6 +1,10 @@
 import type { Readable } from 'node:stream';
 import { StringDecoder } from 'node:string_decoder';
-import { type WorkerProtocolDiagnostic, workerProtocolDiagnostic } from '../diagnostics.ts';
+import {
+  type WorkerProtocolDiagnostic,
+  type WorkerRpcRecordMetadata,
+  workerProtocolDiagnostic,
+} from '../diagnostics.ts';
 
 /**
  * Last-resort transport breaker measured in decoded UTF-16 code units.
@@ -15,7 +19,7 @@ import { type WorkerProtocolDiagnostic, workerProtocolDiagnostic } from '../diag
 export const MAX_WORKER_RPC_JSONL_LINE_LENGTH = 64 * 1_024 * 1_024;
 
 export interface WorkerRpcJsonlCallbacks {
-  readonly onValue: (value: unknown) => void;
+  readonly onValue: (value: unknown, record: WorkerRpcRecordMetadata) => void;
   readonly onProtocolError: (diagnostic: WorkerProtocolDiagnostic) => void;
   readonly maxLineLength?: number;
 }
@@ -50,7 +54,7 @@ export function attachWorkerRpcJsonl(
       return;
     }
     try {
-      callbacks.onValue(JSON.parse(line) as unknown);
+      callbacks.onValue(JSON.parse(line) as unknown, { originalChars: line.length });
     } catch {
       callbacks.onProtocolError(
         workerProtocolDiagnostic(

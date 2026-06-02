@@ -50,6 +50,7 @@ interface VerificationFixtureOptions {
   readonly failSpawnAt?: number;
   readonly failRefresh?: boolean;
   readonly failReviewCreate?: boolean;
+  readonly failReviewInspect?: boolean;
   readonly failReviewProvisionAfterAllocation?: boolean;
   readonly failDiscard?: boolean;
   readonly createDelay?: Duration.Input;
@@ -186,11 +187,19 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
     inspect: (_owner, lease) =>
       Effect.succeed({ changedPaths: [], dirty: false, headSha: sourceHeadSha, path: lease.path }),
     inspectDetachedReviewCheckout: (_owner, lease) =>
-      Effect.succeed({
-        dirty: options.dirtyReviewCheckout === true,
-        headSha: lease.reviewedHeadSha,
-        path: lease.path,
-      }),
+      options.failReviewInspect
+        ? Effect.fail(
+            new WorktreeError({
+              cause: 'fixture failure',
+              operation: 'fixture checkout inspect',
+              path: lease.path,
+            }),
+          )
+        : Effect.succeed({
+            dirty: options.dirtyReviewCheckout === true,
+            headSha: lease.reviewedHeadSha,
+            path: lease.path,
+          }),
     prepareDetachedReviewCheckout: (input) =>
       Effect.succeed(reviewLease(input.verificationId, input.reviewedHeadSha)),
     provisionDetachedReviewCheckout: (_owner, lease) =>
@@ -392,6 +401,22 @@ describe('advisory verification lifecycle', () => {
         verificationId: verification.id,
       }),
     ]);
+  });
+
+  test('marks unavailable detached review checkout with a truthful unverifiable stale code', async () => {
+    const fixture = await verificationFixture({ failReviewInspect: true });
+    const verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+
+    const stale = await Effect.runPromise(fixture.coordinator.status(verification.id));
+
+    expect(currentVerificationAttempt(stale)).toMatchObject({
+      evidenceStatus: 'stale',
+      staleReason:
+        '[review_checkout_unverifiable] detached review checkout is unavailable or unverifiable',
+      staleReasonCode: 'review_checkout_unverifiable',
+    });
   });
 
   test('briefs initial and retained refresh attempts with one comprehensive advisory reporting protocol', async () => {

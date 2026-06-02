@@ -6,6 +6,7 @@ import {
   summarizeToolInvocation,
   visibleAssistantText,
 } from './activity.ts';
+import type { WorkerRpcRecordMetadata } from './diagnostics.ts';
 import {
   type RetainedWorkerRuntime,
   recalibratingContextStats,
@@ -19,7 +20,11 @@ import { WorkerRpcWire } from './rpc/codecs.ts';
 export interface WorkerRpcEventHandlerOptions {
   readonly now: () => number;
   readonly notify: (event: WorkerSupervisorEvent) => void;
-  readonly notifyProtocolError: (runtime: RetainedWorkerRuntime, message: string) => void;
+  readonly notifyProtocolError: (
+    runtime: RetainedWorkerRuntime,
+    message: string,
+    originalChars: number,
+  ) => void;
   readonly emitTelemetry: (runtime: RetainedWorkerRuntime) => void;
   readonly setStatus: (runtime: RetainedWorkerRuntime, status: WorkerStatus) => void;
 }
@@ -28,20 +33,26 @@ export interface WorkerRpcEventHandlerOptions {
 export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions) {
   const { emitTelemetry, notify, notifyProtocolError, now, setStatus } = options;
 
-  return (runtime: RetainedWorkerRuntime, event: unknown): void => {
+  return (
+    runtime: RetainedWorkerRuntime,
+    event: unknown,
+    record: WorkerRpcRecordMetadata,
+  ): void => {
+    const invalidPayload = (message: string) =>
+      notifyProtocolError(runtime, message, record.originalChars);
     const envelope = WorkerRpcWire.decodeEnvelope(event);
     if (Option.isNone(envelope)) return;
 
     if (envelope.value.type === 'message_start') {
       const decoded = WorkerRpcWire.decodeMessageStartEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid message_start RPC event');
+        invalidPayload('Invalid message_start RPC event');
         return;
       }
       if (decoded.value.message.role !== 'assistant') return;
       const message = WorkerRpcWire.decodeAssistantMessage(decoded.value.message);
       if (Option.isNone(message)) {
-        notifyProtocolError(runtime, 'Invalid assistant message_start RPC event');
+        invalidPayload('Invalid assistant message_start RPC event');
         return;
       }
       runtime.activity = closeAssistantActivity(runtime.activity);
@@ -53,14 +64,14 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type === 'message_update') {
       const decoded = WorkerRpcWire.decodeMessageUpdateEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid message_update RPC event');
+        invalidPayload('Invalid message_update RPC event');
         return;
       }
       const updateEnvelope = WorkerRpcWire.decodeAssistantMessageEventEnvelope(
         decoded.value.assistantMessageEvent,
       );
       if (Option.isNone(updateEnvelope)) {
-        notifyProtocolError(runtime, 'Invalid assistant message_update RPC event');
+        invalidPayload('Invalid assistant message_update RPC event');
         return;
       }
       if (updateEnvelope.value.type === 'text_start') {
@@ -69,7 +80,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
             WorkerRpcWire.decodeAssistantTextStartEvent(decoded.value.assistantMessageEvent),
           )
         ) {
-          notifyProtocolError(runtime, 'Invalid text_start RPC event');
+          invalidPayload('Invalid text_start RPC event');
           return;
         }
         runtime.assistantActivitySawDelta = false;
@@ -82,7 +93,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
           decoded.value.assistantMessageEvent,
         );
         if (Option.isNone(update)) {
-          notifyProtocolError(runtime, 'Invalid text_delta RPC event');
+          invalidPayload('Invalid text_delta RPC event');
           return;
         }
         runtime.activity = appendAssistantActivity(runtime.activity, update.value.delta);
@@ -96,7 +107,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
           decoded.value.assistantMessageEvent,
         );
         if (Option.isNone(update)) {
-          notifyProtocolError(runtime, 'Invalid text_end RPC event');
+          invalidPayload('Invalid text_end RPC event');
           return;
         }
         if (!runtime.assistantActivitySawDelta) {
@@ -112,13 +123,13 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type === 'message_end') {
       const decoded = WorkerRpcWire.decodeMessageEndEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid message_end RPC event');
+        invalidPayload('Invalid message_end RPC event');
         return;
       }
       if (decoded.value.message.role !== 'assistant') return;
       const message = WorkerRpcWire.decodeAssistantMessage(decoded.value.message);
       if (Option.isNone(message)) {
-        notifyProtocolError(runtime, 'Invalid assistant message_end RPC event');
+        invalidPayload('Invalid assistant message_end RPC event');
         return;
       }
       const text = visibleAssistantText(message.value);
@@ -133,7 +144,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type === 'tool_execution_start') {
       const decoded = WorkerRpcWire.decodeToolExecutionStartEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid tool_execution_start RPC event');
+        invalidPayload('Invalid tool_execution_start RPC event');
         return;
       }
       runtime.activity = closeAssistantActivity(runtime.activity);
@@ -147,7 +158,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
 
     if (envelope.value.type === 'agent_start') {
       if (Option.isNone(WorkerRpcWire.decodeAgentStartEvent(event))) {
-        notifyProtocolError(runtime, 'Invalid agent_start RPC event');
+        invalidPayload('Invalid agent_start RPC event');
         return;
       }
       runtime.isStreaming = true;
@@ -157,7 +168,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
 
     if (envelope.value.type === 'agent_end') {
       if (Option.isNone(WorkerRpcWire.decodeAgentEndEvent(event))) {
-        notifyProtocolError(runtime, 'Invalid agent_end RPC event');
+        invalidPayload('Invalid agent_end RPC event');
         return;
       }
       runtime.isStreaming = false;
@@ -168,7 +179,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type === 'queue_update') {
       const decoded = WorkerRpcWire.decodeQueueUpdateEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid queue_update RPC event');
+        invalidPayload('Invalid queue_update RPC event');
         return;
       }
       runtime.steeringQueueCount = decoded.value.steering.length;
@@ -181,7 +192,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type === 'compaction_start') {
       const decoded = WorkerRpcWire.decodeCompactionStartEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid compaction_start RPC event');
+        invalidPayload('Invalid compaction_start RPC event');
         return;
       }
       runtime.isCompacting = true;
@@ -194,7 +205,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type === 'compaction_end') {
       const decoded = WorkerRpcWire.decodeCompactionEndEvent(event);
       if (Option.isNone(decoded)) {
-        notifyProtocolError(runtime, 'Invalid compaction_end RPC event');
+        invalidPayload('Invalid compaction_end RPC event');
         return;
       }
       const compaction: WorkerCompactionCompletion = {
@@ -227,7 +238,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     if (envelope.value.type !== 'tool_execution_end') return;
     const decoded = WorkerRpcWire.decodeToolExecutionEndEvent(event);
     if (Option.isNone(decoded)) {
-      notifyProtocolError(runtime, 'Invalid tool_execution_end RPC event');
+      invalidPayload('Invalid tool_execution_end RPC event');
       return;
     }
     if (
@@ -237,13 +248,13 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
       return;
     const result = WorkerRpcWire.decodePardesWorkerToolResult(decoded.value.result);
     if (Option.isNone(result)) {
-      notifyProtocolError(runtime, `Invalid ${decoded.value.toolName} Pardes payload`);
+      invalidPayload('Invalid manager-handoff Pardes payload');
       return;
     }
     if (decoded.value.toolName === 'report_to_manager') {
       const payload = WorkerRpcWire.decodePardesReportPayload(result.value.details.pardesWorker);
       if (Option.isNone(payload)) {
-        notifyProtocolError(runtime, 'Invalid report_to_manager Pardes payload');
+        invalidPayload('Invalid report_to_manager Pardes payload');
         return;
       }
       notify({
@@ -258,7 +269,7 @@ export function makeWorkerRpcEventHandler(options: WorkerRpcEventHandlerOptions)
     }
     const payload = WorkerRpcWire.decodePardesQuestionPayload(result.value.details.pardesWorker);
     if (Option.isNone(payload)) {
-      notifyProtocolError(runtime, 'Invalid ask_manager Pardes payload');
+      invalidPayload('Invalid ask_manager Pardes payload');
       return;
     }
     notify({

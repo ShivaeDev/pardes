@@ -263,8 +263,9 @@ export function workerEventSummary(
       summary: `${event.agentId} emitted invalid RPC JSON: ${renderWorkerProtocolDiagnostic(
         event.diagnostic ??
           workerProtocolDiagnostic(
-            'invalid_rpc_payload',
-            omissionAwareModelFacingText(event.message ?? 'Invalid RPC payload'),
+            'legacy_adapter_text_omitted',
+            'Legacy protocol-error adapter text was omitted.',
+            event.message?.length,
           ),
       )}`,
       type: 'agent_protocol_error',

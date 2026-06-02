@@ -553,6 +553,16 @@ describe('worker supervisor', () => {
       'invalid_rpc_payload',
       'invalid_response',
     ]);
+    expect(
+      protocolDiagnostics.every(
+        ({ countAccuracy, omittedChars, originalChars, shownChars }) =>
+          countAccuracy === 'exact' &&
+          typeof originalChars === 'number' &&
+          originalChars > 0 &&
+          omittedChars === originalChars &&
+          shownChars === 0,
+      ),
+    ).toBe(true);
     expect(events.some((event) => event.type === 'report' || event.type === 'question')).toBe(
       false,
     );

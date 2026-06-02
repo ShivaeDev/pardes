@@ -56,7 +56,13 @@ export const ReportTextCountsSchema = Schema.Struct({
   omittedChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   originalChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   shownChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-});
+}).check(
+  Schema.makeFilter((counts) =>
+    counts.originalChars === counts.shownChars + counts.omittedChars
+      ? undefined
+      : 'originalChars must equal shownChars plus omittedChars',
+  ),
+);
 export type ReportTextCounts = typeof ReportTextCountsSchema.Type;
 
 /** Bounded durable pointer embedded in an agent projection; never contains report details. */
@@ -68,7 +74,21 @@ export const AgentReportReferenceSchema = Schema.Struct({
   summaryOmissionReason: Schema.optionalKey(Schema.Literal(REPORT_SUMMARY_PREVIEW_OMISSION_REASON)),
   /** Compatibility flag for snapshots written before explicit omission counts. */
   summaryTruncated: Schema.Boolean,
-});
+}).check(
+  Schema.makeFilter((reference) => {
+    const counts = reference.summaryChars;
+    if (!counts)
+      return reference.summaryOmissionReason === undefined
+        ? undefined
+        : 'summaryOmissionReason requires summaryChars';
+    const omitted = counts.omittedChars > 0;
+    if (reference.summaryTruncated !== omitted)
+      return 'summaryTruncated must match summaryChars.omittedChars';
+    return (reference.summaryOmissionReason !== undefined) === omitted
+      ? undefined
+      : 'summaryOmissionReason presence must match summaryChars.omittedChars';
+  }),
+);
 export type AgentReportReference = typeof AgentReportReferenceSchema.Type;
 
 export const ReportExcerptFieldSchema = Schema.Literals(['summary', 'details']);

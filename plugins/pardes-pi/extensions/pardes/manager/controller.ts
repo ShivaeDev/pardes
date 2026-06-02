@@ -197,7 +197,8 @@ export interface AgentStatus {
   readonly runtime: WorkerRuntimeSnapshot | undefined;
 }
 
-export interface AgentSendResult extends AgentStatus {
+export interface AgentSendResult {
+  readonly agentId: string;
   readonly delivery: WorkerSendResult;
 }
 
@@ -1816,8 +1817,8 @@ export class ManagerController {
         timestamp,
       ),
     );
-    const status = yield* this.agentStatus(agentId, ctx);
-    return { ...status, delivery } satisfies AgentSendResult;
+    yield* this.agentStatus(agentId, ctx);
+    return { agentId, delivery } satisfies AgentSendResult;
   });
 
   readonly sendAgent = (

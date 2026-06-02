@@ -499,6 +499,38 @@ describe('filesystem state store', () => {
     expect(failure.path).toBe(store.statePath);
   });
 
+  test('rejects restored snapshots with incoherent inbox omission metadata', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    const state = initialState();
+    await Effect.runPromise(store.initialize(state));
+    await writeFile(
+      store.statePath,
+      `${JSON.stringify({
+        ...state,
+        inbox: [
+          {
+            createdAt: '2026-06-01T00:00:00.000Z',
+            id: 'event-incoherent',
+            reportId: 'report-123',
+            reportPreviewChars: { omittedChars: 0, originalChars: 1, shownChars: 999 },
+            reportPreviewOmissionReason: 'report_summary_preview_limit',
+            reportPreviewTruncated: false,
+            summary: 'Impossible restored preview counts.',
+            type: 'agent_report_completed',
+          },
+        ],
+      })}\n`,
+      'utf8',
+    );
+
+    expect(await Effect.runPromise(store.load().pipe(Effect.flip))).toMatchObject({
+      _tag: 'StoreError',
+      operation: 'decode state schema',
+      path: store.statePath,
+    });
+  });
+
   test('rejects schema-invalid mutations without replacing the authoritative snapshot', async () => {
     const directory = await temporaryDirectory();
     const store = await Effect.runPromise(makeFileSystemStateStore(directory));

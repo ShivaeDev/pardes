@@ -126,6 +126,7 @@ export const VerificationStaleReasonCodeSchema = Schema.Literals([
   'source_head_changed',
   'source_dirty',
   'review_checkout_head_changed',
+  'review_checkout_unverifiable',
   'review_checkout_dirty',
   'refresh_superseded',
   'provisioning_failed',
@@ -311,7 +312,21 @@ export const ManagerEventSchema = Schema.Struct({
   type: NonEmptyString,
   verificationId: Schema.optionalKey(NonEmptyString),
   workstreamId: Schema.optionalKey(NonEmptyString),
-});
+}).check(
+  Schema.makeFilter((event) => {
+    const counts = event.reportPreviewChars;
+    if (!counts)
+      return event.reportPreviewOmissionReason === undefined
+        ? undefined
+        : 'reportPreviewOmissionReason requires reportPreviewChars';
+    const omitted = counts.omittedChars > 0;
+    if (event.reportPreviewTruncated !== undefined && event.reportPreviewTruncated !== omitted)
+      return 'reportPreviewTruncated must match reportPreviewChars.omittedChars';
+    return (event.reportPreviewOmissionReason !== undefined) === omitted
+      ? undefined
+      : 'reportPreviewOmissionReason presence must match reportPreviewChars.omittedChars';
+  }),
+);
 export type ManagerEvent = typeof ManagerEventSchema.Type;
 
 /** Durable cursor for the one compact Pi presentation released for an inbox batch. */

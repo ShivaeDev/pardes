@@ -42,6 +42,7 @@ const VERIFICATION_STALE_REASON_LABELS: Readonly<Record<VerificationStaleReasonC
   refresh_superseded: 'evidence superseded',
   review_checkout_dirty: 'detached review checkout became dirty',
   review_checkout_head_changed: 'detached review checkout head changed',
+  review_checkout_unverifiable: 'detached review checkout is unavailable or unverifiable',
   source_dirty: 'source managed worktree became dirty',
   source_head_changed: 'source head changed',
   source_unverifiable: 'source managed worktree state is no longer verifiable',

@@ -130,8 +130,8 @@ describe('worker RPC session', () => {
       {
         countAccuracy: 'exact',
         message: 'RPC response could not be correlated or decoded; response content was discarded.',
-        omittedChars: 0,
-        originalChars: 0,
+        omittedChars: 85,
+        originalChars: 85,
         reason: 'invalid_response',
         shownChars: 0,
       },

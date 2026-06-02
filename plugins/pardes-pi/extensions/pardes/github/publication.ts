@@ -63,7 +63,6 @@ export interface PublishPullRequestInput {
   readonly baseBranch: string;
   readonly title: string;
   readonly body: string;
-  readonly openInBrowser?: boolean;
   /** Mechanical proof for initial human-owned publication, verified against its remote ownership anchor. */
   readonly humanHeadBranchReservation?: {
     readonly claimSha: string;
@@ -117,7 +116,6 @@ export interface PublishedPullRequest {
   readonly headBranch: string;
   readonly baseBranch: string;
   readonly action: 'created' | 'updated';
-  readonly openedInBrowser: boolean;
 }
 
 export interface GitHubPublicationShape {
@@ -718,8 +716,6 @@ export function makeGitHubPublicationService(
             'verify published pull request head and base',
           );
     const pullRequest = yield* verifyPublishedPullRequest;
-    if (input.openInBrowser === true)
-      yield* runGitHub(route, input.cwd, ['pr', 'view', String(pullRequest.number), '--web']);
     return {
       action,
       baseBranch: pullRequest.baseRefName,
@@ -727,7 +723,6 @@ export function makeGitHubPublicationService(
       draft: pullRequest.isDraft,
       headBranch: pullRequest.headRefName,
       number: pullRequest.number,
-      openedInBrowser: input.openInBrowser === true,
       status: status(pullRequest.state),
       title: input.title,
       url: pullRequest.url,

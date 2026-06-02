@@ -9,10 +9,12 @@ import {
   type WorktreeCommitProvenance,
 } from '../git/index.ts';
 import {
+  type BrowserHandoffShape,
   type GitHubHostedMetadataShape,
   type GitHubIntegrationHealthShape,
   type GitHubPublicationShape,
   type GitHubWatcherShape,
+  makeBrowserHandoff,
   makeGitHubHostedMetadataAdapter,
   makeGitHubIntegrationHealthService,
   makeGitHubPublicationService,
@@ -280,6 +282,7 @@ export interface AgentReloadResult {
 
 export interface ManagerControllerOptions {
   readonly worktrees?: ManagedWorktreeShape;
+  readonly browserHandoff?: BrowserHandoffShape;
   readonly github?: GitHubPublicationShape;
   readonly githubWatcher?: GitHubWatcherShape;
   readonly githubIntegrationHealth?: GitHubIntegrationHealthShape;
@@ -344,6 +347,7 @@ export class ManagerController {
   private active: ActiveManager | undefined;
   private latestContext: ExtensionContext | undefined;
   private readonly worktrees: ManagedWorktreeShape;
+  private readonly browserHandoff: BrowserHandoffShape;
   private readonly github: GitHubPublicationShape;
   private readonly githubHostedMetadata: GitHubHostedMetadataShape;
   private readonly githubWatcher: GitHubWatcherShape;
@@ -372,6 +376,7 @@ export class ManagerController {
     options: ManagerControllerOptions = {},
   ) {
     this.worktrees = options.worktrees ?? makeManagedWorktreeService();
+    this.browserHandoff = options.browserHandoff ?? makeBrowserHandoff();
     // One fresh controller owns one repository-pinned GitHub.com context. Ambient `gh`
     // credential switches cannot be proved here: callers must reload the manager first so a
     // fresh controller naturally drops this bounded hosted-metadata cache and debt ledger.
@@ -819,6 +824,7 @@ export class ManagerController {
     reviewGates: ReviewGateLifecycleCoordinatorShape,
   ) {
     return yield* makePullRequestPublicationCoordinator({
+      browserHandoff: this.browserHandoff,
       callbacks: {
         appendEventSafely: (event) => this.appendEventSafely(active.store, event),
         observePublishedTerminal: (event) =>

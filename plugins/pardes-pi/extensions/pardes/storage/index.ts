@@ -16,6 +16,11 @@ export {
   STORAGE_REPORT_WRITE_MAX_BYTES,
 } from './report-artifacts.ts';
 export {
+  STORAGE_EVENT_WRITE_MAX_BYTES,
+  STORAGE_STATE_ARTIFACT_MAX_BYTES,
+  STORAGE_STATE_WRITE_MAX_BYTES,
+} from './state-limits.ts';
+export {
   fileSystemStateStoreLayer,
   makeFileSystemStateStore,
   StateStore,

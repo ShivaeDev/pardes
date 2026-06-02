@@ -11,6 +11,7 @@ import {
   type ManagerEvent,
   type ManagerState,
 } from './domain.ts';
+import { formatPardesError } from './errors.ts';
 import type { PullRequestPublicationCoordinatorShape } from './publication-coordinator.ts';
 import type { ReviewGateLifecycleCoordinatorShape } from './review-gate-lifecycle.ts';
 import {
@@ -18,6 +19,7 @@ import {
   updateCurrentVerificationAttempt,
 } from './verification/index.ts';
 import {
+  acceptedDurableEventDetails,
   applyHandoffAudit,
   boundedFailureSummary,
   isDuplicateWorkerAttention,
@@ -223,6 +225,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
               })),
               Effect.catch((error) =>
                 Effect.succeed({
+                  failureDetails: acceptedDurableEventDetails(
+                    formatPardesError(error),
+                    'report artifact persistence diagnostic',
+                  ),
                   failureSummary: boundedFailureSummary(error),
                   status: 'failed' as const,
                 }),
@@ -267,7 +273,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         : {}),
     };
     const attention = event?.actionable
-      ? makeEvent(event.type, event.summary, timestamp, association)
+      ? {
+          ...makeEvent(event.type, event.summary, timestamp, association),
+          ...(event.details === undefined ? {} : { details: event.details }),
+        }
       : undefined;
     const projection = yield* namespace.store.mutate<WorkerEventProjection, never>((state) => {
       const agent = state.agents[workerEvent.agentId];

@@ -16,6 +16,8 @@ import {
   decodeVerificationRequestInput,
   decodeWorkstreamCreateInput,
   decodeWorkstreamIdInput,
+  INBOX_EVENT_EXCERPT_MAX_CHARS,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   MANAGER_INPUT_ID_MAX_LENGTH,
   MANAGER_INPUT_LONG_TEXT_MAX_LENGTH,
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
@@ -175,9 +177,20 @@ describe('manager input schemas', () => {
       forceDeleteUnmergedBranch: true,
       forceDiscardDirty: true,
     });
-    expect(await Effect.runPromise(decodeInboxGetInput({ eventId: 'event-1234_ab.cd' }))).toEqual({
+    expect(
+      await Effect.runPromise(
+        decodeInboxGetInput({ eventId: 'event-1234_ab.cd', maxChars: 123, offset: 456 }),
+      ),
+    ).toEqual({
       eventId: 'event-1234_ab.cd',
+      maxChars: 123,
+      offset: 456,
     });
+    expect(
+      await Effect.runPromise(
+        decodeInboxGetInput({ eventId: 'event-legacy-summary', offset: 2 * 1_024 * 1_024 }),
+      ),
+    ).toEqual({ eventId: 'event-legacy-summary', offset: 2 * 1_024 * 1_024 });
     expect(
       await Effect.runPromise(
         decodeVerificationRequestInput({
@@ -246,6 +259,14 @@ describe('manager input schemas', () => {
     await expectRejected(decodeInboxGetInput({ eventId: 'event/unsafe' }), 'inbox_get');
     await expectRejected(
       decodeInboxGetInput({ eventId: 'e'.repeat(MANAGER_INPUT_ID_MAX_LENGTH + 1) }),
+      'inbox_get',
+    );
+    await expectRejected(
+      decodeInboxGetInput({ eventId: 'event-safe', maxChars: INBOX_EVENT_EXCERPT_MAX_CHARS + 1 }),
+      'inbox_get',
+    );
+    await expectRejected(
+      decodeInboxGetInput({ eventId: 'event-safe', offset: INBOX_EVENT_EXCERPT_MAX_OFFSET + 1 }),
       'inbox_get',
     );
     await expectRejected(

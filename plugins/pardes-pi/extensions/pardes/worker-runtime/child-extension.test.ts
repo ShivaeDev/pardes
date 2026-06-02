@@ -17,6 +17,7 @@ import pardesWorker, {
   normalizeWorkerToolPath,
   VERIFIER_CHANGED_PATHS_MAX_CHARS,
 } from './child-extension.ts';
+import { CHILD_QUESTION_CONTEXT_MAX_CHARS, CHILD_QUESTION_MAX_CHARS } from './child-profile.ts';
 
 const temporaryDirectories: string[] = [];
 
@@ -484,6 +485,15 @@ describe('worker child reporting tool rendering', () => {
       });
       expect(reportParameters.properties.details).toMatchObject({
         maxLength: REPORT_DETAILS_MAX_CHARS,
+      });
+      const questionParameters = requiredValue(tools.find((tool) => tool.name === 'ask_manager'))
+        .parameters as unknown as ToolParametersPreview;
+      expect(questionParameters.properties.question).toMatchObject({
+        maxLength: CHILD_QUESTION_MAX_CHARS,
+        minLength: 1,
+      });
+      expect(questionParameters.properties.context).toMatchObject({
+        maxLength: CHILD_QUESTION_CONTEXT_MAX_CHARS,
       });
       for (const tool of tools) {
         expect(typeof tool.renderResult, tool.name).toBe('function');

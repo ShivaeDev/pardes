@@ -6,8 +6,10 @@ import {
   type AgentRecord,
   type AgentStatus,
   AUTONOMOUS_INBOX_PATH,
+  INBOX_EVENT_EXCERPT_MAX_OFFSET,
   INBOX_TWO_PATH_GUIDANCE,
   initialManagerState,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerController,
   type ManagerEvent,
   type PluginActivationStatus,
@@ -266,6 +268,11 @@ describe('Pardes model-visible tools', () => {
       minLength: 1,
     });
     assertLexicalId('inbox_get', 'eventId');
+    expect(tools.get('inbox_get')?.parameters.properties.offset).toMatchObject({ minimum: 0 });
+    expect(tools.get('inbox_get')?.parameters.properties.maxChars).toMatchObject({
+      maximum: REPORT_EXCERPT_MAX_CHARS,
+      minimum: 1,
+    });
     assertLexicalId('inbox_acknowledge', 'cursor');
     expect(tools.get('await_user_feedback')?.parameters.properties.prompt).toMatchObject({
       maxLength: 256,
@@ -1290,20 +1297,20 @@ describe('Pardes model-visible tools', () => {
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(
-      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · software refinement pending:1',
+      '· queued suffix:1 · awaiting-user:no · wake wake-fixture · ack-safe cursor:event-1/1 · frontier:event-1/1 · blocked:1 · barrier:event-blocked-merge(software_refinement_pending)',
     );
     expect(pending.content[0]?.text).toContain(`path autonomous: ${AUTONOMOUS_INBOX_PATH}`);
     expect(pending.content[0]?.text).toContain(`path judgment: ${USER_JUDGMENT_INBOX_PATH}`);
     expect(pending.content[0]?.text).toContain(`judgment handoff: ${USER_JUDGMENT_HANDOFF_PATH}`);
     expect(pending.content[0]?.text).toContain(
-      'event-1 [review_feedback] Review gate needs a follow-up.',
+      'event-1 [review_feedback] · external-metadata · drill-down: inbox_get({ eventId:event-1 })',
     );
     expect(pending.content[0]?.text).toContain(
-      'event-blocked-merge [merged] · software refinement pending; do not acknowledge #42 externally merged; bounded retirement outcome is pending.',
+      'event-blocked-merge [merged] · external-metadata · refinement barrier:software_refinement_pending; do not acknowledge · drill-down: inbox_get({ eventId:event-blocked-merge })',
     );
 
     const summary = await status.execute('call-3', {}, signal, onUpdate, ctx);
-    expect(summary.content[0]?.text).toContain('· software refinement pending:1');
+    expect(summary.content[0]?.text).toContain('· blocked:1');
     expect(summary.content[0]?.text).toContain(
       '! inbox event-blocked-merge [merged] · software refinement pending; judge first: inbox_get({ eventId }); do not acknowledge',
     );
@@ -2335,11 +2342,12 @@ describe('Pardes model-visible tools', () => {
     expect(text).toContain(
       'reportId:report-123 · previewTruncated:true · artifact: report_get({ reportId })',
     );
-    expect(text).toContain('event-report [agent_report_completed] child-authored preview:');
     expect(text).toContain(
-      'event-verifier-report [agent_report_completed] advisory-verifier-authored preview:',
+      'event-report [agent_report_completed] · child-authored · drill-down: inbox_get({ eventId:event-report })',
     );
-    expect(text).toContain('child-authored preview:');
+    expect(text).toContain(
+      'event-verifier-report [agent_report_completed] · advisory-verifier-authored · drill-down: inbox_get({ eventId:event-verifier-report })',
+    );
     expect(text).not.toContain('worker summary '.repeat(30));
   });
 
@@ -2533,6 +2541,14 @@ describe('Pardes model-visible tools', () => {
         summary: '#42 has changes-requested review metadata.',
         type: 'review_feedback',
       },
+      'event-question-detail': {
+        agentId: 'agent-1',
+        createdAt,
+        details: 'question-context-tail',
+        id: 'event-question-detail',
+        summary: 'agent-1 asks a blocking question; inspect the durable inbox detail.',
+        type: 'agent_question',
+      },
       'event-report': {
         agentId: 'agent-1',
         createdAt,
@@ -2601,7 +2617,7 @@ describe('Pardes model-visible tools', () => {
     );
     expect(external.content[0]?.text).toContain(`[${INBOX_EVENT_EXTERNAL_FEEDBACK_TRUST_LABEL}]`);
     expect(external.content[0]?.text).toContain(
-      'summary(JSON string): "[external GitHub feedback] #42 observed a preview.\\n\\"quoted external preview\\""',
+      'excerpt(JSON string): "[external GitHub feedback] #42 observed a preview.\\n\\"quoted external preview\\""',
     );
     expect(external.content[0]?.text).toContain(
       'external GitHub feedback remains observation-only: persisted bounded previews only; no worker message was sent.',
@@ -2619,10 +2635,16 @@ describe('Pardes model-visible tools', () => {
       agentId: 'agent-1',
       createdAt,
       eventId: 'event-external',
+      excerptSource: 'summary',
+      hasMore: false,
+      maxChars: 4_000,
+      offset: 0,
       pullRequestId: 'pr-42',
+      returnedChars: externalSummary.length,
       returnedSummaryChars: externalSummary.length,
       summaryChars: externalSummary.length,
       summaryTruncated: false,
+      totalChars: externalSummary.length,
       trust: 'external_feedback',
       type: 'discussion_feedback',
       workstreamId: 'ws-1',
@@ -2746,6 +2768,29 @@ describe('Pardes model-visible tools', () => {
       trust: 'child_authored',
     });
 
+    const questionExcerpt = await inboxGet.execute(
+      'call-question-detail',
+      { eventId: 'event-question-detail', maxChars: 8, offset: 9 },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(questionExcerpt.content[0]?.text).toContain(
+      'excerptSource: details · offset: 9 · maxChars: 8 · returnedChars: 8 · totalChars: 21 · hasMore: true',
+    );
+    expect(questionExcerpt.content[0]?.text).toContain('excerpt(JSON string): "context-"');
+    expect(questionExcerpt.content[0]?.text).toContain(
+      'next: inbox_get({ eventId: "event-question-detail", offset: 17, maxChars: 8 })',
+    );
+    expect(questionExcerpt.details).toMatchObject({
+      excerptSource: 'details',
+      hasMore: true,
+      maxChars: 8,
+      offset: 9,
+      returnedChars: 8,
+      totalChars: 21,
+    });
+
     const verifierReport = await inboxGet.execute(
       'call-verifier-report',
       { eventId: 'event-verifier-report' },
@@ -2831,6 +2876,58 @@ describe('Pardes model-visible tools', () => {
       summaryChars: 5_000,
       summaryTruncated: true,
     });
+  });
+
+  test('traverses every decodable continuation for a restored legacy summary-only row beyond the detail cap', async () => {
+    const summary = `legacy summary ${'x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 2 * REPORT_EXCERPT_MAX_CHARS)} tail`;
+    const event: ManagerEvent = {
+      createdAt,
+      id: 'event-legacy-large-summary',
+      summary,
+      type: 'legacy_attention',
+    };
+    let maximumRequestedOffset = 0;
+    const manager = {
+      getInboxEvent: (params: { readonly offset?: number }) =>
+        Effect.sync(() => {
+          maximumRequestedOffset = Math.max(maximumRequestedOffset, params.offset ?? 0);
+          if ((params.offset ?? 0) > INBOX_EVENT_EXCERPT_MAX_OFFSET)
+            throw new Error('Continuation pointer was not decodable.');
+          return event;
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerWorkstreamTools(pi, manager);
+    const inboxGet = requiredValue(tools.get('inbox_get'));
+    let offset = 0;
+    let returnedTotal = 0;
+
+    while (true) {
+      const result = await inboxGet.execute(
+        'call-legacy-summary',
+        { eventId: event.id, maxChars: REPORT_EXCERPT_MAX_CHARS, offset },
+        signal,
+        onUpdate,
+        ctx,
+      );
+      const details = result.details as {
+        readonly hasMore: boolean;
+        readonly offset: number;
+        readonly returnedChars: number;
+        readonly totalChars: number;
+      };
+      expect(details).toMatchObject({ offset, totalChars: summary.length });
+      returnedTotal += details.returnedChars;
+      if (!details.hasMore) break;
+      offset += details.returnedChars;
+      expect(offset).toBeLessThanOrEqual(INBOX_EVENT_EXCERPT_MAX_OFFSET);
+      expect(result.content[0]?.text).toContain(
+        `next: inbox_get({ eventId: "${event.id}", offset: ${offset}, maxChars: ${REPORT_EXCERPT_MAX_CHARS} })`,
+      );
+    }
+
+    expect(returnedTotal).toBe(summary.length);
+    expect(maximumRequestedOffset).toBeGreaterThan(MANAGER_EVENT_DETAILS_MAX_CHARS);
   });
 
   test('submits valid feedback but disarms cancelled, blank, and oversized handoffs without consuming unseen rows', async () => {

@@ -1,15 +1,22 @@
 import { Schema } from 'effect';
 import { describe, expect, test } from 'vitest';
 import type { WorktreeInspection } from '../git/index.ts';
+import { requiredValue } from '../test-support.ts';
+import {
+  CHILD_QUESTION_CONTEXT_MAX_CHARS,
+  CHILD_QUESTION_MAX_CHARS,
+} from '../worker-runtime/child-profile.ts';
 import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
 import {
   type AgentRecord,
   currentVerificationTerminalReportStatus,
+  MANAGER_EVENT_DETAILS_MAX_CHARS,
   type ManagerEvent,
   ManagerEventSchema,
   type VerificationRecord,
 } from './domain.ts';
 import {
+  acceptedDurableEventDetails,
   applyHandoffAudit,
   boundedEventSummary,
   boundedFailureSummary,
@@ -17,6 +24,7 @@ import {
   type HandoffAuditOutcome,
   handoffAuditSuffix,
   hasPendingAgentAttention,
+  hasPendingCanonicalAttention,
   isDuplicateWorkerAttention,
   type ReportArtifactPersistence,
   reportPersistenceSuffix,
@@ -401,7 +409,8 @@ describe('worker-event summary policy', () => {
         event: { agentId: 'agent-one', question: '  Choose\npath? ', type: 'question' },
         expected: {
           actionable: true,
-          summary: 'agent-one asks: Choose path?',
+          details: '{"question":"  Choose\\npath? "}',
+          summary: 'agent-one asks a blocking question; inspect the durable inbox detail.',
           type: 'agent_question',
         },
       },
@@ -423,7 +432,8 @@ describe('worker-event summary policy', () => {
         event: { agentId: 'agent-one', message: ' invalid\njson ', type: 'protocol_error' },
         expected: {
           actionable: true,
-          summary: 'agent-one emitted invalid RPC JSON: invalid json',
+          details: ' invalid\njson ',
+          summary: 'agent-one emitted invalid RPC JSON; inspect the durable inbox diagnostic.',
           type: 'agent_protocol_error',
         },
       },
@@ -480,6 +490,23 @@ describe('worker-event summary policy', () => {
     expect(projected?.summary.endsWith('…')).toBe(true);
   });
 
+  test('keeps accepted worst-case child question fields lossless beneath the durable inbox cap', () => {
+    const question = '\u0000'.repeat(CHILD_QUESTION_MAX_CHARS);
+    const context = '\u0000'.repeat(CHILD_QUESTION_CONTEXT_MAX_CHARS);
+    const projected = workerEventSummary({
+      agentId: 'agent-one',
+      context,
+      question,
+      type: 'question',
+    });
+
+    expect(projected?.details?.length).toBeLessThanOrEqual(MANAGER_EVENT_DETAILS_MAX_CHARS);
+    expect(JSON.parse(requiredValue(projected?.details))).toEqual({ context, question });
+    expect(
+      acceptedDurableEventDetails('x'.repeat(MANAGER_EVENT_DETAILS_MAX_CHARS + 1), 'fixture'),
+    ).toContain('fixture rejected before durable persistence');
+  });
+
   test('makes progress persistence failures actionable and lets Git audit failure type win', () => {
     const progress = workerEventSummary(
       { agentId: 'agent-one', status: 'progress', summary: 'Routine progress.', type: 'report' },
@@ -487,6 +514,8 @@ describe('worker-event summary policy', () => {
     );
     expect(progress).toEqual({
       actionable: true,
+      details:
+        'report summary(JSON string): "Routine progress."\nreport artifact persistence diagnostic(JSON string): "report store unavailable"',
       summary:
         'agent-one: Routine progress. Report artifact persistence failed: report store unavailable.',
       type: 'agent_report_persist_failed',
@@ -504,6 +533,8 @@ describe('worker-event summary policy', () => {
     );
     expect(completed).toEqual({
       actionable: true,
+      details:
+        'report summary(JSON string): "Done."\nreport artifact persistence diagnostic(JSON string): "report store unavailable"\nmanaged-worktree Git audit diagnostic(JSON string): "inspection unavailable"',
       summary:
         'agent-one: Done. Report artifact persistence failed: report store unavailable. Git audit failed: inspection unavailable.',
       type: 'agent_git_audit_failed',
@@ -525,6 +556,33 @@ describe('manager event dedupe policy', () => {
       hasPendingAgentAttention(inbox, { agentId: 'agent-two', type: 'agent_git_audit_failed' }),
     ).toBe(false);
     expect(hasPendingAgentAttention(inbox, { type: 'manager_notice' })).toBe(true);
+  });
+
+  test('matches only equivalent canonical pending attention so changed outcomes rearm without duplicate noise', () => {
+    const candidate: ManagerEvent = {
+      agentId: 'agent-one',
+      createdAt,
+      details: 'full durable diagnosis',
+      id: 'event-candidate',
+      pullRequestId: 'pr-one',
+      summary: 'Bounded diagnosis.',
+      type: 'pull_request_auto_sync_attention',
+      workstreamId: 'ws-one',
+    };
+    const prior = { ...candidate, id: 'event-prior' };
+
+    expect(hasPendingCanonicalAttention([prior], candidate)).toBe(true);
+    expect(
+      hasPendingCanonicalAttention([{ ...prior, details: 'changed diagnosis' }], candidate),
+    ).toBe(false);
+    expect(hasPendingCanonicalAttention([{ ...prior, pullRequestId: 'pr-two' }], candidate)).toBe(
+      false,
+    );
+    expect(hasPendingCanonicalAttention([], candidate)).toBe(false);
+    const legacyAutoSync = { ...prior, details: undefined };
+    expect(
+      hasPendingCanonicalAttention([legacyAutoSync], { ...candidate, details: candidate.summary }),
+    ).toBe(true);
   });
 
   test('deduplicates repeatable pending diagnostics by type plus agent without collapsing terminal reports', () => {

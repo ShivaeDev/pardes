@@ -5,7 +5,7 @@ import {
   MANAGER_INPUT_LONG_TEXT_MAX_LENGTH,
   MANAGER_INPUT_SHORT_TEXT_MAX_LENGTH,
 } from '../manager/index.ts';
-import { verificationStatusLines } from './projections.ts';
+import { verificationStatusLines } from './projections/verifications.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerVerificationTools(pi: ExtensionAPI, manager: ManagerController): void {

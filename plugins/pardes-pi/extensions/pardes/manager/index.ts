@@ -189,4 +189,4 @@ export {
 export {
   projectVerificationReviewLoopDisposition,
   type VerificationReviewLoopDisposition,
-} from './verification.ts';
+} from './verification/index.ts';

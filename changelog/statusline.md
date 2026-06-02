@@ -3,6 +3,10 @@
 All notable changes to this plugin are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-06-02
+### Fixed
+- Removed redundant explicit registration of conventional `hooks/hooks.json`, which Claude Code auto-loads, avoiding duplicate-hook load failure while preserving the SessionStart hook.
+
 ## [0.1.1] - 2026-05-29
 ### Fixed
 - Ownership check tightened from substring matching to anchored equality, so a similarly-named command is no longer mistaken for ours and silently overwritten.

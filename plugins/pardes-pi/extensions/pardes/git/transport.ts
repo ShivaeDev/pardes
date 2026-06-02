@@ -8,9 +8,15 @@ export interface GitResult {
   readonly stderr: string;
 }
 
+export interface RunGitOptions {
+  readonly maxBuffer?: number;
+  readonly timeoutMs?: number;
+}
+
 export function runGit(
   cwd: string,
   args: ReadonlyArray<string>,
+  options: RunGitOptions = {},
 ): Effect.Effect<GitResult, GitCommandError> {
   return Effect.tryPromise({
     catch: (cause) => new GitCommandError({ args, cause, cwd }),
@@ -19,7 +25,14 @@ export function runGit(
         execFile(
           'git',
           args,
-          { cwd, encoding: 'utf8', env: gitEnvironmentForExplicitCwd(), signal },
+          {
+            cwd,
+            encoding: 'utf8',
+            env: gitEnvironmentForExplicitCwd(),
+            ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+            signal,
+            ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+          },
           (error, stdout, stderr) => {
             if (error) {
               reject(error);

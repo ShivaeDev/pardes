@@ -69,4 +69,18 @@ describe('Git command boundary', () => {
 
     expect(result.stdout).toBe(`${body}\n`);
   });
+
+  test('applies opt-in timeout and output circuit breakers', async () => {
+    const oversized = await Effect.runPromise(
+      runGit(tmpdir(), ['-c', 'alias.emit=!printf 1234567890', 'emit'], { maxBuffer: 4 }).pipe(
+        Effect.flip,
+      ),
+    );
+    const timedOut = await Effect.runPromise(
+      runGit(tmpdir(), ['-c', 'alias.wait=!sleep 1', 'wait'], { timeoutMs: 10 }).pipe(Effect.flip),
+    );
+
+    expect(oversized._tag).toBe('GitCommandError');
+    expect(timedOut._tag).toBe('GitCommandError');
+  });
 });

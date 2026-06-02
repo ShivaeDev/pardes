@@ -446,17 +446,16 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations).toHaveLength(1);
   });
 
-  test('pushes exactly the audited SHA to the proved immutable remote target before creating a ready-for-review PR', async () => {
+  test('pushes exactly the audited SHA before creating a verified ready-for-review PR', async () => {
     const fixture = scriptedRunner([
       result(),
       result('[]'),
       result('https://github.com/acme/project/pull/42\n'),
       result(JSON.stringify(pullRequest())),
-      result(),
     ]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
 
-    const published = await Effect.runPromise(service.publish({ ...input, openInBrowser: true }));
+    const published = await Effect.runPromise(service.publish(input));
 
     expect(published).toEqual({
       action: 'created',
@@ -465,7 +464,6 @@ describe('GitHub publication boundary', () => {
       draft: false,
       headBranch: input.headBranch,
       number: 42,
-      openedInBrowser: true,
       status: 'open',
       title: input.title,
       url: 'https://github.com/acme/project/pull/42',
@@ -526,11 +524,7 @@ describe('GitHub publication boundary', () => {
       '--json',
       'number,url,state,isDraft,headRefName,headRefOid,baseRefName',
     ]);
-    expect(withoutBoundRepo(fixture.invocations.at(-1))).toEqual({
-      args: ['pr', 'view', '42', '--web'],
-      command: 'gh',
-      cwd: input.cwd,
-    });
+    expect(fixture.invocations).toHaveLength(4);
   });
 
   test('retains completed CLI-only hosted spend conservatively without changing exact-SHA publication', async () => {
@@ -662,7 +656,6 @@ describe('GitHub publication boundary', () => {
     expect(published.draft).toBe(true);
     expect(published.title).toBe(input.title);
     expect(published.body).toBe(input.body);
-    expect(published.openedInBrowser).toBe(false);
     expect(fixture.invocations.some(({ args }) => args[0] === 'pr' && args[1] === 'create')).toBe(
       false,
     );

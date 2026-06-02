@@ -22,6 +22,7 @@ import {
   type WorktreeLease,
 } from '../git/index.ts';
 import {
+  type BrowserHandoffShape,
   GitHubCommandError,
   type GitHubPublicationShape,
   type GitHubWatcherCallbacks,
@@ -422,7 +423,7 @@ function failingWorkers(onSpawn?: (input: WorkerSpawnInput) => void) {
   return { makeWorkers };
 }
 
-function manualGithubWatcher() {
+function manualGithubWatcher(onReconcile?: () => void) {
   let callbacks: GitHubWatcherCallbacks | undefined;
   let starts = 0;
   let stops = 0;
@@ -432,6 +433,7 @@ function manualGithubWatcher() {
     reconcile: () =>
       Effect.sync(() => {
         reconciliations += 1;
+        onReconcile?.();
       }),
     start: (nextCallbacks) =>
       Effect.sync(() => {
@@ -553,6 +555,20 @@ function manualGithubWatcher() {
   };
 }
 
+function recordingBrowserHandoff() {
+  const requests: Array<{ readonly requestedMode: string; readonly url: string }> = [];
+  const browserHandoff: BrowserHandoffShape = {
+    handoff: (url, requestedMode) =>
+      Effect.sync(() => {
+        requests.push({ requestedMode, url });
+        return requestedMode === 'none'
+          ? ({ requestedMode, status: 'not_requested' } as const)
+          : ({ openedMode: requestedMode, requestedMode, status: 'opened' } as const);
+      }),
+  };
+  return { browserHandoff, requests };
+}
+
 function observedPullRequest(
   overrides: Partial<PullRequestObservation> = {},
 ): PullRequestObservation {
@@ -596,7 +612,6 @@ function stubGithub(
           draft: true,
           headBranch: input.headBranch,
           number,
-          openedInBrowser: input.openInBrowser === true,
           status: 'open' as const,
           title: input.title,
           url: `https://github.test/acme/project/pull/${number}`,
@@ -7699,7 +7714,9 @@ describe('manager controller', () => {
     const fixture = harness(repo);
     const workers = stubWorkers();
     const github = stubGithub();
+    const browser = recordingBrowserHandoff();
     const controller = new ManagerController(fixture.pi, {
+      browserHandoff: browser.browserHandoff,
       github: github.github,
       makeWorkers: workers.makeWorkers,
     });
@@ -7732,6 +7749,7 @@ describe('manager controller', () => {
           agentId: agent.id,
           baseBranch: 'main',
           body: 'Summary and validation.',
+          browserMode: 'background',
           title: 'Publish the fixture',
           workstreamId: workstream.id,
         },
@@ -7760,6 +7778,14 @@ describe('manager controller', () => {
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
+    expect(published.browserHandoff).toEqual({
+      openedMode: 'background',
+      requestedMode: 'background',
+      status: 'opened',
+    });
+    expect(browser.requests).toEqual([
+      { requestedMode: 'background', url: 'https://github.test/acme/project/pull/42' },
+    ]);
     expect(published.pullRequest).toMatchObject({
       agentId: agent.id,
       baseBranch: 'main',
@@ -7803,6 +7829,108 @@ describe('manager controller', () => {
     expect(github.reservations).toHaveLength(1);
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('persists and settles a verified review gate before handing off its exact verified URL', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub({ status: 'closed' });
+    const redirectedUrl = 'https://attacker.test/acme/project/pull/42';
+    let controller: ManagerController;
+    const watcher = manualGithubWatcher(() => {
+      const statePath = join(activationStateDir(fixture.entries), 'state.json');
+      const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+        pullRequests: Record<string, { url: string }>;
+      };
+      requiredValue(persisted.pullRequests['pr-42']).url = redirectedUrl;
+      writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+      const snapshot = requiredValue(controller.snapshot());
+      (requiredValue(snapshot.pullRequests['pr-42']) as { url: string }).url = redirectedUrl;
+    });
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    const browserHandoff: BrowserHandoffShape = {
+      handoff: (url, requestedMode) =>
+        Effect.gen(function* () {
+          expect(url).toBe('https://github.test/acme/project/pull/42');
+          expect(requestedMode).toBe('background');
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return {
+            attemptedMode: 'background' as const,
+            failure: { code: 'ENOENT' as const, kind: 'browser_open_failed' as const },
+            requestedMode: 'background' as const,
+            status: 'failed' as const,
+          };
+        }),
+    };
+    controller = new ManagerController(fixture.pi, {
+      browserHandoff,
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { workstream, agent } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'post-persistence browser handoff',
+    );
+    writeFileSync(join(requiredValue(agent.worktree).path, 'handoff.txt'), 'handoff fixture\n');
+    git(requiredValue(agent.worktree).path, 'add', 'handoff.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'handoff fixture');
+
+    const publication = Effect.runFork(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Persist before browser handoff.',
+          browserMode: 'background',
+          title: 'Post-persistence browser handoff',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+
+    expect(controller.snapshot()?.pullRequests['pr-42']).toMatchObject({
+      agentId: agent.id,
+      id: 'pr-42',
+      number: 42,
+      status: 'closed',
+      url: redirectedUrl,
+      workstreamId: workstream.id,
+    });
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+    expect(controller.snapshot()?.inbox).toEqual([
+      expect.objectContaining({ pullRequestId: 'pr-42', type: 'closed_unmerged' }),
+    ]);
+    expect(watcher.associations()).toEqual([]);
+    expect(watcher.reconciliations()).toBe(1);
+    expect(
+      readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
+    ).toContain('pull_request_published');
+
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    const published = await Effect.runPromise(Fiber.join(publication));
+    expect(published).toMatchObject({
+      browserHandoff: {
+        attemptedMode: 'background',
+        failure: { code: 'ENOENT', kind: 'browser_open_failed' },
+        requestedMode: 'background',
+        status: 'failed',
+      },
+      openedInBrowser: false,
+      pullRequest: { id: 'pr-42', url: redirectedUrl },
+    });
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
   test('durably clears a collided remote candidate before reserving its readable fallback', async () => {

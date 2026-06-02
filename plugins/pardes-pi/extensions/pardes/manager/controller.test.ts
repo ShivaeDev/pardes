@@ -6442,6 +6442,164 @@ describe('manager controller', () => {
     await Effect.runPromise(restored.shutdown(fixture.ctx));
   });
 
+  test('defers merge-driven auto-completion while another worker publication is in flight, preserving an active stream with its new open gate', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub((index) => ({ number: index === 0 ? 42 : 43 }));
+    const watcher = manualGithubWatcher();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      githubWatcher: watcher.watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Serialize merge retirement with publication.', title: 'Retirement race' },
+        fixture.ctx,
+      ),
+    );
+    const [first, publishing] = await Effect.runPromise(
+      Effect.all([
+        controller.spawnAgent(
+          { task: 'Publish gate A.', workstreamId: workstream.id },
+          fixture.ctx,
+        ),
+        controller.spawnAgent(
+          { task: 'Publish gate B.', workstreamId: workstream.id },
+          fixture.ctx,
+        ),
+      ]),
+    );
+    for (const [agent, path] of [
+      [first, 'gate-a.txt'],
+      [publishing, 'gate-b.txt'],
+    ] as const) {
+      const worktree = requiredValue(agent.worktree).path;
+      writeFileSync(join(worktree, path), `${path}\n`);
+      git(worktree, 'add', path);
+      git(worktree, 'commit', '-m', path);
+    }
+    const gateA = await Effect.runPromise(
+      controller.createPullRequest(
+        {
+          agentId: first.id,
+          baseBranch: 'main',
+          body: 'Gate A.',
+          title: 'Gate A',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(controller.stopAgent(first.id, fixture.ctx));
+    await Effect.runPromise(controller.stopAgent(publishing.id, fixture.ctx));
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const release = await Effect.runPromise(Deferred.make<void>());
+    github.setDuringPublish(() =>
+      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    );
+
+    const gateBFiber = Effect.runFork(
+      controller.createPullRequest(
+        {
+          agentId: publishing.id,
+          baseBranch: 'main',
+          body: 'Gate B remains open.',
+          title: 'Gate B',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(Deferred.await(entered));
+    await Effect.runPromise(
+      watcher.observe(gateA.pullRequest.id, observedPullRequest({ number: 42, status: 'merged' })),
+    );
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+
+    await Effect.runPromise(Deferred.succeed(release, undefined));
+    const gateB = await Effect.runPromise(Fiber.join(gateBFiber));
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.pullRequests[gateA.pullRequest.id]?.status).toBe('merged');
+    expect(controller.snapshot()?.pullRequests[gateB.pullRequest.id]?.status).toBe('open');
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) =>
+          type === 'workstream_auto_completed' ||
+          type === 'workstream_reopened_for_published_review_gate',
+      ),
+    ).toEqual([]);
+    expect(existsSync(requiredValue(first.worktree).path)).toBe(true);
+    expect(existsSync(requiredValue(publishing.worktree).path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('durably reopens an unexpectedly completed stream if a remote open gate already exists at final publication persistence', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const stateDir = activationStateDir(fixture.entries);
+    const statePath = join(stateDir, 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'final remote gate repair',
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    writeFileSync(join(worktree, 'remote-gate.txt'), 'remote gate\n');
+    git(worktree, 'add', 'remote-gate.txt');
+    git(worktree, 'commit', '-m', 'remote gate');
+    github.setDuringPublish(() =>
+      Effect.sync(() => {
+        const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+          workstreams: Record<string, { status: string }>;
+        };
+        requiredValue(state.workstreams[workstream.id]).status = 'complete';
+        writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+      }),
+    );
+
+    const published = await Effect.runPromise(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Preserve remote gate ownership.',
+          title: 'Remote gate repair',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+
+    expect(published.pullRequest.status).toBe('open');
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.pullRequests[published.pullRequest.id]?.status).toBe('open');
+    expect(
+      managerEvents(stateDir).filter(
+        ({ type }) => type === 'workstream_reopened_for_published_review_gate',
+      ),
+    ).toHaveLength(1);
+    expect(existsSync(requiredValue(agent.worktree).path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
   test('waits for every open review gate in a stream before auto-completing merged work', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));

@@ -450,6 +450,18 @@ export class ManagerController {
     );
   }
 
+  private tryWithActiveLifecyclePermit<A, E, R>(
+    operation: Effect.Effect<A, E, R>,
+  ): Effect.Effect<boolean, E, R> {
+    return Effect.suspend(() => {
+      if (!this.lifecycleAcceptingOperations || this.lifecycleTransitioning)
+        return Effect.succeed(false);
+      return this.lifecycleGate
+        .withPermitsIfAvailable(1)(operation)
+        .pipe(Effect.map(Option.isSome));
+    });
+  }
+
   private withLifecycleTransition<A, E, R>(
     operation: (epoch: number) => Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E, R> {
@@ -787,6 +799,7 @@ export class ManagerController {
         retireResolvedVerificationsForSource: (sourceAgentId) =>
           verifications.retireResolvedForSource(sourceAgentId),
         stopIdleWorker: (agentId) => this.workers.stopIfIdle(agentId),
+        trySerializeWorkstreamCompletion: (effect) => this.tryWithActiveLifecyclePermit(effect),
       },
       namespace: active,
     });
@@ -2032,7 +2045,9 @@ export class ManagerController {
     // stopped owner's dirty or failed handoff audit. Re-run conservative merged
     // retirement only after cleanup durably removes that unresolved projection.
     yield* active.reviewGates
-      .retryMergedRetirementForWorkstream(state.agents[input.agentId]?.workstreamId)
+      .retryMergedRetirementForWorkstream(state.agents[input.agentId]?.workstreamId, {
+        alreadySerialized: true,
+      })
       .pipe(
         Effect.catch((error) =>
           Effect.sync(() =>
@@ -2068,7 +2083,7 @@ export class ManagerController {
     // for bounded diagnosis. Stopping that owner is a safe retry edge for the
     // already-terminal stream; open gates and other blockers still fail closed.
     yield* active.reviewGates
-      .retryMergedRetirementForWorkstream(stopped.workstreamId)
+      .retryMergedRetirementForWorkstream(stopped.workstreamId, { alreadySerialized: true })
       .pipe(
         Effect.catch((error) =>
           Effect.sync(() =>

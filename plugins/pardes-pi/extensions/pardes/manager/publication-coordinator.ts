@@ -105,6 +105,10 @@ interface PublishedReviewBranchReservation {
   readonly changed: boolean;
 }
 
+interface PublishedReviewGatePersistence {
+  readonly reopenedWorkstream: boolean;
+}
+
 type ManagerEventAssociation = Pick<ManagerEvent, 'workstreamId' | 'agentId' | 'pullRequestId'>;
 
 function makeEvent(
@@ -313,9 +317,20 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
     });
     const timestamp = yield* nowIso;
     const id = `pr-${publication.number}`;
-    yield* namespace.store.mutate((current) => {
+    const persistence = yield* namespace.store.mutate<
+      PublishedReviewGatePersistence,
+      InvalidManagedStateError
+    >((current) => {
       const currentAgent = current.agents[agent.id] ?? agent;
       const currentPullRequest = current.pullRequests[id];
+      const currentWorkstream = current.workstreams[workstream.id];
+      if (!currentWorkstream) {
+        return Effect.fail(
+          new InvalidManagedStateError({
+            reason: `published review gate ${id} lost its owning workstream ${workstream.id} before durable association`,
+          }),
+        );
+      }
       const pullRequest: PullRequestRecord = {
         agentId: agent.id,
         baseBranch: publication.baseBranch,
@@ -349,8 +364,10 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         createdAt: currentPullRequest?.createdAt ?? timestamp,
         updatedAt: timestamp,
       };
+      const reopenWorkstream =
+        pullRequest.status === 'open' && currentWorkstream.status !== 'active';
       return Effect.succeed([
-        undefined,
+        { reopenedWorkstream: reopenWorkstream },
         {
           ...current,
           agents: {
@@ -358,6 +375,16 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
             [agent.id]: { ...applyHandoffAudit(currentAgent, audit), updatedAt: timestamp },
           },
           pullRequests: { ...current.pullRequests, [pullRequest.id]: pullRequest },
+          workstreams: reopenWorkstream
+            ? {
+                ...current.workstreams,
+                [currentWorkstream.id]: {
+                  ...currentWorkstream,
+                  status: 'active',
+                  updatedAt: timestamp,
+                },
+              }
+            : current.workstreams,
         },
       ] as const);
     });
@@ -368,6 +395,16 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         timestamp,
       ),
     );
+    if (persistence.reopenedWorkstream) {
+      yield* callbacks.appendEventSafely(
+        makeEvent(
+          'workstream_reopened_for_published_review_gate',
+          `Reopened ${workstream.id} because newly published remote review gate #${publication.number} remains open; retained review ownership was preserved.`,
+          timestamp,
+          { agentId: agent.id, pullRequestId: id, workstreamId: workstream.id },
+        ),
+      );
+    }
     yield* callbacks.refresh(ctx);
     if (publication.status !== 'open') {
       yield* callbacks.observePublishedTerminal({

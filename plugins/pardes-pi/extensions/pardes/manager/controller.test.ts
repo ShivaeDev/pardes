@@ -32,6 +32,7 @@ import {
   type PublishedPullRequest,
   type PublishPullRequestInput,
   type PullRequestDiscussionSnapshot,
+  type ReservePublishedReviewBranchInput,
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from '../github/index.ts';
@@ -497,6 +498,7 @@ function stubGithub(
     | ((publicationIndex: number) => Partial<PublishedPullRequest>) = {},
 ) {
   const publications: PublishPullRequestInput[] = [];
+  const reservations: ReservePublishedReviewBranchInput[] = [];
   const syncs: SyncExistingPullRequestInput[] = [];
   let duringPublish: (() => Effect.Effect<void, unknown>) | undefined;
   let duringSync: (() => Effect.Effect<void, unknown>) | undefined;
@@ -524,6 +526,14 @@ function stubGithub(
           ...currentOverrides,
         };
       }),
+    reservePublishedReviewBranch: (input) =>
+      Effect.sync(() => {
+        reservations.push(input);
+        return `fixture-user/pardes/${input.workstreamTitle
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')}`;
+      }),
     syncExisting: (input) =>
       Effect.gen(function* () {
         syncs.push(input);
@@ -535,6 +545,7 @@ function stubGithub(
   return {
     github,
     publications,
+    reservations,
     setDuringPublish: (effect: () => Effect.Effect<void, unknown>) => {
       duringPublish = effect;
     },
@@ -1149,6 +1160,10 @@ describe('manager controller', () => {
         Effect.sync(() => {
           calls.push('github.publish');
         }).pipe(Effect.flatMap(() => baseGithub.github.publish(input))),
+      reservePublishedReviewBranch: (input) =>
+        Effect.sync(() => {
+          calls.push('github.reservePublishedReviewBranch');
+        }).pipe(Effect.flatMap(() => baseGithub.github.reservePublishedReviewBranch(input))),
       syncExisting: (input) =>
         Effect.sync(() => {
           calls.push('github.syncExisting');
@@ -6347,9 +6362,7 @@ describe('manager controller', () => {
     const publishedHeadBranch = github.publications[0]?.headBranch;
     expect(isManagedPublishedReviewBranch(publishedHeadBranch)).toBe(true);
     expect(isOpaquePublishedReviewBranch(publishedHeadBranch)).toBe(false);
-    expect(publishedHeadBranch).toMatch(
-      /^pardes\/review\/readable-publish-pr-commit-the-bounded-publication-fixture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    );
+    expect(publishedHeadBranch).toBe('fixture-user/pardes/publish-pr');
     expect(publishedHeadBranch).not.toBe(requiredValue(agent.worktree).branch);
     expect(publishedHeadBranch).not.toContain(requiredValue(agent.worktree).managerId);
     expect(publishedHeadBranch).not.toContain(agent.id);
@@ -6359,6 +6372,7 @@ describe('manager controller', () => {
       cwd: requiredValue(agent.worktree).path,
       headBranch: publishedHeadBranch,
       headSha: git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD'),
+      managedHeadBranchReservation: true,
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
@@ -6401,6 +6415,7 @@ describe('manager controller', () => {
       ),
     );
     expect(github.publications[1]?.headBranch).toBe(publishedHeadBranch);
+    expect(github.reservations).toHaveLength(1);
   });
 
   test('rejects base retarget while an owned review gate remains open before reaching GitHub publication', async () => {

@@ -10,7 +10,6 @@ import {
   type GitHubPublicationError,
   type GitHubPublicationShape,
   isManagedPublishedReviewBranch,
-  READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX,
 } from '../github/index.ts';
 import type { StateStoreShape, StoreError } from '../storage/index.ts';
 import type { AgentRecord, ManagerEvent, ManagerState, PullRequestRecord } from './domain.ts';
@@ -130,38 +129,6 @@ export function pullRequestEventAssociation(
   };
 }
 
-export const PUBLISHED_REVIEW_BRANCH_SLUG_MAX_LENGTH = 64;
-const PUBLISHED_REVIEW_BRANCH_RESERVATION_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-function readablePublishedReviewBranchSlug(value: string, fallback: string): string {
-  const slug = value
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, PUBLISHED_REVIEW_BRANCH_SLUG_MAX_LENGTH)
-    .replace(/-+$/g, '');
-  return slug || fallback;
-}
-
-export function readablePublishedReviewBranch(
-  workstreamName: string,
-  taskName: string,
-  reservationId: string,
-): string {
-  if (!PUBLISHED_REVIEW_BRANCH_RESERVATION_ID_PATTERN.test(reservationId))
-    throw new Error('Published review branch reservation ID must be a UUID.');
-  const workstream = readablePublishedReviewBranchSlug(workstreamName, 'workstream');
-  const task = readablePublishedReviewBranchSlug(taskName, 'task');
-  return `${READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX}${workstream}-${task}-${reservationId}`;
-}
-
-function allocateReadablePublishedReviewBranch(workstreamName: string, taskName: string): string {
-  return readablePublishedReviewBranch(workstreamName, taskName, randomUUID());
-}
-
 /** Allocate one coordinator per active manager namespace so both publication paths share one permit. */
 export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function* (
   options: PullRequestPublicationCoordinatorOptions,
@@ -187,14 +154,20 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
 
   const reservePublishedReviewBranch = Effect.fnUntraced(function* (
     agentId: string,
-    workstreamName: string,
+    workstreamTitle: string,
+    cwd: string,
+    headSha: string,
     ctx?: ExtensionContext,
   ) {
-    const agent = namespace.state.agents[agentId];
-    const allocated = allocateReadablePublishedReviewBranch(
-      workstreamName,
-      agent?.title ?? agent?.task ?? 'task',
-    );
+    const known = namespace.state.agents[agentId];
+    if (known?.publishedReviewBranch !== undefined) return known.publishedReviewBranch;
+    const allocated = yield* github.reservePublishedReviewBranch({
+      cwd,
+      disambiguator: agentId,
+      fallbackDisambiguator: namespace.managerId,
+      headSha,
+      workstreamTitle,
+    });
     const timestamp = yield* nowIso;
     const reservation = yield* namespace.store.mutate<
       PublishedReviewBranchReservation,
@@ -324,18 +297,31 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
         reason: `persisted open review gate ${pullRequestLabel(existingAssociation)} has no published head branch`,
       });
     }
+    const associationHasManagedReservation =
+      existingAssociation?.headBranch !== undefined &&
+      agent.publishedReviewBranch === existingAssociation.headBranch &&
+      isManagedPublishedReviewBranch(existingAssociation.headBranch);
     if (
       existingAssociation?.headBranch !== undefined &&
-      !isManagedPublishedReviewBranch(existingAssociation.headBranch) &&
+      !associationHasManagedReservation &&
       existingAssociation.number === undefined
     ) {
       return yield* new PullRequestPublicationValidationError({
-        reason: `persisted legacy review gate ${pullRequestLabel(existingAssociation)} has no pull-request number for update-only publication`,
+        reason: `persisted compatibility review gate ${pullRequestLabel(existingAssociation)} has no pull-request number for update-only publication`,
       });
     }
     const headBranch =
       existingAssociation?.headBranch ??
-      (yield* reservePublishedReviewBranch(agent.id, workstream.title, ctx));
+      (yield* reservePublishedReviewBranch(
+        agent.id,
+        workstream.title,
+        worktree.path,
+        inspection.headSha,
+        ctx,
+      ));
+    const hasManagedReservation =
+      namespace.state.agents[agent.id]?.publishedReviewBranch === headBranch &&
+      isManagedPublishedReviewBranch(headBranch);
     const publication = yield* github.publish({
       baseBranch: input.baseBranch,
       body: input.body,
@@ -344,7 +330,8 @@ export const makePullRequestPublicationCoordinator = Effect.fnUntraced(function*
       headSha: inspection.headSha,
       title: input.title,
       ...(input.openInBrowser === undefined ? {} : { openInBrowser: input.openInBrowser }),
-      ...(existingAssociation?.number !== undefined && !isManagedPublishedReviewBranch(headBranch)
+      ...(hasManagedReservation ? { managedHeadBranchReservation: true } : {}),
+      ...(existingAssociation?.number !== undefined && !hasManagedReservation
         ? { legacyExistingPullRequestNumber: existingAssociation.number }
         : {}),
     });

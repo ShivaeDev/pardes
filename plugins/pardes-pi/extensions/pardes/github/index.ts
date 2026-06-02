@@ -32,16 +32,20 @@ export {
   makeGitHubPublicationService,
   type PublishedPullRequest,
   type PublishPullRequestInput,
+  type ReservePublishedReviewBranchInput,
   type SyncExistingPullRequestInput,
   type SyncExistingPullRequestResult,
 } from './publication.ts';
 export {
+  FLAT_FALLBACK_PUBLISHED_REVIEW_BRANCH_PATTERN,
   GITHUB_DISCUSSION_PREVIEW_MAX_LENGTH,
   type GitHubDiscussionCursor,
   GitHubDiscussionCursorSchema,
   GitHubDiscussionPaginationGapsSchema,
   type GitHubDiscussionSurface,
   GitHubDiscussionSurfaceSchema,
+  HUMAN_PUBLISHED_REVIEW_BRANCH_PATTERN,
+  HumanPublishedReviewBranchSchema,
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
   MAX_GITHUB_DISCUSSION_ITEMS_PER_SURFACE,
@@ -64,6 +68,7 @@ export {
   READABLE_PUBLISHED_REVIEW_BRANCH_PATTERN,
   READABLE_PUBLISHED_REVIEW_BRANCH_PREFIX,
   ReadablePublishedReviewBranchSchema,
+  ReservePublishedReviewBranchInputSchema,
 } from './schemas.ts';
 export {
   DEFAULT_GITHUB_WATCHER_CADENCE,

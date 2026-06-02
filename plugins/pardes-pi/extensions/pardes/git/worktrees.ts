@@ -1,5 +1,5 @@
 import { appendFile, lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { Clock, Context, type Duration, Effect, Exit, Layer, Schedule } from 'effect';
 import {
   DirtyWorktreeError,
@@ -21,6 +21,7 @@ export interface CreateWorktreeInput {
   readonly managerId: string;
   readonly agentId: string;
   readonly branchPointSha: string;
+  readonly name?: string;
 }
 
 export interface CreateDetachedReviewCheckoutInput {
@@ -187,8 +188,8 @@ function assertSafeSegment(
       );
 }
 
-function leasePath(repo: RepoState, managerId: string, ownerId: string): string {
-  return join(repo.primaryCheckout, '.worktrees', 'pardes', managerId, ownerId);
+function leasePath(repo: RepoState, managerId: string, directoryName: string): string {
+  return join(repo.primaryCheckout, '.worktrees', 'pardes', managerId, directoryName);
 }
 
 function detachedReviewCheckoutPath(
@@ -210,6 +211,41 @@ export function managedWorktreeBranch(managerId: string, agentId: string): strin
   return `pardes/${managerId.slice(0, 8)}/${agentId}`;
 }
 
+const READABLE_WORKTREE_NAME_MAX_LENGTH = 64;
+const READABLE_LOCAL_BRANCH = /^[a-z0-9]+(?:-[a-z0-9]+)*\/pardes\/[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const FLAT_FALLBACK_LOCAL_BRANCH = /^[a-z0-9]+(?:-[a-z0-9]+)*-pardes-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function readableWorktreeSlug(
+  value: string,
+  fallback: string,
+  maxLength = READABLE_WORKTREE_NAME_MAX_LENGTH,
+): string {
+  const slug = value
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, maxLength)
+    .replace(/-+$/g, '');
+  return slug || fallback;
+}
+
+function shortWorktreeDisambiguator(value: string): string {
+  return readableWorktreeSlug(value, 'worker', 8);
+}
+
+function readableWorktreeCandidates(
+  name: string,
+  agentId: string,
+  managerId: string,
+): ReadonlyArray<string> {
+  const preferred = readableWorktreeSlug(name, 'workstream');
+  const agent = shortWorktreeDisambiguator(agentId.replace(/^agent-/, ''));
+  const manager = shortWorktreeDisambiguator(managerId);
+  return [preferred, `${preferred}-${agent}`, `${preferred}-${agent}-${manager}`];
+}
+
 function invalidLease(reason: string): InvalidManagedLeaseError {
   return new InvalidManagedLeaseError({ reason });
 }
@@ -229,11 +265,20 @@ const validateManagedWorktreeLeaseIdentity = Effect.fnUntraced(function* (
     return yield* invalidLease('manager namespace does not match its owner');
   if (lease.agentId !== owner.agentId)
     return yield* invalidLease('agent namespace does not match its owner');
-  if (lease.path !== leasePath(owner.repo, owner.managerId, owner.agentId)) {
-    return yield* invalidLease('worktree path does not match its managed namespace');
-  }
-  if (lease.branch !== managedWorktreeBranch(owner.managerId, owner.agentId)) {
-    return yield* invalidLease('branch does not match its managed namespace');
+  const legacy =
+    lease.path === leasePath(owner.repo, owner.managerId, owner.agentId) &&
+    lease.branch === managedWorktreeBranch(owner.managerId, owner.agentId);
+  const directoryName = basename(lease.path);
+  const readable =
+    isSafeManagedSegment(directoryName) &&
+    directoryName !== DETACHED_REVIEW_CHECKOUTS_DIRECTORY &&
+    lease.path === leasePath(owner.repo, owner.managerId, directoryName) &&
+    ((READABLE_LOCAL_BRANCH.test(lease.branch) &&
+      lease.branch.endsWith(`/pardes/${directoryName}`)) ||
+      (FLAT_FALLBACK_LOCAL_BRANCH.test(lease.branch) &&
+        lease.branch.endsWith(`-pardes-${directoryName}`)));
+  if (!legacy && !readable) {
+    return yield* invalidLease('worktree path and branch do not match their managed namespace');
   }
   if (!FULL_COMMIT_SHA.test(lease.branchPointSha)) {
     return yield* invalidLease('branch point is not an immutable commit SHA');
@@ -348,11 +393,11 @@ const ensureManagedWorktreeParent = Effect.fnUntraced(function* (
     return yield* invalid('path', 'managed worktree target must not be a symbolic link');
 });
 
-const ensureWritingWorktreeParent = (repo: RepoState, managerId: string, agentId: string) =>
+const ensureWritingWorktreeParent = (repo: RepoState, managerId: string, directoryName: string) =>
   ensureManagedWorktreeParent(
     repo,
     ['.worktrees', 'pardes', managerId],
-    leasePath(repo, managerId, agentId),
+    leasePath(repo, managerId, directoryName),
   );
 
 const ensureDetachedReviewCheckoutParent = (
@@ -543,13 +588,9 @@ export function makeManagedWorktreeService(
       yield* assertSafeSegment('agentId', input.agentId);
       if (input.agentId === DETACHED_REVIEW_CHECKOUTS_DIRECTORY)
         return yield* invalid('agentId', 'is reserved for detached review checkouts');
-      const branch = managedWorktreeBranch(input.managerId, input.agentId);
       if (!FULL_COMMIT_SHA.test(input.branchPointSha)) {
         return yield* invalid('branchPointSha', 'must be a full lowercase commit SHA');
       }
-      yield* git(input.repo.primaryCheckout, ['check-ref-format', '--branch', branch]).pipe(
-        Effect.mapError(() => invalid('branch', 'must be a valid Git branch name')),
-      );
       const resolved = (yield* git(input.repo.primaryCheckout, [
         'rev-parse',
         '--verify',
@@ -557,32 +598,79 @@ export function makeManagedWorktreeService(
       ])).stdout.trim();
       if (resolved !== input.branchPointSha)
         return yield* invalid('branchPointSha', 'must identify one immutable commit exactly');
-      const path = leasePath(input.repo, input.managerId, input.agentId);
-      yield* withRepositoryLock(
+      const configuredActor = yield* git(input.repo.primaryCheckout, [
+        'config',
+        '--get',
+        'user.name',
+      ]).pipe(
+        Effect.map(({ stdout }) => stdout.trim()),
+        Effect.catch(() => Effect.succeed('')),
+      );
+      const actor = readableWorktreeSlug(
+        configuredActor || process.env.USER || process.env.LOGNAME || 'user',
+        'user',
+      );
+      const selection = yield* withRepositoryLock(
         input.repo,
         retryDelay,
         retries,
         Effect.gen(function* () {
           yield* ensureManagedRootExcluded(input.repo);
-          yield* ensureWritingWorktreeParent(input.repo, input.managerId, input.agentId);
-          yield* git(input.repo.primaryCheckout, [
-            'worktree',
-            'add',
-            '-b',
-            branch,
-            path,
-            input.branchPointSha,
-          ]);
+          const namespaceRoot = `${actor}/pardes`;
+          const namespaceRootRef = `refs/heads/${namespaceRoot}`;
+          const namespaceRootBlocked = (yield* git(input.repo.primaryCheckout, [
+            'for-each-ref',
+            '--format=%(refname)',
+            namespaceRootRef,
+          ])).stdout
+            .split(/\r?\n/)
+            .includes(namespaceRootRef);
+          for (const directoryName of readableWorktreeCandidates(
+            input.name ?? input.agentId,
+            input.agentId,
+            input.managerId,
+          )) {
+            const branch = namespaceRootBlocked
+              ? `${actor}-pardes-${directoryName}`
+              : `${namespaceRoot}/${directoryName}`;
+            yield* git(input.repo.primaryCheckout, ['check-ref-format', '--branch', branch]).pipe(
+              Effect.mapError(() => invalid('branch', 'must be a valid Git branch name')),
+            );
+            const ref = `refs/heads/${branch}`;
+            const present = (yield* git(input.repo.primaryCheckout, [
+              'for-each-ref',
+              '--format=%(refname)',
+              ref,
+            ])).stdout
+              .split(/\r?\n/)
+              .includes(ref);
+            const path = leasePath(input.repo, input.managerId, directoryName);
+            const target = yield* lstatIfExists('inspect managed worktree target', path);
+            if (target?.isSymbolicLink())
+              return yield* invalid('path', 'managed worktree target must not be a symbolic link');
+            if (present || target) continue;
+            yield* ensureWritingWorktreeParent(input.repo, input.managerId, directoryName);
+            yield* git(input.repo.primaryCheckout, [
+              'worktree',
+              'add',
+              '-b',
+              branch,
+              path,
+              input.branchPointSha,
+            ]);
+            return { branch, path };
+          }
+          return yield* invalid('name', 'could not allocate a unique readable worktree name');
         }),
       );
       const millis = yield* Clock.currentTimeMillis;
       const lease = {
         agentId: input.agentId,
-        branch,
+        branch: selection.branch,
         branchPointSha: input.branchPointSha,
         createdAt: new Date(millis).toISOString(),
         managerId: input.managerId,
-        path,
+        path: selection.path,
       };
       yield* validateManagedWorktreeLease(
         { agentId: input.agentId, managerId: input.managerId, repo: input.repo },

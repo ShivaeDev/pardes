@@ -9,7 +9,7 @@ import {
   WorktreeLockError,
 } from './errors.ts';
 import type { DetachedReviewCheckoutLease, RepoState, WorktreeLease } from './schemas.ts';
-import { runGit } from './transport.ts';
+import { type RunGitOptions, runGit } from './transport.ts';
 
 const MANAGED_EXCLUDE = '/.worktrees/pardes/';
 const DETACHED_REVIEW_CHECKOUTS_DIRECTORY = 'reviews';
@@ -43,24 +43,70 @@ export interface DetachedReviewCheckoutInspection {
   readonly dirty: boolean;
 }
 
+export const WORKTREE_PROVENANCE_MAX_FIRST_PARENT_COMMITS = 200;
+export const WORKTREE_PROVENANCE_MAX_PATHS = 512;
+export const WORKTREE_PROVENANCE_GIT_TIMEOUT_MS = 2_000;
+export const WORKTREE_PROVENANCE_GIT_MAX_BUFFER_BYTES = 256 * 1_024;
+
 export interface WorktreeLatestCommitDelta {
   readonly changedPaths: ReadonlyArray<string>;
   readonly commitSha: string;
-  readonly kind: 'worker_authored' | 'integration';
+  readonly kind: 'first_parent_non_merge' | 'merge_commit';
 }
 
-/** Commit provenance stays separate from the total branch delta used by safety audits. */
-export interface WorktreeCommitProvenance {
-  readonly branchPointSha: string;
-  readonly dirtyPaths: ReadonlyArray<string>;
-  readonly headSha: string;
-  readonly integrationCommitCount: number;
-  readonly integrationPaths: ReadonlyArray<string>;
-  readonly latestDelta?: WorktreeLatestCommitDelta;
-  readonly totalBranchCommitCount: number;
-  readonly totalBranchDeltaPaths: ReadonlyArray<string>;
-  readonly workerAuthoredCommitCount: number;
-  readonly workerAuthoredPaths: ReadonlyArray<string>;
+export interface WorktreeCommitProvenanceBounds {
+  readonly maxFirstParentCommits: number;
+  readonly maxPaths: number;
+}
+
+export type WorktreeCommitProvenanceUnavailableReason =
+  | 'dirty_worktree'
+  | 'worktree_not_registered'
+  | 'branch_mismatch'
+  | 'baseline_not_ancestor'
+  | 'unsupported_graph'
+  | 'bounds_exceeded'
+  | 'inspection_failed';
+
+export type WorktreeCommitProvenance =
+  | {
+      readonly status: 'available';
+      readonly attribution: 'cooperative_first_parent';
+      readonly bounds: WorktreeCommitProvenanceBounds;
+      readonly branchPointSha: string;
+      readonly headSha: string;
+      readonly latestDelta?: WorktreeLatestCommitDelta;
+      readonly mergeCommitCount: number;
+      readonly mergePaths: ReadonlyArray<string>;
+      readonly firstParentNonMergeCommitCount: number;
+      readonly firstParentNonMergePaths: ReadonlyArray<string>;
+      readonly totalBranchCommitCount: number;
+      readonly totalBranchDeltaPaths: ReadonlyArray<string>;
+    }
+  | {
+      readonly status: 'unavailable';
+      readonly bounds: WorktreeCommitProvenanceBounds;
+      readonly dirtyPaths: ReadonlyArray<string>;
+      readonly observedBranch?: string;
+      readonly reason: WorktreeCommitProvenanceUnavailableReason;
+    };
+
+const WORKTREE_PROVENANCE_BOUNDS: WorktreeCommitProvenanceBounds = {
+  maxFirstParentCommits: WORKTREE_PROVENANCE_MAX_FIRST_PARENT_COMMITS,
+  maxPaths: WORKTREE_PROVENANCE_MAX_PATHS,
+};
+export function unavailableWorktreeCommitProvenance(
+  reason: WorktreeCommitProvenanceUnavailableReason,
+  dirtyPaths: ReadonlyArray<string> = [],
+  observedBranch?: string,
+): WorktreeCommitProvenance {
+  return {
+    bounds: WORKTREE_PROVENANCE_BOUNDS,
+    dirtyPaths,
+    ...(observedBranch === undefined ? {} : { observedBranch }),
+    reason,
+    status: 'unavailable',
+  };
 }
 
 export interface WorktreeInspection {
@@ -162,6 +208,10 @@ export class ManagedWorktrees extends Context.Service<ManagedWorktrees, ManagedW
 interface WorktreeServiceOptions {
   readonly lockRetryDelay?: Duration.Input;
   readonly lockRetries?: number;
+  readonly provenanceGitMaxBufferBytes?: number;
+  readonly provenanceGitTimeoutMs?: number;
+  readonly provenanceMaxFirstParentCommits?: number;
+  readonly provenanceMaxPaths?: number;
 }
 
 function fsError(operation: string, path: string, cause: unknown): WorktreeError {
@@ -179,16 +229,24 @@ function fsEffect<A>(
   });
 }
 
-function git(repoPath: string, args: ReadonlyArray<string>) {
-  return runGit(repoPath, args).pipe(
+function git(repoPath: string, args: ReadonlyArray<string>, options?: RunGitOptions) {
+  return runGit(repoPath, args, options).pipe(
     Effect.mapError(
       (cause) => new WorktreeError({ cause, operation: `git ${args.join(' ')}`, path: repoPath }),
     ),
   );
 }
 
-const isRegisteredWorktreePath = Effect.fnUntraced(function* (repo: RepoState, path: string) {
-  const listed = yield* git(repo.primaryCheckout, ['worktree', 'list', '--porcelain', '-z']);
+const isRegisteredWorktreePath = Effect.fnUntraced(function* (
+  repo: RepoState,
+  path: string,
+  options?: RunGitOptions,
+) {
+  const listed = yield* git(
+    repo.primaryCheckout,
+    ['worktree', 'list', '--porcelain', '-z'],
+    options,
+  );
   return listed.stdout.split('\0').includes(`worktree ${path}`);
 });
 
@@ -320,7 +378,7 @@ const validateManagedWorktreeLeaseIdentity = Effect.fnUntraced(function* (
   }
 });
 
-export const validateManagedWorktreeLease = Effect.fnUntraced(function* (
+const validateManagedWorktreeLeasePath = Effect.fnUntraced(function* (
   owner: ManagedLeaseOwner,
   lease: WorktreeLease,
 ) {
@@ -330,6 +388,21 @@ export const validateManagedWorktreeLease = Effect.fnUntraced(function* (
     try: () => realpath(lease.path),
   });
   if (physicalPath !== lease.path) return yield* invalidLease('worktree path is redirected');
+});
+
+export const validateManagedWorktreeLease = Effect.fnUntraced(function* (
+  owner: ManagedLeaseOwner,
+  lease: WorktreeLease,
+) {
+  yield* validateManagedWorktreeLeasePath(owner, lease);
+  if (!(yield* isRegisteredWorktreePath(owner.repo, lease.path)))
+    return yield* invalidLease('managed writing checkout is not a registered worktree');
+  const branch = yield* git(lease.path, ['symbolic-ref', '--quiet', '--short', 'HEAD']).pipe(
+    Effect.map(({ stdout }) => stdout.trim()),
+    Effect.catch(() => invalidLease('managed writing checkout branch cannot be verified')),
+  );
+  if (branch !== lease.branch)
+    return yield* invalidLease('managed writing checkout branch does not match its retained lease');
 });
 
 const validateDetachedReviewCheckoutLeaseIdentity = Effect.fnUntraced(function* (
@@ -539,7 +612,7 @@ function parseCommittedChangedPaths(output: string): ReadonlyArray<string> {
 
 interface FirstParentCommit {
   readonly commitSha: string;
-  readonly integration: boolean;
+  readonly parentCount: number;
 }
 
 function parseFirstParentCommits(output: string): ReadonlyArray<FirstParentCommit> {
@@ -550,7 +623,7 @@ function parseFirstParentCommits(output: string): ReadonlyArray<FirstParentCommi
     .map((line) => {
       const [commitSha, ...parents] = line.trim().split(/\s+/);
       if (!commitSha) throw new Error('Git returned an invalid first-parent commit row');
-      return { commitSha, integration: parents.length > 1 };
+      return { commitSha, parentCount: parents.length };
     });
 }
 
@@ -559,27 +632,48 @@ export function makeManagedWorktreeService(
 ): ManagedWorktreeShape {
   const retryDelay = options.lockRetryDelay ?? '25 millis';
   const retries = options.lockRetries ?? 80;
+  const provenanceBounds: WorktreeCommitProvenanceBounds = {
+    maxFirstParentCommits:
+      options.provenanceMaxFirstParentCommits ?? WORKTREE_PROVENANCE_MAX_FIRST_PARENT_COMMITS,
+    maxPaths: options.provenanceMaxPaths ?? WORKTREE_PROVENANCE_MAX_PATHS,
+  };
+  const provenanceGitOptions: RunGitOptions = {
+    maxBuffer: options.provenanceGitMaxBufferBytes ?? WORKTREE_PROVENANCE_GIT_MAX_BUFFER_BYTES,
+    timeoutMs: options.provenanceGitTimeoutMs ?? WORKTREE_PROVENANCE_GIT_TIMEOUT_MS,
+  };
+  const provenanceUnavailable = (
+    reason: WorktreeCommitProvenanceUnavailableReason,
+    dirtyPaths: ReadonlyArray<string> = [],
+    observedBranch?: string,
+  ): WorktreeCommitProvenance => ({
+    bounds: provenanceBounds,
+    dirtyPaths,
+    ...(observedBranch === undefined ? {} : { observedBranch }),
+    reason,
+    status: 'unavailable',
+  });
 
   const inspectPresent = Effect.fnUntraced(function* (
     owner: ManagedLeaseOwner,
     lease: WorktreeLease,
     includeProvenance = false,
   ) {
-    yield* validateManagedWorktreeLease(owner, lease);
-    const headSha = (yield* git(lease.path, [
-      'rev-parse',
-      '--verify',
-      'HEAD^{commit}',
-    ])).stdout.trim();
-    const status = yield* git(lease.path, [
-      'status',
-      '--porcelain=v1',
-      '-z',
-      '--untracked-files=all',
-    ]);
+    if (includeProvenance) yield* validateManagedWorktreeLeasePath(owner, lease);
+    else yield* validateManagedWorktreeLease(owner, lease);
+    const gitOptions = includeProvenance ? provenanceGitOptions : undefined;
+    const headSha = (yield* git(
+      lease.path,
+      ['rev-parse', '--verify', 'HEAD^{commit}'],
+      gitOptions,
+    )).stdout.trim();
+    const status = yield* git(
+      lease.path,
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+      gitOptions,
+    );
     const dirtyPaths = parsePorcelainChangedPaths(status.stdout);
     const range = `${lease.branchPointSha}..${headSha}`;
-    const committed = yield* git(lease.path, ['diff', '--name-status', '-z', range]);
+    const committed = yield* git(lease.path, ['diff', '--name-status', '-z', range], gitOptions);
     const totalBranchDeltaPaths = parseCommittedChangedPaths(committed.stdout);
     const changedPaths = [...new Set([...dirtyPaths, ...totalBranchDeltaPaths])].sort();
     const baseInspection = {
@@ -589,77 +683,142 @@ export function makeManagedWorktreeService(
       path: lease.path,
     };
     if (!includeProvenance) return baseInspection;
+    const unavailable = (
+      reason: WorktreeCommitProvenanceUnavailableReason,
+      paths: ReadonlyArray<string> = [],
+      observedBranch?: string,
+    ) => ({
+      ...baseInspection,
+      provenance: provenanceUnavailable(reason, paths, observedBranch),
+    });
+    if (dirtyPaths.length > 0) return unavailable('dirty_worktree', dirtyPaths);
+    if (totalBranchDeltaPaths.length > provenanceBounds.maxPaths)
+      return unavailable('bounds_exceeded');
+    if (!(yield* isRegisteredWorktreePath(owner.repo, lease.path, gitOptions)))
+      return unavailable('worktree_not_registered');
+    const branchResult = yield* git(
+      lease.path,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      gitOptions,
+    ).pipe(Effect.exit);
+    if (Exit.isFailure(branchResult)) return unavailable('branch_mismatch');
+    const observedBranch = branchResult.value.stdout.trim();
+    if (observedBranch !== lease.branch) return unavailable('branch_mismatch', [], observedBranch);
+    const ancestor = yield* git(
+      lease.path,
+      ['merge-base', '--is-ancestor', lease.branchPointSha, headSha],
+      gitOptions,
+    ).pipe(Effect.exit);
+    if (Exit.isFailure(ancestor)) return unavailable('baseline_not_ancestor');
     const firstParentCommits = parseFirstParentCommits(
-      (yield* git(lease.path, ['rev-list', '--first-parent', '--parents', range])).stdout,
+      (yield* git(
+        lease.path,
+        [
+          'rev-list',
+          '--first-parent',
+          '--parents',
+          `--max-count=${provenanceBounds.maxFirstParentCommits + 1}`,
+          range,
+        ],
+        gitOptions,
+      )).stdout,
     );
+    if (firstParentCommits.length > provenanceBounds.maxFirstParentCommits)
+      return unavailable('bounds_exceeded');
+    if (firstParentCommits.some(({ parentCount }) => parentCount < 1 || parentCount > 2))
+      return unavailable('unsupported_graph');
     const totalBranchCommitCount = firstParentCommits.length;
-    const integrationCommitCount = firstParentCommits.filter(
-      ({ integration }) => integration,
+    const mergeCommitCount = firstParentCommits.filter(
+      ({ parentCount }) => parentCount === 2,
     ).length;
-    const authoredPaths =
-      integrationCommitCount === 0
+    const firstParentNonMergePaths =
+      mergeCommitCount === 0
         ? totalBranchDeltaPaths
         : parseCommittedChangedPaths(
-            (yield* git(lease.path, [
-              'log',
-              '--first-parent',
-              '--no-merges',
-              '--format=',
-              '--name-status',
-              '-z',
-              range,
-            ])).stdout,
+            (yield* git(
+              lease.path,
+              [
+                'log',
+                '--first-parent',
+                '--no-merges',
+                `--max-count=${provenanceBounds.maxFirstParentCommits}`,
+                '--format=',
+                '--name-status',
+                '-z',
+                range,
+              ],
+              gitOptions,
+            )).stdout,
           );
-    const integrationPaths =
-      integrationCommitCount === 0
+    const mergePaths =
+      mergeCommitCount === 0
         ? []
         : parseCommittedChangedPaths(
-            (yield* git(lease.path, [
-              'log',
-              '--first-parent',
-              '--merges',
-              '--diff-merges=first-parent',
-              '--format=',
-              '--name-status',
-              '-z',
-              range,
-            ])).stdout,
+            (yield* git(
+              lease.path,
+              [
+                'log',
+                '--first-parent',
+                '--merges',
+                '--diff-merges=first-parent',
+                `--max-count=${provenanceBounds.maxFirstParentCommits}`,
+                '--format=',
+                '--name-status',
+                '-z',
+                range,
+              ],
+              gitOptions,
+            )).stdout,
           );
     const latestCommit = firstParentCommits[0];
     const latestDelta = latestCommit
       ? {
           changedPaths: parseCommittedChangedPaths(
-            (yield* git(lease.path, [
-              'diff',
-              '--name-status',
-              '-z',
-              `${latestCommit.commitSha}^1`,
-              latestCommit.commitSha,
-            ])).stdout,
+            (yield* git(
+              lease.path,
+              [
+                'diff',
+                '--name-status',
+                '-z',
+                `${latestCommit.commitSha}^1`,
+                latestCommit.commitSha,
+              ],
+              gitOptions,
+            )).stdout,
           ),
           commitSha: latestCommit.commitSha,
-          kind: latestCommit.integration ? ('integration' as const) : ('worker_authored' as const),
+          kind:
+            latestCommit.parentCount === 2
+              ? ('merge_commit' as const)
+              : ('first_parent_non_merge' as const),
         }
       : undefined;
+    if (
+      firstParentNonMergePaths.length > provenanceBounds.maxPaths ||
+      mergePaths.length > provenanceBounds.maxPaths ||
+      (latestDelta?.changedPaths.length ?? 0) > provenanceBounds.maxPaths
+    )
+      return unavailable('bounds_exceeded');
     return {
       ...baseInspection,
       provenance: {
+        attribution: 'cooperative_first_parent' as const,
+        bounds: provenanceBounds,
         branchPointSha: lease.branchPointSha,
-        dirtyPaths,
+        firstParentNonMergeCommitCount: totalBranchCommitCount - mergeCommitCount,
+        firstParentNonMergePaths,
         headSha,
-        integrationCommitCount,
-        integrationPaths,
         ...(latestDelta === undefined ? {} : { latestDelta }),
+        mergeCommitCount,
+        mergePaths,
+        status: 'available' as const,
         totalBranchCommitCount,
         totalBranchDeltaPaths,
-        workerAuthoredCommitCount: totalBranchCommitCount - integrationCommitCount,
-        workerAuthoredPaths: authoredPaths,
       },
     };
   });
 
-  const inspect: ManagedWorktreeShape['inspect'] = (owner, lease) =>
-    inspectPresent(owner, lease, false);
+  const inspect: ManagedWorktreeShape['inspect'] = (owner, lease) => inspectPresent(owner, lease);
   const inspectWithProvenance: NonNullable<ManagedWorktreeShape['inspectWithProvenance']> = (
     owner,
     lease,

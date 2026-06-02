@@ -5,6 +5,7 @@ import {
   discoverRepository,
   type ManagedWorktreeShape,
   makeManagedWorktreeService,
+  unavailableWorktreeCommitProvenance,
   type WorktreeCommitProvenance,
 } from '../git/index.ts';
 import {
@@ -1789,8 +1790,13 @@ export class ManagerController {
             { agentId, managerId: state.managerId, repo: state.repo },
             agent.worktree,
           ).pipe(
-            Effect.map((inspection) => inspection.provenance),
-            Effect.catch(() => Effect.succeed(undefined)),
+            Effect.map(
+              (inspection) =>
+                inspection.provenance ?? unavailableWorktreeCommitProvenance('inspection_failed'),
+            ),
+            Effect.catch(() =>
+              Effect.succeed(unavailableWorktreeCommitProvenance('inspection_failed')),
+            ),
           )
         : undefined;
     this.render(ctx);

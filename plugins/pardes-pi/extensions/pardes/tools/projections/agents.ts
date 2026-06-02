@@ -141,24 +141,33 @@ function auditPathProjection(status: AgentStatus): {
   readonly label: string;
   readonly paths: ReadonlyArray<string>;
 } {
-  return status.gitProvenance === undefined
-    ? { label: 'changed paths', paths: status.agent.changedPaths ?? [] }
-    : { label: 'worker-authored paths', paths: status.gitProvenance.workerAuthoredPaths };
+  const provenance = status.gitProvenance;
+  if (provenance?.status === 'available')
+    return {
+      label: 'cooperative first-parent non-merge paths',
+      paths: provenance.firstParentNonMergePaths,
+    };
+  if (provenance?.status === 'unavailable' && provenance.reason === 'dirty_worktree')
+    return { label: 'dirty paths', paths: provenance.dirtyPaths };
+  return { label: 'changed paths', paths: status.agent.changedPaths ?? [] };
 }
 
 function auditProvenanceLines(status: AgentStatus): ReadonlyArray<string> {
   const provenance = status.gitProvenance;
   if (provenance === undefined)
+    return ['commit provenance: unavailable · reason:not_requested_or_unsupported_adapter'];
+  if (provenance.status === 'unavailable')
     return [
-      'commit provenance: unavailable · opt-in managed-worktree inspection did not return it',
+      `commit provenance: unavailable · reason:${provenance.reason}${provenance.observedBranch === undefined ? '' : ` · observed branch:${structuralValue(provenance.observedBranch)}`} · bounds:first ${provenance.bounds.maxFirstParentCommits} first-parent commits/${provenance.bounds.maxPaths} paths/category`,
     ];
   const latest = provenance.latestDelta;
   return [
-    `commits: worker-authored:${provenance.workerAuthoredCommitCount} · integration:${provenance.integrationCommitCount} · total branch:${provenance.totalBranchCommitCount}`,
+    `commit provenance: cooperative first-parent graph · non-merge rows are worker-branch candidates; merge rows are integration context only · bounds:first ${provenance.bounds.maxFirstParentCommits} commits/${provenance.bounds.maxPaths} paths/category`,
+    `commits: first-parent non-merge:${provenance.firstParentNonMergeCommitCount} · merge-context:${provenance.mergeCommitCount} · total branch:${provenance.totalBranchCommitCount}`,
     latest === undefined
       ? 'latest delta: none · branch still at immutable baseline'
       : `latest delta: ${latest.kind} commit:${structuralValue(latest.commitSha)} · ${plural(latest.changedPaths.length, 'changed path')}`,
-    `total branch delta: ${structuralValue(provenance.branchPointSha)}..${structuralValue(provenance.headSha)} · ${plural(provenance.totalBranchDeltaPaths.length, 'changed path')} · ${plural(provenance.integrationPaths.length, 'integration path')} · ${plural(provenance.dirtyPaths.length, 'dirty path')}`,
+    `total branch delta: ${structuralValue(provenance.branchPointSha)}..${structuralValue(provenance.headSha)} · ${plural(provenance.totalBranchDeltaPaths.length, 'changed path')} · ${plural(provenance.mergePaths.length, 'merge-context path')}`,
   ];
 }
 

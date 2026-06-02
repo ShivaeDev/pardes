@@ -1835,7 +1835,7 @@ describe('Pardes model-visible tools', () => {
     expect(provenanceRequests).toEqual([true, false]);
   });
 
-  test('keeps additive integration context distinct from complete first-N worker-authored audit paths', async () => {
+  test('keeps additive merge context distinct from complete first-N cooperative candidate paths', async () => {
     const baselineSha = 'a'.repeat(40);
     const headSha = 'b'.repeat(40);
     const authoredPaths = [
@@ -1861,20 +1861,22 @@ describe('Pardes model-visible tools', () => {
         Effect.succeed({
           agent: detailedAgent,
           gitProvenance: {
+            attribution: 'cooperative_first_parent' as const,
+            bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
             branchPointSha: baselineSha,
-            dirtyPaths: [],
+            firstParentNonMergeCommitCount: 2,
+            firstParentNonMergePaths: authoredPaths,
             headSha,
-            integrationCommitCount: 1,
-            integrationPaths: ['src/main-only.ts'],
             latestDelta: {
               changedPaths: ['src/main-only.ts'],
               commitSha: headSha,
-              kind: 'integration' as const,
+              kind: 'merge_commit' as const,
             },
+            mergeCommitCount: 1,
+            mergePaths: ['src/main-only.ts'],
+            status: 'available' as const,
             totalBranchCommitCount: 3,
             totalBranchDeltaPaths: [...authoredPaths, 'src/main-only.ts'],
-            workerAuthoredCommitCount: 2,
-            workerAuthoredPaths: authoredPaths,
           },
           runtime: undefined,
         }),
@@ -1891,19 +1893,75 @@ describe('Pardes model-visible tools', () => {
     );
     const text = result.content[0]?.text ?? '';
 
-    expect(text).toContain('commits: worker-authored:2 · integration:1 · total branch:3');
-    expect(text).toContain(`latest delta: integration commit:${headSha} · 1 changed path`);
     expect(text).toContain(
-      `total branch delta: ${baselineSha}..${headSha} · 7 changed paths · 1 integration path · 0 dirty paths`,
+      'commit provenance: cooperative first-parent graph · non-merge rows are worker-branch candidates; merge rows are integration context only · bounds:first 200 commits/512 paths/category',
+    );
+    expect(text).toContain('commits: first-parent non-merge:2 · merge-context:1 · total branch:3');
+    expect(text).toContain(`latest delta: merge_commit commit:${headSha} · 1 changed path`);
+    expect(text).toContain(
+      `total branch delta: ${baselineSha}..${headSha} · 7 changed paths · 1 merge-context path`,
     );
     expect(text).toContain(
-      'worker-authored paths: 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
+      'cooperative first-parent non-merge paths: 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
     );
-    for (const path of authoredPaths.slice(0, 4)) expect(text).toContain(`↳ ${path}`);
-    expect(text).toContain('… +2 more worker-authored paths omitted');
-    expect(text).not.toContain('src/authored-e.ts');
+    for (const path of authoredPaths.slice(0, 3)) expect(text).toContain(`↳ ${path}`);
+    expect(text).toContain('… +3 more cooperative first-parent non-merge paths omitted');
+    expect(text).not.toContain('src/authored-d.ts');
     expect(text).not.toContain('src/main-only.ts');
     expect(text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
+  });
+
+  test('renders explicit dirty provenance refusal with complete first-N live dirty paths', async () => {
+    const dirtyPaths = [
+      'src/dirty-a.ts',
+      'src/dirty-b.ts',
+      'src/dirty-c.ts',
+      'src/dirty-d.ts',
+      'src/dirty-e.ts',
+    ];
+    const detailedAgent: AgentRecord = {
+      ...worker(),
+      changedPaths: [...dirtyPaths, 'src/stale-committed.ts'],
+      gitAudit: {
+        checkedAt: createdAt,
+        dirty: true,
+        status: 'succeeded',
+        trigger: 'completion',
+      },
+    };
+    const manager = {
+      agentStatus: () =>
+        Effect.succeed({
+          agent: detailedAgent,
+          gitProvenance: {
+            bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+            dirtyPaths,
+            reason: 'dirty_worktree' as const,
+            status: 'unavailable' as const,
+          },
+          runtime: undefined,
+        }),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    registerAgentTools(pi, manager);
+
+    const result = await requiredValue(tools.get('agent_status')).execute(
+      'call-dirty-provenance',
+      { agentId: detailedAgent.id, mode: 'audit' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain(
+      'commit provenance: unavailable · reason:dirty_worktree · bounds:first 200 first-parent commits/512 paths/category',
+    );
+    expect(text).toContain('dirty paths: 5 paths');
+    for (const path of dirtyPaths.slice(0, 4)) expect(text).toContain(`↳ ${path}`);
+    expect(text).toContain('… +1 more dirty paths omitted');
+    expect(text).not.toContain('src/dirty-e.ts');
+    expect(text).not.toContain('src/stale-committed.ts');
   });
 
   test('registers narrow guarded child lifecycle tools with bounded path-free projections and distinct reload semantics', async () => {

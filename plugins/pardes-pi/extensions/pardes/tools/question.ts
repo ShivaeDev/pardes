@@ -11,7 +11,6 @@ import {
   QUESTION_OPTION_LABEL_MAX_CHARS,
   QUESTION_OPTIONS_MAX_ITEMS,
   QUESTION_PROMPT_MAX_CHARS,
-  sanitizeQuestionCustomAnswer,
   sanitizeQuestionOptionLabel,
   selectPardesQuestionOption,
 } from '../presentation/index.ts';
@@ -47,8 +46,8 @@ export function registerQuestionTool(pi: ExtensionAPI): void {
       );
       if (!selection) return textResult('User cancelled the question.', { answer: null });
       if (selection.kind === 'custom') {
-        const answer = sanitizeQuestionCustomAnswer((await ctx.ui.input('Custom answer')) ?? '');
-        return answer
+        const answer = await ctx.ui.input('Custom answer');
+        return answer?.trim()
           ? textResult(`User answered: ${answer}`, { answer, custom: true })
           : textResult('User cancelled the question.', { answer: null });
       }

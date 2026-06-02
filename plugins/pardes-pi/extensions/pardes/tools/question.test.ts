@@ -2,7 +2,6 @@ import type { ExtensionAPI, ExtensionContext, Theme } from '@earendil-works/pi-c
 import { type Component, KeybindingsManager, TUI_KEYBINDINGS } from '@earendil-works/pi-tui';
 import { describe, expect, test } from 'vitest';
 import {
-  QUESTION_CUSTOM_ANSWER_MAX_CHARS,
   QUESTION_CUSTOM_LABEL,
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
@@ -129,7 +128,7 @@ describe('question tool execution semantics', () => {
     });
   });
 
-  test('preserves trimmed custom-response and cancellation behavior', async () => {
+  test('preserves full custom responses and cancellation behavior', async () => {
     const custom = await questionTool().execute(
       'call-1',
       {
@@ -141,8 +140,8 @@ describe('question tool execution semantics', () => {
       interactiveContext(['\x1b[B', '\r'], '  use release/next  '),
     );
     expect(custom).toEqual({
-      content: [{ text: 'User answered: use release/next', type: 'text' }],
-      details: { answer: 'use release/next', custom: true },
+      content: [{ text: 'User answered:   use release/next  ', type: 'text' }],
+      details: { answer: '  use release/next  ', custom: true },
     });
 
     const cancelled = await questionTool().execute(
@@ -176,7 +175,8 @@ describe('question tool execution semantics', () => {
     });
   });
 
-  test('sanitizes and bounds a returned custom response', async () => {
+  test('returns a full oversized custom response without clipping or presentation sanitation', async () => {
+    const oversized = `  safe\u001b-${'x'.repeat(4_001)}  `;
     const result = await questionTool().execute(
       'call-1',
       {
@@ -185,20 +185,12 @@ describe('question tool execution semantics', () => {
       },
       signal,
       onUpdate,
-      interactiveContext(
-        ['\x1b[B', '\r'],
-        `  safe\u001b${'x'.repeat(QUESTION_CUSTOM_ANSWER_MAX_CHARS)}  `,
-      ),
+      interactiveContext(['\x1b[B', '\r'], oversized),
     );
-    const answer = (result.details as { readonly answer: string }).answer;
 
-    expect(answer).toHaveLength(QUESTION_CUSTOM_ANSWER_MAX_CHARS);
-    expect(answer.startsWith('safe ')).toBe(true);
-    expect(answer.endsWith('…')).toBe(true);
-    expect(answer).not.toContain('\u001b');
     expect(result).toEqual({
-      content: [{ text: `User answered: ${answer}`, type: 'text' }],
-      details: { answer, custom: true },
+      content: [{ text: `User answered: ${oversized}`, type: 'text' }],
+      details: { answer: oversized, custom: true },
     });
   });
 

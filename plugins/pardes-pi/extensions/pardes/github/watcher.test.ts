@@ -645,6 +645,65 @@ describe('GitHub watcher service', () => {
     expect(received.observations).toHaveLength(2);
   });
 
+  test.each([
+    ['HTTP 429', { statusCode: 429 }],
+    ['secondary limit', { stderr: 'HTTP 403: secondary rate limit exceeded' }],
+  ])('quietly stops a multi-gate pass and reconciles after a classified %s symptom', async (_label, cause) => {
+    let now = 1_700_000_000_000;
+    let fallbackRequests = 0;
+    const watchedPullRequests: string[] = [];
+    const runner: GitHubCommandRunnerShape = {
+      run: (invocation) => {
+        if (invocation.command === 'git')
+          return Effect.succeed(result('git@github.com:acme/project.git\n'));
+        if (invocation.args[0] === 'api' && invocation.args[1] === 'rate_limit') {
+          fallbackRequests += 1;
+          return Effect.succeed(rateLimitFallbackResult());
+        }
+        if (invocation.args[0] === 'pr' && invocation.args[1] === 'view') {
+          watchedPullRequests.push(invocation.args[2] ?? 'missing');
+          return Effect.fail(new GitHubCommandError({ ...invocation, cause }));
+        }
+        return Effect.die(`Unexpected command: ${invocation.command} ${invocation.args.join(' ')}`);
+      },
+    };
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.sync(() => now),
+      runner,
+      unsafeNowMillis: () => now,
+    });
+    const service = makeGitHubWatcherServiceProduction({ hostedMetadata, runner });
+    const received = callbacks([
+      pullRequest(),
+      pullRequest({ id: 'pr-43', number: 43, url: 'https://github.com/acme/project/pull/43' }),
+      pullRequest({ id: 'pr-44', number: 44, url: 'https://github.com/acme/project/pull/44' }),
+    ]);
+
+    await Effect.runPromise(service.poll(received.callbacks));
+
+    expect(watchedPullRequests).toEqual(['42']);
+    expect(fallbackRequests).toBe(1);
+    expect(received.failures).toEqual([]);
+    expect(received.throttleDiagnostics).toEqual([
+      { status: 'rate_metadata_recovered', tier: 'normal' },
+      { status: 'proactive_throttle', tier: 'paused' },
+    ]);
+    expect(await Effect.runPromise(hostedMetadata.snapshot())).toMatchObject({
+      graphql: { availability: 'available', remaining: 4_995, source: 'local_estimate' },
+      watcherPolling: { reason: 'proactive_throttle', status: 'deferred', tier: 'paused' },
+    });
+    expect(hostedMetadata.compactStatusUnsafe()).toMatchObject({ throttle: 'paused' });
+
+    await Effect.runPromise(service.poll(received.callbacks));
+    expect(watchedPullRequests).toEqual(['42']);
+    expect(fallbackRequests).toBe(1);
+
+    now += 60_000;
+    await Effect.runPromise(service.poll(received.callbacks));
+    expect(watchedPullRequests).toEqual(['42', '43']);
+    expect(fallbackRequests).toBe(2);
+  });
+
   test('re-emits unavailable metadata diagnostics when watcher callbacks are rebound', async () => {
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) =>

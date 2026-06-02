@@ -85,6 +85,54 @@ describe('GitHub publication boundary', () => {
     ]);
   });
 
+  test('proves the fixed route before explicitly hosted actor lookup and retains conservative REST debt', async () => {
+    const fixture = scriptedRunner([
+      result(
+        JSON.stringify({
+          resources: {
+            core: { limit: 5_000, remaining: 3_000, reset: 1_800_000_000 },
+            graphql: { limit: 5_000, remaining: 4_000, reset: 1_800_000_000 },
+          },
+        }),
+      ),
+      result('OctoUser\n'),
+      result(),
+    ]);
+    const hostedMetadata = makeGitHubHostedMetadataAdapter({
+      nowMillis: Effect.succeed(1_700_000_000_000),
+      runner: fixture.runner,
+    });
+    const service = makeGitHubPublicationService({ hostedMetadata, runner: fixture.runner });
+    await Effect.runPromise(hostedMetadata.refreshFallback(input.cwd));
+
+    await Effect.runPromise(
+      service.publishedReviewBranchCandidates({
+        cwd: input.cwd,
+        disambiguator: 'agent-12345678',
+        fallbackDisambiguator: 'manager-87654321',
+        workstreamTitle: 'Readable Branch UX',
+      }),
+    );
+    const rateLimit = await Effect.runPromise(hostedMetadata.snapshot());
+
+    expect(fixture.invocations[1]?.args).toEqual([
+      'api',
+      'user',
+      '--hostname',
+      'github.com',
+      '--jq',
+      '.login',
+    ]);
+    expect(fixture.invocations[2]?.args).toEqual([
+      'ls-remote',
+      '--heads',
+      'git@github.com:acme/project.git',
+      'refs/heads/octouser',
+      'refs/heads/octouser/pardes',
+    ]);
+    expect(rateLimit.rest).toMatchObject({ remaining: 2_999, source: 'local_estimate' });
+  });
+
   test('falls back to a sanitized Git config actor when the GitHub login response is not safe', async () => {
     const fixture = scriptedRunner([result('Not Safe Actor!\n'), result('Local Dev\n'), result()]);
     const service = makeGitHubPublicationService({ runner: fixture.runner });
@@ -143,7 +191,7 @@ describe('GitHub publication boundary', () => {
         '--atomic',
         `--force-with-lease=refs/heads/${branch}:`,
         `--force-with-lease=refs/heads/${claim}:`,
-        'origin',
+        'git@github.com:acme/project.git',
         `${input.headSha}:refs/heads/${branch}`,
         `${input.headSha}:refs/heads/${claim}`,
       ],
@@ -169,7 +217,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations[1]?.args).toEqual([
       'push',
       `--force-with-lease=refs/heads/${claim}:${input.headSha}`,
-      'origin',
+      'git@github.com:acme/project.git',
       `:refs/heads/${claim}`,
     ]);
   });
@@ -183,7 +231,12 @@ describe('GitHub publication boundary', () => {
       readonly command: string;
       readonly cwd: string;
     }> = [];
-    const outputs: Array<ProcessResult | 'lost'> = [result(), 'lost', result(advertised)];
+    const outputs: Array<ProcessResult | 'lost'> = [
+      result('git@github.com:acme/project.git\n'),
+      result(),
+      'lost',
+      result(advertised),
+    ];
     const runner: GitHubCommandRunnerShape = {
       run: (invocation) => {
         invocations.push(invocation);
@@ -249,7 +302,19 @@ describe('GitHub publication boundary', () => {
       git('remote', 'add', 'origin', origin);
       const headSha = git('rev-parse', 'HEAD');
       git('push', 'origin', `${headSha}:refs/heads/${HUMAN_CLAIM}/child`);
-      const service = makeGitHubPublicationService({ runner: makeExecFileGitHubCommandRunner() });
+      const execRunner = makeExecFileGitHubCommandRunner();
+      const runner: GitHubCommandRunnerShape = {
+        run: (invocation) =>
+          invocation.command === 'git' && invocation.args.join(' ') === 'remote get-url origin'
+            ? Effect.succeed(result('git@github.com:acme/project.git\n'))
+            : execRunner.run({
+                ...invocation,
+                args: invocation.args.map((arg) =>
+                  arg === 'git@github.com:acme/project.git' ? 'origin' : arg,
+                ),
+              }),
+      };
+      const service = makeGitHubPublicationService({ runner });
 
       expect(
         await Effect.runPromise(
@@ -273,6 +338,7 @@ describe('GitHub publication boundary', () => {
   test('classifies an actor-root TOCTOU hierarchy conflict after failed atomic reservation', async () => {
     const branch = 'actor/pardes/readable-branch-ux';
     const outputs: Array<ProcessResult | 'race'> = [
+      result('git@github.com:acme/project.git\n'),
       result(),
       'race',
       result(`${input.headSha}\trefs/heads/actor\n`),
@@ -310,7 +376,7 @@ describe('GitHub publication boundary', () => {
         }),
       ),
     ).toBe('hierarchy_collision');
-    expect(invocations).toHaveLength(3);
+    expect(invocations).toHaveLength(4);
   });
 
   test('allows create-capable human publication only after mechanical remote reservation proof', async () => {
@@ -338,7 +404,7 @@ describe('GitHub publication boundary', () => {
     expect(fixture.invocations[0]?.args).toEqual([
       'ls-remote',
       '--heads',
-      'origin',
+      'git@github.com:acme/project.git',
       `refs/heads/${headBranch}`,
       `refs/heads/${HUMAN_CLAIM}`,
     ]);

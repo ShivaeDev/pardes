@@ -148,6 +148,8 @@ export interface GitHubHostedMetadataShape {
     pullRequestCount: number,
     route?: GitHubRepositoryIdentity,
   ) => Effect.Effect<GitHubWatcherRateLimitStatus, GitHubCommandError | GitHubResponseError>;
+  /** Quietly pause after a classified server rate-limit symptom and require bounded reconciliation. */
+  readonly deferWatcherForRateLimitSymptom: () => Effect.Effect<GitHubWatcherRateLimitStatus>;
   readonly snapshot: () => Effect.Effect<GitHubRateLimitHealth>;
   /** Bounded transient UI sample only; never persist this controller-scoped telemetry. */
   readonly compactStatusUnsafe: () => GitHubRateLimitCompactStatus;
@@ -190,6 +192,8 @@ interface HostedMetadataState {
   readonly nextCompletedSequence: number;
   readonly nextReservation: number;
   readonly nextWatcherAdmissionAtMillis?: number;
+  readonly rateLimitSymptomRecoveryRequired?: boolean;
+  readonly rateLimitSymptomThrottleUntilMillis?: number;
   readonly watcherPolling: GitHubWatcherRateLimitStatus;
 }
 
@@ -224,11 +228,11 @@ function watcherIntervalMillis(tier: GitHubWatcherThrottleTier): number {
 
 function proactiveWatcherThrottle(
   tier: Exclude<GitHubWatcherThrottleTier, 'normal' | 'unavailable'>,
-  effectiveRemaining: number,
+  effectiveRemaining: number | undefined,
   untilMillis: number,
 ): GitHubWatcherRateLimitStatus {
   return {
-    effectiveRemaining,
+    ...(effectiveRemaining === undefined ? {} : { effectiveRemaining }),
     reason: 'proactive_throttle',
     status: 'deferred',
     tier,
@@ -468,8 +472,19 @@ function compactStatus(
   nowMillis: number,
   fallbackMaxAgeMillis: number,
 ): GitHubRateLimitCompactStatus {
-  if (!fallbackUsable(state, nowMillis, fallbackMaxAgeMillis)) return { throttle: 'unavailable' };
-  const remaining = effectiveRemaining(state, pruneLedger(state.debt, nowMillis));
+  const fallbackAvailable = fallbackUsable(state, nowMillis, fallbackMaxAgeMillis);
+  const remaining = fallbackAvailable
+    ? effectiveRemaining(state, pruneLedger(state.debt, nowMillis))
+    : undefined;
+  if (
+    state.rateLimitSymptomThrottleUntilMillis !== undefined &&
+    state.rateLimitSymptomThrottleUntilMillis > nowMillis
+  )
+    return {
+      ...(remaining === undefined ? {} : { effectiveRemaining: remaining }),
+      throttle: 'paused',
+    };
+  if (!fallbackAvailable) return { throttle: 'unavailable' };
   return {
     ...(remaining === undefined ? {} : { effectiveRemaining: remaining }),
     throttle: remaining === undefined ? 'unavailable' : watcherThrottleTier(remaining),
@@ -569,8 +584,10 @@ function observeFallback(
   const debt = pruneLedger(state.debt, nowMillis);
   const graphql = mergeObservedBudget(state.graphql, graphqlIncoming);
   const rest = mergeObservedBudget(state.rest, restIncoming);
+  const { rateLimitSymptomRecoveryRequired: _rateLimitSymptomRecoveryRequired, ...recovered } =
+    state;
   return {
-    ...state,
+    ...recovered,
     debt: {
       graphql: bindUnknownDebt(
         reconcileObservedDebt(debt.graphql, causalBoundarySequence),
@@ -976,6 +993,30 @@ export function makeGitHubHostedMetadataAdapter(
       ),
     );
 
+  const deferWatcherForRateLimitSymptom: GitHubHostedMetadataShape['deferWatcherForRateLimitSymptom'] =
+    () =>
+      Effect.flatMap(nowMillis, (now) =>
+        Ref.modify(state, (value) => {
+          const debt = pruneLedger(value.debt, now);
+          const remaining = effectiveRemaining(value, debt);
+          const untilMillis = Math.max(
+            value.rateLimitSymptomThrottleUntilMillis ?? 0,
+            now + GITHUB_WATCHER_PAUSE_INTERVAL_MILLIS,
+          );
+          const watcherPolling = proactiveWatcherThrottle('paused', remaining, untilMillis);
+          return [
+            watcherPolling,
+            {
+              ...value,
+              debt,
+              rateLimitSymptomRecoveryRequired: true,
+              rateLimitSymptomThrottleUntilMillis: untilMillis,
+              watcherPolling,
+            },
+          ] as const;
+        }),
+      );
+
   const reserveWatcherPoll: GitHubHostedMetadataShape['reserveWatcherPoll'] = Effect.fnUntraced(
     function* (cwd, pullRequestCount, route) {
       const admittedRoute = yield* route === undefined ? fixedRoute(cwd) : Effect.succeed(route);
@@ -984,23 +1025,44 @@ export function makeGitHubHostedMetadataAdapter(
         const debt = pruneLedger(value.debt, beforeRefresh);
         const remaining = effectiveRemaining(value, debt);
         if (
-          value.nextWatcherAdmissionAtMillis === undefined ||
-          value.nextWatcherAdmissionAtMillis <= beforeRefresh ||
+          value.rateLimitSymptomThrottleUntilMillis !== undefined &&
+          value.rateLimitSymptomThrottleUntilMillis > beforeRefresh
+        ) {
+          const watcherPolling = proactiveWatcherThrottle(
+            'paused',
+            remaining,
+            value.rateLimitSymptomThrottleUntilMillis,
+          );
+          return [watcherPolling, { ...value, debt, watcherPolling }] as const;
+        }
+        const {
+          rateLimitSymptomThrottleUntilMillis: _expiredRateLimitSymptomThrottleUntilMillis,
+          ...admissionState
+        } = value;
+        if (
+          admissionState.nextWatcherAdmissionAtMillis === undefined ||
+          admissionState.nextWatcherAdmissionAtMillis <= beforeRefresh ||
           remaining === undefined ||
-          !fallbackUsable(value, beforeRefresh, fallbackMaxAgeMillis)
+          !fallbackUsable(admissionState, beforeRefresh, fallbackMaxAgeMillis)
         )
-          return [undefined, { ...value, debt }] as const;
+          return [undefined, { ...admissionState, debt }] as const;
         const tier = watcherThrottleTier(remaining);
-        if (tier === 'normal') return [undefined, { ...value, debt }] as const;
+        if (tier === 'normal') return [undefined, { ...admissionState, debt }] as const;
         const watcherPolling = proactiveWatcherThrottle(
           tier,
           remaining,
-          value.nextWatcherAdmissionAtMillis,
+          admissionState.nextWatcherAdmissionAtMillis,
         );
-        return [watcherPolling, { ...value, debt, watcherPolling }] as const;
+        return [watcherPolling, { ...admissionState, debt, watcherPolling }] as const;
       });
       if (deferred !== undefined) return deferred;
-      const refreshed = yield* Effect.result(refreshFallback(cwd, admittedRoute));
+      const requiresRateLimitSymptomRecovery =
+        (yield* Ref.get(state)).rateLimitSymptomRecoveryRequired === true;
+      const refreshed = yield* Effect.result(
+        requiresRateLimitSymptomRecovery
+          ? recoverRequestCapacity(cwd, admittedRoute)
+          : refreshFallback(cwd, admittedRoute),
+      );
       const now = yield* nowMillis;
       const count =
         Number.isSafeInteger(pullRequestCount) && pullRequestCount > 0 ? pullRequestCount : 1;
@@ -1165,6 +1227,7 @@ export function makeGitHubHostedMetadataAdapter(
     cancelUnlaunchedGraphQLReservation,
     compactStatusUnsafe,
     decodeGraphQL,
+    deferWatcherForRateLimitSymptom,
     ensureControllerScope,
     finalizeGraphQLRequest,
     fixedRoute,

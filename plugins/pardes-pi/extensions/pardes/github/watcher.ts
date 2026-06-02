@@ -41,6 +41,7 @@ import {
   makeExecFileGitHubCommandRunner,
   makeGitHubCli,
 } from './transport.ts';
+import { classifyGitHubWatcherFailure } from './watcher-diagnostics.ts';
 
 export const DEFAULT_GITHUB_WATCHER_CADENCE: Duration.Input = '15 seconds';
 export const DEFAULT_GITHUB_WATCHER_COMMAND_TIMEOUT: Duration.Input = '10 seconds';
@@ -542,6 +543,16 @@ export function makeGitHubWatcherService(
           const generation = expectedHeadGeneration(pullRequest.lastPushedHeadSha);
           const failure = (error: GitHubWatcherError) =>
             callbacks.onFailure({ pullRequestId: pullRequest.id, ...generation, error });
+          const watchedFailure = (error: GitHubWatcherError) => {
+            if (classifyGitHubWatcherFailure(error).kind !== 'rate_limit_likely')
+              return failure(error);
+            pollingDeferred = true;
+            return hostedMetadata
+              .deferWatcherForRateLimitSymptom()
+              .pipe(
+                Effect.flatMap((reservation) => notifyThrottleDiagnostic(callbacks, reservation)),
+              );
+          };
           const operationalFailure = (error: GitHubWatcherError) =>
             notifyThrottleDiagnostic(callbacks, metadataUnavailable).pipe(
               Effect.andThen(failure(error)),
@@ -591,7 +602,7 @@ export function makeGitHubWatcherService(
                                     reservation.watcherCliReservationId,
                                   ).pipe(
                                     Effect.matchEffect({
-                                      onFailure: failure,
+                                      onFailure: watchedFailure,
                                       onSuccess: (inspected) => {
                                         if (inspected._tag === 'HeadDivergence') {
                                           const divergence = callbacks.onHeadDivergence({
@@ -629,7 +640,7 @@ export function makeGitHubWatcherService(
                                                 watcherRestReservationId,
                                               ).pipe(
                                                 Effect.matchEffect({
-                                                  onFailure: failure,
+                                                  onFailure: watchedFailure,
                                                   onSuccess: (discussion) =>
                                                     callbacks.onObservation({
                                                       pullRequestId: pullRequest.id,

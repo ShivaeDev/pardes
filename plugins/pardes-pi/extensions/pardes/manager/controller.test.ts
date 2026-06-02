@@ -29,6 +29,7 @@ import {
   type GitHubWatcherShape,
   isManagedPublishedReviewBranch,
   isOpaquePublishedReviewBranch,
+  makeGitHubPublicationService,
   type PublishedPullRequest,
   type PublishedReviewBranchCandidatesInput,
   type PublishPullRequestInput,
@@ -7593,6 +7594,56 @@ describe('manager controller', () => {
     ).toHaveLength(0);
     expect(fixture.messages).toHaveLength(1);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('rejects unsupported-origin initial publication before readable-branch remote mutation', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      github: makeGitHubPublicationService(),
+      githubWatcher: manualGithubWatcher().watcher,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'Unsupported origin',
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    writeFileSync(join(worktree, 'unsupported-origin.txt'), 'must not escape\n');
+    git(worktree, 'add', 'unsupported-origin.txt');
+    git(worktree, 'commit', '-m', 'unsupported origin fixture');
+    const before = git(repo, 'ls-remote', '--heads', 'origin');
+
+    const failure = await Effect.runPromise(
+      controller
+        .createPullRequest(
+          {
+            agentId: agent.id,
+            baseBranch: 'main',
+            body: 'Must fail before readable branch reservation.',
+            title: 'Reject unsupported origin',
+            workstreamId: workstream.id,
+          },
+          fixture.ctx,
+        )
+        .pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'GitHubResponseError',
+      operation: 'enforce fixed github.com route for repository origin',
+    });
+    expect(git(repo, 'ls-remote', '--heads', 'origin')).toBe(before);
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranch).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
   });
 
   test('persists a published PR association only after a committed managed-worktree audit', async () => {

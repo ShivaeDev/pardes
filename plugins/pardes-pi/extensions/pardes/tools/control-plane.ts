@@ -1,22 +1,22 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { type ManagerController, projectResolvedWorkCleanup } from '../manager/index.ts';
+import { agentLines } from './projections/agents.ts';
+import { resolvedWorkCleanupLines } from './projections/cleanup.ts';
+import { summaryLines, workstreamLines } from './projections/control-plane.ts';
+import { CONTROL_PLANE_MAX_ROWS } from './projections/core.ts';
 import {
-  activationLines,
-  agentLines,
-  CONTROL_PLANE_MAX_ROWS,
-  compositionLines,
-  githubIntegrationHealthLines,
   inboxEventDetailLines,
   inboxEventDetailMetadata,
   inboxLines,
-  resolvedWorkCleanupLines,
-  reviewLines,
+} from './projections/inbox.ts';
+import {
+  activationLines,
+  githubIntegrationHealthLines,
   storageLines,
-  summaryLines,
-  verificationLines,
-  workstreamLines,
-} from './projections.ts';
+} from './projections/inspections.ts';
+import { compositionLines, reviewLines } from './projections/reviews.ts';
+import { verificationLines } from './projections/verifications.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
 export function registerPardesStatusTool(pi: ExtensionAPI, manager: ManagerController): void {

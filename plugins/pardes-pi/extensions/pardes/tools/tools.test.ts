@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
@@ -11,6 +15,7 @@ import {
   type GitHubIntegrationHealthInspection,
   GitHubResponseError,
 } from '../github/index.ts';
+import { createPardesCommandHandler } from '../index.ts';
 import {
   type AgentRecord,
   type AgentStatus,
@@ -29,6 +34,7 @@ import {
   type VerificationRecord,
   type Workstream,
 } from '../manager/index.ts';
+import type { ManagerPresentation } from '../presentation/index.ts';
 import { REPORT_EXCERPT_MAX_CHARS, REPORT_HANDOFF_NOTE_MAX_CHARS } from '../reporting/index.ts';
 import {
   STORAGE_EVENT_SCAN_MAX_BYTES,
@@ -2654,6 +2660,124 @@ describe('Pardes model-visible tools', () => {
       totalChars: 16,
     });
     expect(JSON.stringify(result.details)).not.toContain('private');
+  });
+
+  test('rejects a delayed report read that resolves after delivery deactivation', async () => {
+    const resolvers: Array<() => void> = [];
+    const canonical = {
+      agentId: 'agent-one',
+      content: 'late report body',
+      field: 'details' as const,
+      reportId: 'report-late',
+      status: 'completed' as const,
+      totalChars: 16,
+    };
+    const manager = {
+      deactivate: () => Effect.sync(() => undefined),
+      getReport: () =>
+        Effect.promise(
+          () =>
+            new Promise<typeof canonical>((resolve) => {
+              resolvers.push(() => resolve(canonical));
+            }),
+        ),
+      snapshot: () => managerState(),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const command = createPardesCommandHandler(pi, manager, {} as ManagerPresentation, delivery);
+    const commandCtx = {
+      ...ctx,
+      ui: { notify() {} },
+    } as unknown as ExtensionCommandContext;
+    const pending = requiredValue(tools.get('report_get')).execute(
+      'call-late',
+      { reportId: 'report-late' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (resolvers.length < 1) await Promise.resolve();
+
+    await command('stop', commandCtx);
+    requiredValue(resolvers[0])();
+    const result = await pending;
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('canceled by a manager lifecycle change');
+    expect(text.length).toBeLessThan(300);
+    expect(delivery.isActive).toBe(false);
+  });
+
+  test('keeps an old delayed read stale across restart while a fresh retrieval enters compaction', async () => {
+    const resolvers = new Map<string, () => void>();
+    let active = true;
+    const manager = {
+      activate: () =>
+        Effect.sync(() => {
+          active = true;
+          return managerState();
+        }),
+      deactivate: () =>
+        Effect.sync(() => {
+          active = false;
+        }),
+      getReport: (input: { readonly reportId: string }) => {
+        const canonical = {
+          agentId: 'agent-one',
+          content: `${input.reportId} body`,
+          field: 'details' as const,
+          reportId: input.reportId,
+          status: 'completed' as const,
+          totalChars: input.reportId.length + 5,
+        };
+        return Effect.promise(
+          () =>
+            new Promise<typeof canonical>((resolve) => {
+              resolvers.set(input.reportId, () => resolve(canonical));
+            }),
+        );
+      },
+      runtimeSnapshots: () => new Map(),
+      snapshot: () => (active ? managerState() : undefined),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const command = createPardesCommandHandler(pi, manager, {} as ManagerPresentation, delivery);
+    const commandCtx = {
+      ...ctx,
+      ui: { notify() {} },
+    } as unknown as ExtensionCommandContext;
+    const reportGet = requiredValue(tools.get('report_get'));
+    const oldPending = reportGet.execute(
+      'call-old',
+      { reportId: 'report-old' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolvers.has('report-old')) await Promise.resolve();
+
+    await command('stop', commandCtx);
+    await command('start', commandCtx);
+    const freshPending = reportGet.execute(
+      'call-fresh',
+      { reportId: 'report-fresh' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolvers.has('report-fresh')) await Promise.resolve();
+    requiredValue(resolvers.get('report-fresh'))();
+    const fresh = await freshPending;
+    delivery.observeCompactionStart();
+    requiredValue(resolvers.get('report-old'))();
+    const old = await oldPending;
+
+    expect(fresh.details).toMatchObject({ reportId: 'report-fresh' });
+    expect(old.content[0]?.text).toContain('canceled by a manager lifecycle change');
+    expect(delivery.activeReportId).toBe('report-fresh');
+    delivery.clear();
   });
 
   test('automatically serializes every oversized canonical report part without model pagination calls', async () => {

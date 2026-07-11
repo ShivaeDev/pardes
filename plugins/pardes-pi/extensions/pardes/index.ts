@@ -40,13 +40,14 @@ export function createPardesCommandHandler(
   pi: ExtensionAPI,
   manager: ManagerController,
   presentation: ManagerPresentation,
-  reportDelivery: Pick<ReportDeliveryCoordinator, 'clear'>,
+  reportDelivery: Pick<ReportDeliveryCoordinator, 'activate' | 'deactivate'>,
 ): (args: string, ctx: ExtensionCommandContext) => Promise<void> {
   return async (args, ctx) => {
     const [action] = args.trim().split(/\s+/, 1);
     if (action === 'start') {
       const state = await runCommand(ctx, manager.activate(ctx));
       if (state) {
+        reportDelivery.activate();
         queueManagerGuidance(pi, state, manager.runtimeSnapshots(), 'activated');
         ctx.ui.notify(`Pardes manager activated: ${state.managerId}`, 'info');
       }
@@ -54,7 +55,7 @@ export function createPardesCommandHandler(
     }
     if (action === 'stop') {
       const state = manager.snapshot();
-      reportDelivery.clear();
+      reportDelivery.deactivate();
       const stopped = await runCommand(ctx, manager.deactivate(ctx));
       if (stopped !== undefined || state)
         ctx.ui.notify(`Pardes manager stopped${state ? `: ${state.managerId}` : ''}`, 'info');
@@ -111,6 +112,7 @@ export default function pardes(pi: ExtensionAPI): void {
   pi.on('session_start', async (event, ctx) => {
     const state = await runCommand(ctx, manager.restore(ctx));
     if (state) {
+      reportDelivery.activate();
       queueManagerGuidance(
         pi,
         state,
@@ -121,7 +123,7 @@ export default function pardes(pi: ExtensionAPI): void {
       // inbox state, not a former transient hold, decides whether one
       // presentation cursor is still due.
       manager.scheduleInboxWakeAfterIdle(ctx);
-    }
+    } else reportDelivery.deactivate();
   });
 
   pi.on('agent_end', (_event, ctx) => {

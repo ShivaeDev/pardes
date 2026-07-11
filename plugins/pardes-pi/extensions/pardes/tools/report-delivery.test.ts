@@ -51,6 +51,14 @@ function report(content: string, reportId = 'report-one'): CanonicalReport {
   };
 }
 
+function startDelivery(
+  delivery: ReportDeliveryCoordinator,
+  canonicalReport: CanonicalReport,
+  toolCallId: string,
+) {
+  return delivery.start(canonicalReport, toolCallId, requiredValue(delivery.capturePermit()));
+}
+
 function schedulerHarness() {
   const tasks: Array<{ cancelled: boolean; readonly delayMs: number; readonly task: () => void }> =
     [];
@@ -133,7 +141,7 @@ describe('canonical report delivery', () => {
 
   test('delivers every part in its own acknowledged triggerTurn run and never uses the shared queue', () => {
     const { ctx, delivery, runNext, sent, setIdle, tasks } = harness();
-    const started = delivery.start(report('x'.repeat(120_000)), 'tool-call-one');
+    const started = startDelivery(delivery, report('x'.repeat(120_000)), 'tool-call-one');
 
     expect(started.metadata.parts).toBeGreaterThan(1);
     expect(started.text).toContain('after this agent run settles');
@@ -179,7 +187,7 @@ describe('canonical report delivery', () => {
   test('keeps aggregate report contribution bounded while spanning a maximum-size report across runs', () => {
     const { ctx, delivery, runNext, sent } = harness();
     const content = '\u0000'.repeat(REPORT_DETAILS_MAX_CHARS);
-    const started = delivery.start(report(content), 'tool-call-aggregate');
+    const started = startDelivery(delivery, report(content), 'tool-call-aggregate');
     const transcript: unknown[] = [];
     delivery.observeAgentEnd(stoppedRun, ctx);
 
@@ -322,7 +330,7 @@ describe('canonical report delivery', () => {
 
   test('cancels exact pending identities across abort, clear, and reload without stale dispatch', () => {
     const first = harness();
-    first.delivery.start(report('x'.repeat(80_000)), 'tool-call-old');
+    startDelivery(first.delivery, report('x'.repeat(80_000)), 'tool-call-old');
     first.delivery.observeAgentEnd(stoppedRun, first.ctx);
     const staleDispatch = requiredValue(first.tasks[0]);
     first.delivery.clear();
@@ -330,7 +338,7 @@ describe('canonical report delivery', () => {
     expect(first.sent).toEqual([]);
 
     const reloaded = harness();
-    const next = reloaded.delivery.start(report('x'.repeat(80_000)), 'tool-call-new');
+    const next = startDelivery(reloaded.delivery, report('x'.repeat(80_000)), 'tool-call-new');
     reloaded.delivery.observeAgentEnd(stoppedRun, reloaded.ctx);
     reloaded.runNext();
     expect(reloaded.sent).toHaveLength(1);
@@ -348,7 +356,7 @@ describe('canonical report delivery', () => {
 
   test('fails closed on unrelated interleaving and resumes known failed compaction', () => {
     const interleaved = harness();
-    interleaved.delivery.start(report('x'.repeat(80_000)), 'tool-call-interleaved');
+    startDelivery(interleaved.delivery, report('x'.repeat(80_000)), 'tool-call-interleaved');
     interleaved.delivery.observeAgentEnd(stoppedRun, interleaved.ctx);
     const stale = requiredValue(interleaved.tasks[0]);
     interleaved.delivery.observeMessageStart({ customType: 'unrelated', role: 'custom' });
@@ -357,7 +365,7 @@ describe('canonical report delivery', () => {
     expect(interleaved.delivery.activeReportId).toBeUndefined();
 
     const compacting = harness();
-    compacting.delivery.start(report('x'.repeat(80_000)), 'tool-call-compacting');
+    startDelivery(compacting.delivery, report('x'.repeat(80_000)), 'tool-call-compacting');
     compacting.delivery.observeAgentEnd(stoppedRun, compacting.ctx);
     const preCompactionDispatch = requiredValue(compacting.tasks[0]);
     compacting.delivery.observeCompactionStart();
@@ -369,7 +377,7 @@ describe('canonical report delivery', () => {
     expect(compacting.sent).toHaveLength(1);
 
     const failed = harness();
-    failed.delivery.start(report('x'.repeat(80_000)), 'tool-call-failed');
+    startDelivery(failed.delivery, report('x'.repeat(80_000)), 'tool-call-failed');
     failed.delivery.observeAgentEnd(stoppedRun, failed.ctx);
     failed.delivery.observeCompactionStart();
     failed.delivery.observeCompactionFailure(failed.ctx);
@@ -378,7 +386,7 @@ describe('canonical report delivery', () => {
     expect(failed.sent).toHaveLength(1);
 
     const stalled = harness();
-    stalled.delivery.start(report('x'.repeat(80_000)), 'tool-call-stalled');
+    startDelivery(stalled.delivery, report('x'.repeat(80_000)), 'tool-call-stalled');
     stalled.delivery.observeAgentEnd(stoppedRun, stalled.ctx);
     stalled.delivery.observeCompactionStart();
     stalled.runNext();
@@ -388,8 +396,8 @@ describe('canonical report delivery', () => {
 
   test('rejects overlapping retrievals and mismatched delivery markers', () => {
     const { ctx, delivery, runNext, sent } = harness();
-    delivery.start(report('x'.repeat(80_000)), 'tool-call-one');
-    expect(() => delivery.start(report('other', 'report-two'), 'tool-call-two')).toThrow(
+    startDelivery(delivery, report('x'.repeat(80_000)), 'tool-call-one');
+    expect(() => startDelivery(delivery, report('other', 'report-two'), 'tool-call-two')).toThrow(
       'report-one is still being delivered',
     );
     delivery.observeAgentEnd(stoppedRun, ctx);

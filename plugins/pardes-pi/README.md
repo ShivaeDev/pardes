@@ -114,7 +114,9 @@ and replace persisted report bodies with bounded identity metadata in compaction
 preparation without rewriting durable session history. A failed manager compaction
 is canceled so delivery can resume; unrelated input cancels rather than interleaves.
 `/pardes stop` is also a synchronous cancellation boundary: it retires every
-scheduled, in-flight, or compaction-held report identity before deactivation.
+scheduled, in-flight, or compaction-held report identity and invalidates permits
+held by asynchronous artifact reads before deactivation. Restart issues a fresh
+monotonic delivery epoch, so late pre-stop reads cannot create delivery.
 
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`

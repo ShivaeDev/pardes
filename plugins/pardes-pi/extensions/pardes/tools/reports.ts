@@ -36,10 +36,15 @@ export function registerReportTools(
         return textResult(
           `Error: Canonical report ${delivery.activeReportId} is still being delivered; wait for its final automatic part before retrieving another report.`,
         );
+      const permit = delivery.capturePermit();
+      if (!permit)
+        return textResult(
+          'Error: Canonical report delivery is unavailable while Pardes is stopped.',
+        );
       const result = await runTool(manager.getReport(params));
       if (!result.ok) return textResult(`Error: ${result.error}`);
       try {
-        const scheduled = delivery.start(result.value, toolCallId);
+        const scheduled = delivery.start(result.value, toolCallId, permit);
         return textResult(scheduled.text, scheduled.metadata);
       } catch (error) {
         return textResult(`Error: ${error instanceof Error ? error.message : String(error)}`);

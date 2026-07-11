@@ -40,6 +40,10 @@ export interface ReportDeliveryScheduler {
   readonly schedule: (delayMs: number, task: () => void) => () => void;
 }
 
+export interface ReportDeliveryPermit {
+  readonly epoch: number;
+}
+
 const liveScheduler: ReportDeliveryScheduler = {
   schedule(delayMs, task) {
     const timer = setTimeout(task, delayMs);
@@ -79,6 +83,8 @@ export class ReportDeliveryCoordinator {
   private cancelDispatch: (() => void) | undefined;
   private cancelCompactionTimeout: (() => void) | undefined;
   private compactionInProgress = false;
+  private acceptingDeliveries = true;
+  private deliveryEpoch = 0;
 
   constructor(
     private readonly pi: Pick<ExtensionAPI, 'sendMessage'>,
@@ -93,7 +99,27 @@ export class ReportDeliveryCoordinator {
     return this.active !== undefined;
   }
 
-  start(report: CanonicalReport, toolCallId: string): ReportDeliveryStart {
+  capturePermit(): ReportDeliveryPermit | undefined {
+    return this.acceptingDeliveries ? { epoch: this.deliveryEpoch } : undefined;
+  }
+
+  activate(): void {
+    this.clear();
+    this.acceptingDeliveries = true;
+  }
+
+  deactivate(): void {
+    this.acceptingDeliveries = false;
+    this.clear();
+  }
+
+  start(
+    report: CanonicalReport,
+    toolCallId: string,
+    permit: ReportDeliveryPermit,
+  ): ReportDeliveryStart {
+    if (!this.acceptingDeliveries || permit.epoch !== this.deliveryEpoch)
+      throw new Error('Canonical report delivery was canceled by a manager lifecycle change.');
     if (this.active)
       throw new Error(
         `Canonical report ${this.active.report.reportId} is still being delivered; wait for its final automatic part before retrieving another report.`,
@@ -224,6 +250,7 @@ export class ReportDeliveryCoordinator {
   }
 
   clear(): void {
+    this.deliveryEpoch += 1;
     this.cancelScheduledDispatch();
     this.cancelCompactionTimeout?.();
     this.cancelCompactionTimeout = undefined;
@@ -317,7 +344,7 @@ export function registerReportDelivery(pi: ExtensionAPI): ReportDeliveryCoordina
     delivery.observeCompactionComplete(ctx);
   });
   pi.on('session_shutdown', () => {
-    delivery.clear();
+    delivery.deactivate();
   });
   return delivery;
 }

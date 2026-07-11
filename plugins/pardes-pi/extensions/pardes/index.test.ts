@@ -85,7 +85,7 @@ function commandDeliveryHarness() {
       }),
     deactivate: () =>
       Effect.sync(() => {
-        deactivatedAfterClear = !delivery.isActive;
+        deactivatedAfterClear = !delivery.isActive && delivery.capturePermit() === undefined;
         active = false;
       }),
     runtimeSnapshots: () => new Map(),
@@ -104,6 +104,8 @@ function commandDeliveryHarness() {
     status: 'completed',
     totalChars: 80_000,
   });
+  const startReport = (reportId: string, toolCallId: string) =>
+    delivery.start(report(reportId), toolCallId, requiredValue(delivery.capturePermit()));
   return {
     ctx,
     delivery,
@@ -111,6 +113,7 @@ function commandDeliveryHarness() {
     notifications,
     report,
     sent,
+    startReport,
     tasks,
     wasDeactivatedAfterClear: () => deactivatedAfterClear,
   };
@@ -127,7 +130,7 @@ describe('Pardes package extension registration', () => {
 
   test('stops a scheduled report delivery synchronously before manager deactivation', async () => {
     const fixture = commandDeliveryHarness();
-    fixture.delivery.start(fixture.report('report-scheduled'), 'tool-scheduled');
+    fixture.startReport('report-scheduled', 'tool-scheduled');
     fixture.delivery.observeAgentEnd(stoppedRun, fixture.ctx);
     const staleDispatch = requiredValue(fixture.tasks[0]);
 
@@ -145,7 +148,7 @@ describe('Pardes package extension registration', () => {
 
   test('stops an acknowledged in-flight report without scheduling another part', async () => {
     const fixture = commandDeliveryHarness();
-    fixture.delivery.start(fixture.report('report-in-flight'), 'tool-in-flight');
+    fixture.startReport('report-in-flight', 'tool-in-flight');
     fixture.delivery.observeAgentEnd(stoppedRun, fixture.ctx);
     requiredValue(fixture.tasks[0]).task();
     const dispatched = requiredValue(fixture.sent[0]);
@@ -164,14 +167,14 @@ describe('Pardes package extension registration', () => {
 
   test('stops a compaction-held delivery and restarts without stale identity or timers', async () => {
     const fixture = commandDeliveryHarness();
-    const old = fixture.delivery.start(fixture.report('report-old'), 'tool-old');
+    const old = fixture.startReport('report-old', 'tool-old');
     fixture.delivery.observeAgentEnd(stoppedRun, fixture.ctx);
     fixture.delivery.observeCompactionStart();
     const staleTasks = [...fixture.tasks];
 
     await fixture.handler('stop', fixture.ctx);
     await fixture.handler('start', fixture.ctx);
-    const restarted = fixture.delivery.start(fixture.report('report-new'), 'tool-new');
+    const restarted = fixture.startReport('report-new', 'tool-new');
     for (const stale of staleTasks) stale.task();
 
     expect(fixture.delivery.activeReportId).toBe('report-new');

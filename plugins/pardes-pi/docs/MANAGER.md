@@ -49,8 +49,10 @@ sequence finish before unrelated manager work. Pardes permits compaction between
 parts, replaces prior persisted report bodies with bounded metadata only in the
 compaction request, and resumes delivery if its manager-owned compactor fails;
 durable history remains intact. It fails closed on unrelated interruption, and
-`/pardes stop` synchronously cancels every active report identity before manager
-deactivation so restart cannot inherit stale report timers. After fixes, call
+`/pardes stop` synchronously cancels every active report identity and invalidates
+pre-read lifecycle permits before manager deactivation. Restart advances the
+permit epoch, so a late pre-stop artifact read cannot create delivery or block a
+fresh retrieval. After fixes, call
 `verification_refresh({ verificationId })` so the same retained verifier checks
 the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering

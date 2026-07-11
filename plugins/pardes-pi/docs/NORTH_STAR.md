@@ -211,7 +211,9 @@ model-managed pagination. A delivery never uses Pi's shared follow-up queue:
 unrelated input cancels its exact in-memory identity rather than interleaving, and
 reload or shutdown cancels every not-yet-dispatched part. Explicit manager stop
 synchronously retires the whole delivery identity—including scheduled, in-flight,
-and compaction-held phases—before deactivation or success notification.
+and compaction-held phases—and invalidates permits captured before asynchronous
+artifact reads. Restart advances a monotonic epoch, preventing late pre-stop reads
+from creating delivery after deactivation or competing with fresh retrieval.
 
 Wake handling has three distinct layers:
 

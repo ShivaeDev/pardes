@@ -4613,6 +4613,80 @@ describe('manager controller', () => {
     ]);
   });
 
+  test('defers cursor minting behind an owned delivery hold and restores one durable wake without duplication', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    let held = true;
+    const inboxWakeHold = {
+      get isHoldingOwnedWakes() {
+        return held;
+      },
+    };
+    const controller = new ManagerController(fixture.pi, {
+      inboxWakeHold,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        {
+          objective: 'Hold one durable inbox wake during report delivery',
+          title: 'Owned wake hold',
+        },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        {
+          task: 'Emit durable attention while delivery owns the conversation.',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        question: 'Preserve this durable row across the transient hold?',
+        type: 'question',
+      }),
+    );
+    const cursor = controller.snapshot()?.inbox[0]?.id;
+    controller.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await sleep(20);
+
+    expect(controller.snapshot()?.inbox).toHaveLength(1);
+    expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    expect(fixture.messages).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+
+    held = false;
+    const restored = new ManagerController(fixture.pi, {
+      inboxWakeHold,
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    restored.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await eventually(() => fixture.messages.length === 1);
+
+    expect(restored.snapshot()?.inbox.map(({ id }) => id)).toEqual([cursor]);
+    expect(restored.snapshot()?.inboxWake?.cursor).toBe(cursor);
+    expect(fixture.messages[0]?.message).toMatchObject({
+      customType: 'pardes-worker-event',
+      details: { cursor, pendingCount: 1, queuedSuffixCount: 0, type: 'manager_inbox_wake' },
+    });
+    restored.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await sleep(20);
+    expect(fixture.messages).toHaveLength(1);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
   test('buffers a busy-period attention burst durably and releases one bounded cursor wake after manager idle', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));

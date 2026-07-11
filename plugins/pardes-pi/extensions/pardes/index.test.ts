@@ -13,6 +13,7 @@ import {
   ReportDeliveryCoordinator,
   type ReportDeliveryScheduler,
 } from './tools/report-delivery.ts';
+import { REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE } from './tools/report-delivery-content.ts';
 
 const temporaryDirectories: string[] = [];
 const originalStateDir = process.env.PARDES_PI_STATE_DIR;
@@ -140,7 +141,14 @@ describe('Pardes package extension registration', () => {
 
     expect(fixture.wasDeactivatedAfterClear()).toBe(true);
     expect(fixture.delivery.isActive).toBe(false);
-    expect(fixture.sent).toEqual([]);
+    expect(fixture.sent).toHaveLength(1);
+    expect(fixture.sent[0]).toMatchObject({
+      message: {
+        customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+        details: { reason: 'manager_stopped', resumable: true },
+      },
+      options: { deliverAs: 'steer' },
+    });
     expect(fixture.notifications).toContainEqual([
       'Pardes manager stopped: manager-fixture',
       'info',
@@ -162,7 +170,13 @@ describe('Pardes package extension registration', () => {
 
     expect(fixture.wasDeactivatedAfterClear()).toBe(true);
     expect(fixture.delivery.isActive).toBe(false);
-    expect(fixture.sent).toHaveLength(1);
+    expect(fixture.sent).toHaveLength(2);
+    expect(fixture.sent[1]).toMatchObject({
+      message: {
+        customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+        details: { nextPart: 1, reason: 'manager_stopped', resumable: true },
+      },
+    });
     expect(fixture.tasks).toHaveLength(1);
   });
 

@@ -68,6 +68,7 @@ export {
   type ManagerCompactionSafetySnapshot,
   ManagerController,
   type ManagerControllerOptions,
+  type ManagerInboxWakeHold,
   type PullRequestCreateResult,
   type WorkstreamCompletionResult,
 } from './controller.ts';
@@ -174,7 +175,11 @@ export {
 } from './idle-disposition.ts';
 export {
   type InboxAttentionProjection,
+  isManagerInboxWakeMessage,
+  type ManagerInboxWakeMessage,
+  makeInboxWake,
   projectInboxAttention,
+  renderInboxWakeMessage,
 } from './inbox.ts';
 export {
   type AgentSendReportInput,

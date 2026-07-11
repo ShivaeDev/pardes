@@ -4,6 +4,7 @@ import { type InboxWake, initialManagerState, type ManagerEvent } from './domain
 import {
   inboxWakeAgeMs,
   inboxWakeToken,
+  isManagerInboxWakeMessage,
   MANAGER_INBOX_WAKE_MAX_CHARS,
   MANAGER_INBOX_WAKE_MAX_ROW_CHARS,
   MANAGER_INBOX_WAKE_MAX_ROWS,
@@ -44,6 +45,16 @@ function render(inbox: ReadonlyArray<ManagerEvent>) {
 }
 
 describe('manager inbox notification projection', () => {
+  test('recognizes only the exact Pi custom-message shape owned by inbox presentation', () => {
+    const inbox = [event('event-1')];
+    const message = { ...render(inbox), role: 'custom' as const };
+
+    expect(isManagerInboxWakeMessage(message)).toBe(true);
+    expect(isManagerInboxWakeMessage({ ...message, role: 'user' })).toBe(false);
+    expect(isManagerInboxWakeMessage({ ...message, details: { type: 'other' } })).toBe(false);
+    expect(isManagerInboxWakeMessage({ ...message, customType: 'other' })).toBe(false);
+  });
+
   test('creates a stable wake token through at most one inspectable durable inbox batch', () => {
     const inbox = Array.from({ length: MANAGER_INBOX_WAKE_MAX_ROWS + 2 }, (_, index) =>
       event(`event-${index + 1}`),

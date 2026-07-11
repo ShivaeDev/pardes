@@ -8,7 +8,7 @@ import {
 } from './control-plane.ts';
 import { registerHostedDrilldownTools } from './hosted-drilldown.ts';
 import { registerPullRequestTools } from './pull-requests.ts';
-import type { ReportDeliveryCoordinator } from './report-delivery.ts';
+import { type ReportDeliveryCoordinator, registerReportDelivery } from './report-delivery.ts';
 import { registerReportTools } from './reports.ts';
 import { registerVerificationTools } from './verifications.ts';
 import { registerWorkstreamDomainTools } from './workstreams.ts';
@@ -36,15 +36,17 @@ export {
   COMPOSITION_MAX_UNCERTAIN_GATES,
 } from './projections/reviews.ts';
 export { registerQuestionTool } from './question.ts';
+export { type ReportDeliveryCoordinator, registerReportDelivery } from './report-delivery.ts';
 export { registerPullRequestTools };
 
 export function registerWorkstreamTools(
   pi: ExtensionAPI,
   manager: ManagerController,
+  reportDelivery: ReportDeliveryCoordinator = registerReportDelivery(pi),
 ): ReportDeliveryCoordinator {
   registerPardesStatusTool(pi, manager);
   registerWorkstreamDomainTools(pi, manager);
-  const reportDelivery = registerReportTools(pi, manager);
+  registerReportTools(pi, manager, reportDelivery);
   registerInboxGetTool(pi, manager);
   registerInboxAcknowledgeTool(pi, manager);
   return reportDelivery;

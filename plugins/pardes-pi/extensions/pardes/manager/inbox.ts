@@ -54,6 +54,29 @@ export interface InboxWakeRelease {
   readonly inbox: ReadonlyArray<ManagerEvent>;
 }
 
+export interface ManagerInboxWakeMessage {
+  readonly role: 'custom';
+  readonly customType: typeof MANAGER_INBOX_WAKE_MESSAGE_TYPE;
+  readonly details: {
+    readonly type: typeof MANAGER_INBOX_WAKE_DETAIL_TYPE;
+  };
+}
+
+/** Match only Pardes-owned inbox presentation; malformed or unrelated custom input stays foreign. */
+export function isManagerInboxWakeMessage(message: unknown): message is ManagerInboxWakeMessage {
+  if (!message || typeof message !== 'object') return false;
+  const candidate = message as {
+    readonly role?: unknown;
+    readonly customType?: unknown;
+    readonly details?: { readonly type?: unknown };
+  };
+  return (
+    candidate.role === 'custom' &&
+    candidate.customType === MANAGER_INBOX_WAKE_MESSAGE_TYPE &&
+    candidate.details?.type === MANAGER_INBOX_WAKE_DETAIL_TYPE
+  );
+}
+
 export interface InboxAttentionProjection {
   readonly deliveredCursor?: string;
   readonly wakeToken?: string;

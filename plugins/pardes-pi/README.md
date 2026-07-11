@@ -147,8 +147,12 @@ body in bounded ordered settlement runs without field or pagination parameters.
 Separate runs permit compaction, retire prior raw parts from later model requests,
 and replace persisted report bodies with bounded identity metadata in compaction
 preparation without rewriting durable session history. A failed manager compaction
-is canceled so delivery can resume; unrelated input cancels rather than interleaves.
-`/pardes stop` is also a synchronous cancellation boundary: it retires every
+is canceled so delivery can resume. Pardes defers its own durable inbox wake while
+report delivery owns the conversation, then retries the still-pending cursor after
+report completion or cancellation. Exact wake messages are tolerated only as a
+race fallback; unrelated input still cancels and leaves one bounded resumable
+cancellation record rather than silently truncating the sequence. `/pardes stop`
+is also a synchronous cancellation boundary: it retires every
 scheduled, in-flight, or compaction-held report identity and invalidates permits
 held by asynchronous artifact reads before deactivation. Restart issues a fresh
 monotonic delivery epoch, so late pre-stop reads cannot create delivery.

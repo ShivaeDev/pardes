@@ -14,11 +14,12 @@ import {
 } from './manager/index.ts';
 import { type ManagerPresentation, registerManagerPresentation } from './presentation/index.ts';
 import {
+  type ReportDeliveryCoordinator,
   registerAgentTools,
   registerQuestionTool,
+  registerReportDelivery,
   registerWorkstreamTools,
 } from './tools/index.ts';
-import type { ReportDeliveryCoordinator } from './tools/report-delivery.ts';
 
 export function isNormalUserInputSource(source: 'interactive' | 'rpc' | 'extension'): boolean {
   return source !== 'extension';
@@ -55,7 +56,7 @@ export function createPardesCommandHandler(
     }
     if (action === 'stop') {
       const state = manager.snapshot();
-      reportDelivery.deactivate();
+      reportDelivery.deactivate('manager_stopped');
       const stopped = await runCommand(ctx, manager.deactivate(ctx));
       if (stopped !== undefined || state)
         ctx.ui.notify(`Pardes manager stopped${state ? `: ${state.managerId}` : ''}`, 'info');
@@ -92,9 +93,13 @@ export function createPardesCommandHandler(
 
 export default function pardes(pi: ExtensionAPI): void {
   const presentation = registerManagerPresentation(pi);
-  const manager = new ManagerController(pi, { presentation });
+  // Register report observation first so its agent_end transition installs the
+  // next-part hold before the general inbox-idle retry handler runs.
+  const reportDelivery = registerReportDelivery(pi);
+  const manager = new ManagerController(pi, { inboxWakeHold: reportDelivery, presentation });
+  reportDelivery.onOwnedWakeRelease((ctx) => manager.scheduleInboxWakeAfterIdle(ctx));
   registerQuestionTool(pi, manager);
-  const reportDelivery = registerWorkstreamTools(pi, manager);
+  registerWorkstreamTools(pi, manager, reportDelivery);
   registerAgentTools(pi, manager);
 
   pi.registerCommand('pardes', {

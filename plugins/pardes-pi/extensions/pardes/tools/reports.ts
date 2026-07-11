@@ -26,8 +26,8 @@ function prepareLegacyReportGetArguments(args: unknown): { readonly reportId: st
 export function registerReportTools(
   pi: ExtensionAPI,
   manager: ManagerController,
+  delivery: ReportDeliveryCoordinator = registerReportDelivery(pi),
 ): ReportDeliveryCoordinator {
-  const delivery = registerReportDelivery(pi);
   registerPardesTool(pi, {
     description:
       'Retrieve one known manager-scoped durable worker or advisory-verifier report by reportId. Automatically selects the canonical full body (details when present, otherwise summary) and delivers every trust-labelled bounded part in separate settlement runs so compaction can occur; never choose fields, offsets, page sizes, or continuation calls, and never lists, guesses, or loads other artifacts.',

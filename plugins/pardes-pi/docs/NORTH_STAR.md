@@ -248,10 +248,15 @@ Long child reports remain outside manager context until explicitly retrieved.
 Manager-visible retrieval is opt-in by path-free report ID, automatically selects
 `details` when present and otherwise `summary`, and delivers that canonical body
 through trust-labelled, JSON-escaped, bounded ordered settlement runs without
-model-managed pagination. A delivery never uses Pi's shared follow-up queue:
-unrelated input cancels its exact in-memory identity rather than interleaving, and
-reload or shutdown cancels every not-yet-dispatched part. Explicit manager stop
-synchronously retires the whole delivery identity—including scheduled, in-flight,
+model-managed pagination. A delivery never uses Pi's shared follow-up queue for
+report parts. Pardes holds its own durable inbox wake injection until that
+delivery completes or cancels;
+an already-released exact wake shape is tolerated only as a race fallback.
+Unrelated user or custom input still cancels the exact in-memory identity rather
+than interleaving and emits one bounded resumable cancellation record. Reload or
+shutdown cancels every not-yet-dispatched part and releases the transient hold;
+restored durable inbox state remains the wake retry authority. Explicit manager
+stop synchronously retires the whole delivery identity—including scheduled, in-flight,
 and compaction-held phases—and invalidates permits captured before asynchronous
 artifact reads. Restart advances a monotonic epoch, preventing late pre-stop reads
 from creating delivery after deactivation or competing with fresh retrieval.
@@ -408,9 +413,10 @@ in control. During active canonical-report delivery, it instead cancels that
 unobservable fallback and explicitly resumes delivery; a later settlement run can
 retry compaction without stalling the report sequence.
 
-While manager compaction is unsettled, Pardes holds owned wake injection and
-resumes it through generation-checked bounded recovery. Worker automatic
-compaction completion remains ephemeral monitor telemetry.
+While manager compaction or canonical-report delivery is unsettled, Pardes holds
+owned wake injection and resumes it from durable inbox state through exact
+report settlement or generation-checked bounded compaction recovery. Worker
+automatic compaction completion remains ephemeral monitor telemetry.
 
 ## User interaction and UI
 

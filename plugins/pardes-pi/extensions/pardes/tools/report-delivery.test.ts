@@ -6,12 +6,14 @@ import {
   type SessionEntry,
 } from '@earendil-works/pi-coding-agent';
 import { describe, expect, test } from 'vitest';
+import { type ManagerEvent, makeInboxWake, renderInboxWakeMessage } from '../manager/index.ts';
 import { type CanonicalReport, REPORT_DETAILS_MAX_CHARS } from '../reporting/index.ts';
 import { requiredValue } from '../test-support.ts';
 import {
   REPORT_DELIVERY_COMPACTION_TIMEOUT_MS,
   ReportDeliveryCoordinator,
   type ReportDeliveryScheduler,
+  registerReportDelivery,
 } from './report-delivery.ts';
 import {
   REPORT_DELIVERY_COMPACTION_MAX_PLACEHOLDERS,
@@ -22,6 +24,8 @@ import {
   partitionCanonicalReport,
   REPORT_DELIVERY_DETAIL_TYPE,
   REPORT_DELIVERY_MESSAGE_TYPE,
+  REPORT_DELIVERY_OUTCOME_MAX_BYTES,
+  REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
   REPORT_DELIVERY_PART_MAX_BYTES,
   renderCanonicalReportPart,
 } from './report-delivery-content.ts';
@@ -90,9 +94,13 @@ function harness() {
     },
   } as unknown as Pick<ExtensionAPI, 'sendMessage'>;
   const ctx = { isIdle: () => idle } as ExtensionContext;
+  const delivery = new ReportDeliveryCoordinator(pi, scheduled.scheduler);
+  const released: ExtensionContext[] = [];
+  delivery.onOwnedWakeRelease((releaseContext) => released.push(releaseContext));
   return {
     ctx,
-    delivery: new ReportDeliveryCoordinator(pi, scheduled.scheduler),
+    delivery,
+    released,
     runNext: scheduled.runNext,
     sent,
     setIdle(value: boolean) {
@@ -182,6 +190,63 @@ describe('canonical report delivery', () => {
 
     expect(delivery.activeReportId).toBeUndefined();
     expect(sent).toHaveLength(started.metadata.parts);
+  });
+
+  test('holds owned wake release and tolerates one real cursor wake between report parts through compaction', () => {
+    const { ctx, delivery, released, runNext, sent } = harness();
+    const started = startDelivery(delivery, report('x'.repeat(120_000)), 'tool-call-owned-wake');
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
+    delivery.observeAgentEnd(stoppedRun, ctx);
+    runNext();
+
+    const firstPart = deliveredMessage(requiredValue(sent[0]));
+    delivery.observeMessageStart(firstPart, ctx);
+    delivery.observeMessageEnd(firstPart);
+    delivery.observeAgentEnd(stoppedRun, ctx);
+
+    const createdAt = new Date(0).toISOString();
+    const inbox: ManagerEvent[] = Array.from({ length: 5 }, (_, index) => ({
+      createdAt,
+      id: `event-${index + 1}`,
+      summary: `Durable attention ${index + 1}`,
+      type: 'agent_question',
+    }));
+    const wake = requiredValue(makeInboxWake('manager-owned-wake', inbox, createdAt));
+    const wakeMessage = {
+      ...renderInboxWakeMessage({ inbox, wake }),
+      role: 'custom' as const,
+    };
+    expect(wakeMessage.details).toMatchObject({
+      cursor: 'event-4',
+      pendingCount: 4,
+      queuedSuffixCount: 1,
+      type: 'manager_inbox_wake',
+    });
+
+    delivery.observeCompactionStart(ctx);
+    delivery.observeMessageStart(wakeMessage, ctx);
+    delivery.observeMessageEnd(wakeMessage);
+    expect(delivery.activeReportId).toBe('report-one');
+    expect(released).toEqual([]);
+    delivery.observeCompactionFailure(ctx);
+
+    for (let part = 2; part <= started.metadata.parts; part += 1) {
+      runNext();
+      const dispatched = deliveredMessage(requiredValue(sent[part - 1]));
+      delivery.observeMessageStart(dispatched, ctx);
+      delivery.observeMessageEnd(dispatched);
+      delivery.observeAgentEnd(stoppedRun, ctx);
+    }
+
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
+    expect(released).toEqual([ctx]);
+    expect(sent).toHaveLength(started.metadata.parts);
+    expect(
+      sent.filter(
+        ({ message }) =>
+          (message as { customType?: unknown }).customType === REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+      ),
+    ).toEqual([]);
   });
 
   test('keeps aggregate report contribution bounded while spanning a maximum-size report across runs', () => {
@@ -335,7 +400,14 @@ describe('canonical report delivery', () => {
     const staleDispatch = requiredValue(first.tasks[0]);
     first.delivery.clear();
     staleDispatch.task();
-    expect(first.sent).toEqual([]);
+    expect(first.sent).toHaveLength(1);
+    expect(first.sent[0]).toMatchObject({
+      message: {
+        customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+        details: { reason: 'manager_lifecycle_change', resumable: true },
+      },
+      options: { deliverAs: 'steer' },
+    });
 
     const reloaded = harness();
     const next = startDelivery(reloaded.delivery, report('x'.repeat(80_000)), 'tool-call-new');
@@ -359,10 +431,28 @@ describe('canonical report delivery', () => {
     startDelivery(interleaved.delivery, report('x'.repeat(80_000)), 'tool-call-interleaved');
     interleaved.delivery.observeAgentEnd(stoppedRun, interleaved.ctx);
     const stale = requiredValue(interleaved.tasks[0]);
-    interleaved.delivery.observeMessageStart({ customType: 'unrelated', role: 'custom' });
+    interleaved.delivery.observeMessageStart(
+      {
+        customType: 'pardes-worker-event',
+        details: { type: 'not_a_manager_inbox_wake' },
+        role: 'custom',
+      },
+      interleaved.ctx,
+    );
     stale.task();
-    expect(interleaved.sent).toEqual([]);
+    expect(interleaved.sent).toHaveLength(1);
+    expect(interleaved.sent[0]).toMatchObject({
+      message: {
+        customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+        details: { reason: 'unrelated_input', resumable: true },
+      },
+      options: { deliverAs: 'steer' },
+    });
+    expect(
+      Buffer.byteLength((interleaved.sent[0]?.message as { content: string }).content, 'utf8'),
+    ).toBeLessThanOrEqual(REPORT_DELIVERY_OUTCOME_MAX_BYTES);
     expect(interleaved.delivery.activeReportId).toBeUndefined();
+    expect(interleaved.released).toEqual([interleaved.ctx]);
 
     const compacting = harness();
     startDelivery(compacting.delivery, report('x'.repeat(80_000)), 'tool-call-compacting');
@@ -377,21 +467,68 @@ describe('canonical report delivery', () => {
     expect(compacting.sent).toHaveLength(1);
 
     const failed = harness();
-    startDelivery(failed.delivery, report('x'.repeat(80_000)), 'tool-call-failed');
+    const failedStart = startDelivery(
+      failed.delivery,
+      report('x'.repeat(80_000)),
+      'tool-call-failed',
+    );
     failed.delivery.observeAgentEnd(stoppedRun, failed.ctx);
     failed.delivery.observeCompactionStart();
     failed.delivery.observeCompactionFailure(failed.ctx);
     failed.runNext();
     expect(failed.delivery.activeReportId).toBe('report-one');
     expect(failed.sent).toHaveLength(1);
+    for (let part = 1; part <= failedStart.metadata.parts; part += 1) {
+      const message = deliveredMessage(requiredValue(failed.sent[part - 1]));
+      failed.delivery.observeMessageStart(message, failed.ctx);
+      failed.delivery.observeMessageEnd(message);
+      failed.delivery.observeAgentEnd(stoppedRun, failed.ctx);
+      if (part < failedStart.metadata.parts) failed.runNext();
+    }
+    expect(failed.released).toEqual([failed.ctx]);
+    expect(failed.delivery.isHoldingOwnedWakes).toBe(false);
 
     const stalled = harness();
     startDelivery(stalled.delivery, report('x'.repeat(80_000)), 'tool-call-stalled');
     stalled.delivery.observeAgentEnd(stoppedRun, stalled.ctx);
-    stalled.delivery.observeCompactionStart();
+    stalled.delivery.observeCompactionStart(stalled.ctx);
     stalled.runNext();
     expect(stalled.delivery.activeReportId).toBeUndefined();
-    expect(stalled.sent).toEqual([]);
+    expect(stalled.sent).toHaveLength(1);
+    expect(stalled.sent[0]?.message).toMatchObject({
+      customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+      details: { reason: 'compaction_timeout', resumable: true },
+    });
+    expect(stalled.released).toEqual([stalled.ctx]);
+  });
+
+  test('releases the process-lifecycle hold on reload and starts a fresh permit epoch', () => {
+    const handlers = new Map<string, (event: { reason?: string }, ctx: ExtensionContext) => void>();
+    const sent: Array<{ readonly message: unknown; readonly options: unknown }> = [];
+    const pi = {
+      on(event: string, handler: (event: { reason?: string }, ctx: ExtensionContext) => void) {
+        handlers.set(event, handler);
+      },
+      sendMessage(message: unknown, options: unknown) {
+        sent.push({ message, options });
+      },
+    } as unknown as ExtensionAPI;
+    const delivery = registerReportDelivery(pi);
+    startDelivery(delivery, report('reload body'), 'tool-call-reload');
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
+
+    requiredValue(handlers.get('session_shutdown'))({ reason: 'reload' }, {} as ExtensionContext);
+
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
+    expect(delivery.capturePermit()).toBeUndefined();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.message).toMatchObject({
+      customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+      details: { reason: 'session_reload', resumable: true },
+    });
+    delivery.activate();
+    expect(delivery.capturePermit()).toEqual({ epoch: expect.any(Number) });
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
   });
 
   test('rejects overlapping retrievals and mismatched delivery markers', () => {

@@ -80,7 +80,10 @@ bounded ordered settlement runs without pagination calls. Let that automatic
 sequence finish before unrelated manager work. Pardes permits compaction between
 parts, replaces prior persisted report bodies with bounded metadata only in the
 compaction request, and resumes delivery if its manager-owned compactor fails;
-durable history remains intact. It fails closed on unrelated interruption, and
+durable history remains intact. Pardes defers its own durable inbox wakes until
+the sequence settles, then releases exactly the still-pending cursor from durable
+state. It fails closed on unrelated interruption and emits a bounded cancellation
+record with the one-call report_get resume path instead of silently stalling.
 `/pardes stop` synchronously cancels every active report identity and invalidates
 pre-read lifecycle permits before manager deactivation. Restart advances the
 permit epoch, so a late pre-stop artifact read cannot create delivery or block a

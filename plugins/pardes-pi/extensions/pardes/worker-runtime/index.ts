@@ -36,3 +36,20 @@ export {
   type WorkerSupervisorShape,
   type WorkerThinkingLevel,
 } from './supervisor.ts';
+export {
+  makeWorktreeBootstrap,
+  renderWorktreeUpdateTerminalDiagnostic,
+  WORKTREE_UPDATE_DIAGNOSTIC_TAIL_MAX_CHARS,
+  WORKTREE_UPDATE_FINAL_DRAIN_MS,
+  WORKTREE_UPDATE_SCRIPT,
+  WORKTREE_UPDATE_TIMEOUT_EXIT_CONFIRM_MS,
+  WORKTREE_UPDATE_TIMEOUT_MS,
+  WorktreeBootstrap,
+  type WorktreeBootstrapOptions,
+  type WorktreeBootstrapShape,
+  WorktreeUpdateError,
+  type WorktreeUpdateFailureReason,
+  type WorktreeUpdateOutcome,
+  type WorktreeUpdateOutput,
+  worktreeUpdateFailureSummary,
+} from './worktree-bootstrap.ts';

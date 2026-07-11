@@ -93,7 +93,7 @@ export function createPardesCommandHandler(
 export default function pardes(pi: ExtensionAPI): void {
   const presentation = registerManagerPresentation(pi);
   const manager = new ManagerController(pi, { presentation });
-  registerQuestionTool(pi);
+  registerQuestionTool(pi, manager);
   const reportDelivery = registerWorkstreamTools(pi, manager);
   registerAgentTools(pi, manager);
 
@@ -132,8 +132,9 @@ export default function pardes(pi: ExtensionAPI): void {
 
   // Pi 0.75.5 exposes the supported raw `input` event before normal agent
   // processing. Extension-injected prompts are excluded: only the next normal
-  // interactive/RPC user message after an explicitly surfaced handoff resolves
-  // that one presented cursor.
+  // interactive/RPC user message after a restored explicitly surfaced handoff
+  // resolves that one presented cursor. The question tool normally settles its
+  // own exact handoff before this compatibility path is needed.
   pi.on('input', async (event, ctx) => {
     if (!isNormalUserInputSource(event.source) || !manager.isActive())
       return { action: 'continue' };

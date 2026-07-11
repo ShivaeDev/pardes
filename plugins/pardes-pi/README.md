@@ -92,7 +92,7 @@ The manager-visible tools are grouped by purpose:
 
 ```text
 question
-pardes_status · inbox_get · inbox_acknowledge · await_user_feedback
+pardes_status · inbox_get · inbox_acknowledge
 workstream_create · workstream_list · workstream_get · workstream_complete
 report_get
 pull_request_create
@@ -101,10 +101,45 @@ agent_spawn · agent_status · agent_send · agent_send_report
 agent_compact · agent_reload · agent_revive · agent_stop · agent_lease_cleanup
 ```
 
+`question` is the single user-judgment surface. Its options array may be empty
+for pure free-form input, and custom input is always available up to 4,000
+characters. If attention was
+delivered when the question opened, only that exact cursor is consumed after a
+submitted non-blank answer; cancellation, failure, blank input, and queued or
+later attention remain pending.
+
 Writing-worker spawns require a reachable `origin` with a configured default
-branch. Pardes resolves an immutable baseline, creates an isolated managed
-worktree, and retains the child Pi conversation for follow-up. Use baseline
-branch overrides only intentionally. Worker reports are stored under the owning
+branch. Pardes resolves an immutable baseline and creates a managed worktree.
+Before launching a writer—or a verifier in its fresh detached checkout—it runs
+that checkout's executable `script/update` directly from the checkout root when
+present; absence is a no-op. The hook inherits the manager environment, and its
+shebang selects its interpreter. Pardes does not copy `.env` files or other
+secrets; repository-owned hooks may implement their own worktree-aware setup.
+A nonzero exit, signal, launch error, or timeout initiated at 15 minutes fails
+provisioning before Pi is launched. The manager stops waiting after a bounded
+final drain/exit-confirmation window; a nominally successful hook whose
+inherited pipes do not settle also fails closed. This bounds orchestration, not
+the lifetime of an escaped OS descendant. Status and output counts are durable,
+while bounded output tails are terminal-only. A verifier checkout must also still be clean at
+the captured head after the hook and before launch. Runtime launch or
+launched-state persistence failure also classifies cleanup before removing provisional writer
+ownership: dirty or unverifiable leases remain attached to a durable crashed
+agent. A retained crashed agent never keeps a `running` bootstrap marker; an
+unrecorded terminal outcome is normalized to interrupted with unknown
+completion and termination. External cancellation during bootstrap runs an
+uninterruptible manager settlement: writer leases and verifier scratch become
+crashed, interrupted, and immediately available to conservative cleanup without
+waiting for manager restoration. Retained revive does not rerun the hook, and
+restoration never automatically reruns a hook whose completion was not observed.
+
+Managed worktrees and verifier tool restrictions are workflow guardrails, not a
+security sandbox: repository hooks, child Bash, and other same-user processes
+can access resources available to that OS user. Pardes signals the directly
+spawned process group on POSIX (the direct child elsewhere) on timeout or
+interruption, but cannot observe or prove termination of a descendant that creates a new session. Timeout-uncertain,
+lifecycle-unsettled, and restart-interrupted checkout ownership is therefore
+retained for later inspection rather than declared safe. Use baseline branch
+overrides only intentionally. Worker reports are stored under the owning
 manager's `reports/` directory; concise summaries wake the manager. Retrieve a
 known report with `report_get({ reportId })`: Pardes selects `details` when
 present, otherwise `summary`, and automatically delivers the complete canonical
@@ -119,7 +154,12 @@ held by asynchronous artifact reads before deactivation. Restart issues a fresh
 monotonic delivery epoch, so late pre-stop reads cannot create delivery.
 
 `pull_request_create` publishes a clean committed worker state as a
-user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`
+user-controlled review gate. After the exact pushed SHA is verified as the
+hosted head, Pardes makes the retained local worker branch track the managed
+`origin` review branch, including when their names differ. This local-only step
+never pushes again; a bounded tracking failure is reported separately without
+turning verified remote publication into failure. Browser handoff is explicit:
+`browserMode: 'none'`
 (the default), `'background'` (macOS `open -g`, with a portable ordinary-opener
 fallback elsewhere), or `'foreground'`. The legacy `openInBrowser` boolean
 remains a compatibility alias. Browser launch runs only after durable review-gate

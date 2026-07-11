@@ -11,9 +11,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
-import { copyLocalGitRepositoryFixture, runGitFixture } from '../test-support.ts';
+import {
+  copyLocalGitRepositoryFixture,
+  copyOriginGitRepositoryFixture,
+  runGitFixture,
+} from '../test-support.ts';
+import { WorktreeError } from './errors.ts';
 import { discoverRepository } from './repository.ts';
 import type { WorktreeLease } from './schemas.ts';
+import { runGit } from './transport.ts';
 import {
   type CreateDetachedReviewCheckoutInput,
   type ManagedLeaseOwner,
@@ -32,6 +38,17 @@ afterEach(() => {
 function git(cwd: string, ...args: string[]): string {
   return runGitFixture(cwd, ...args);
 }
+
+const worktreeGit = (
+  cwd: string,
+  args: ReadonlyArray<string>,
+  options?: Parameters<typeof runGit>[2],
+) =>
+  runGit(cwd, args, options).pipe(
+    Effect.mapError(
+      (cause) => new WorktreeError({ cause, operation: `git ${args.join(' ')}`, path: cwd }),
+    ),
+  );
 
 function owner(
   repo: ManagedLeaseOwner['repo'],
@@ -118,6 +135,287 @@ describe('managed worktree service', () => {
     });
     await Effect.runPromise(service.removeIfClean(owner(repo, 'manager-1', 'agent-1'), lease));
     expect(existsSync(lease.path)).toBe(false);
+  });
+
+  test('tracks an exact verified remote review branch with a different local name and is idempotent', async () => {
+    const fixture = copyOriginGitRepositoryFixture('pardes-worktree-tracking-');
+    temporaryDirectories.push(fixture.root);
+    const primary = realpathSync(fixture.repo);
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const headSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const leaseOwner = owner(repo, 'manager-track', 'agent-track');
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: leaseOwner.agentId,
+        branchPointSha: headSha,
+        managerId: leaseOwner.managerId,
+        name: 'Local Worker Name',
+        repo,
+      }),
+    );
+    const remoteBranch = 'reviewer/pardes/hosted-review-name';
+    git(primary, 'push', 'origin', `${headSha}:refs/heads/${remoteBranch}`);
+    git(primary, 'update-ref', '-d', `refs/remotes/origin/${remoteBranch}`);
+    const advertisedBefore = git(primary, 'ls-remote', '--heads', 'origin');
+
+    const configured = await Effect.runPromise(
+      service.trackPublishedReviewBranch(leaseOwner, lease, { headBranch: remoteBranch, headSha }),
+    );
+    const idempotent = await Effect.runPromise(
+      service.trackPublishedReviewBranch(leaseOwner, lease, { headBranch: remoteBranch, headSha }),
+    );
+
+    expect(lease.branch).not.toBe(remoteBranch);
+    expect(configured).toEqual({
+      localBranch: lease.branch,
+      remote: 'origin',
+      remoteBranch,
+      status: 'configured',
+    });
+    expect(idempotent).toEqual({ ...configured, status: 'already_configured' });
+    expect(git(lease.path, 'rev-parse', '--verify', '@{upstream}^{commit}')).toBe(headSha);
+    expect(git(lease.path, 'config', '--get', `branch.${lease.branch}.remote`)).toBe('origin');
+    expect(git(lease.path, 'config', '--get', `branch.${lease.branch}.merge`)).toBe(
+      `refs/heads/${remoteBranch}`,
+    );
+    expect(git(primary, 'ls-remote', '--heads', 'origin')).toBe(advertisedBefore);
+  });
+
+  test('replaces mismatched upstream config and materializes an already configured missing tracking ref', async () => {
+    const fixture = copyOriginGitRepositoryFixture('pardes-worktree-retracking-');
+    temporaryDirectories.push(fixture.root);
+    const primary = realpathSync(fixture.repo);
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const headSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService();
+    const leaseOwner = owner(repo, 'manager-retrack', 'agent-retrack');
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: leaseOwner.agentId,
+        branchPointSha: headSha,
+        managerId: leaseOwner.managerId,
+        name: 'Retrack Worker',
+        repo,
+      }),
+    );
+    const remoteBranch = 'reviewer/pardes/retracked-review';
+    git(primary, 'push', 'origin', `${headSha}:refs/heads/${remoteBranch}`);
+    git(lease.path, 'branch', '--set-upstream-to=origin/main', '--', lease.branch);
+
+    const replaced = await Effect.runPromise(
+      service.trackPublishedReviewBranch(leaseOwner, lease, { headBranch: remoteBranch, headSha }),
+    );
+    expect(replaced.status).toBe('configured');
+    expect(git(lease.path, 'config', '--get', `branch.${lease.branch}.merge`)).toBe(
+      `refs/heads/${remoteBranch}`,
+    );
+
+    git(primary, 'update-ref', '-d', `refs/remotes/origin/${remoteBranch}`);
+    const retainedConfig = await Effect.runPromise(
+      service.trackPublishedReviewBranch(leaseOwner, lease, { headBranch: remoteBranch, headSha }),
+    );
+    expect(retainedConfig.status).toBe('already_configured');
+    expect(
+      git(lease.path, 'rev-parse', '--verify', `refs/remotes/origin/${remoteBranch}^{commit}`),
+    ).toBe(headSha);
+  });
+
+  test('rejects invalid tracking inputs and executes only local Git commands', async () => {
+    const fixture = copyOriginGitRepositoryFixture('pardes-worktree-tracking-input-');
+    temporaryDirectories.push(fixture.root);
+    const primary = realpathSync(fixture.repo);
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const headSha = git(primary, 'rev-parse', 'HEAD');
+    const leaseOwner = owner(repo, 'manager-input', 'agent-input');
+    const commands: ReadonlyArray<string>[] = [];
+    const service = makeManagedWorktreeService({
+      publishedReviewBranchGit: (cwd, args, options) => {
+        commands.push(args);
+        return worktreeGit(cwd, args, options);
+      },
+    });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: leaseOwner.agentId,
+        branchPointSha: headSha,
+        managerId: leaseOwner.managerId,
+        name: 'Tracking Input',
+        repo,
+      }),
+    );
+
+    const invalidSha = await Effect.runPromise(
+      service
+        .trackPublishedReviewBranch(leaseOwner, lease, {
+          headBranch: 'reviewer/pardes/valid',
+          headSha: 'HEAD',
+        })
+        .pipe(Effect.flip),
+    );
+    expect(invalidSha).toMatchObject({ _tag: 'InvalidWorktreeInputError', field: 'headSha' });
+    expect(commands).toEqual([]);
+
+    const invalidBranch = await Effect.runPromise(
+      service
+        .trackPublishedReviewBranch(leaseOwner, lease, {
+          headBranch: 'reviewer/pardes/../invalid',
+          headSha,
+        })
+        .pipe(Effect.flip),
+    );
+    expect(invalidBranch._tag).toBe('WorktreeError');
+
+    const missingObject = await Effect.runPromise(
+      service
+        .trackPublishedReviewBranch(leaseOwner, lease, {
+          headBranch: 'reviewer/pardes/missing-object',
+          headSha: 'f'.repeat(40),
+        })
+        .pipe(Effect.flip),
+    );
+    expect(missingObject._tag).toBe('WorktreeError');
+
+    const remoteBranch = 'reviewer/pardes/local-commands-only';
+    await Effect.runPromise(
+      service.trackPublishedReviewBranch(leaseOwner, lease, { headBranch: remoteBranch, headSha }),
+    );
+    expect(
+      commands.some(([command]) => ['fetch', 'ls-remote', 'push'].includes(command ?? '')),
+    ).toBe(false);
+    expect(commands.flat()).not.toContain('--force');
+  });
+
+  test('fails a contended tracking-ref CAS and converges on retry without overwriting the competitor', async () => {
+    const fixture = copyOriginGitRepositoryFixture('pardes-worktree-tracking-cas-');
+    temporaryDirectories.push(fixture.root);
+    const primary = realpathSync(fixture.repo);
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const baselineSha = git(primary, 'rev-parse', 'HEAD');
+    const leaseOwner = owner(repo, 'manager-cas', 'agent-cas');
+    const baseService = makeManagedWorktreeService();
+    const lease = await Effect.runPromise(
+      baseService.create({
+        agentId: leaseOwner.agentId,
+        branchPointSha: baselineSha,
+        managerId: leaseOwner.managerId,
+        name: 'Tracking CAS',
+        repo,
+      }),
+    );
+    writeFileSync(join(lease.path, 'expected.txt'), 'expected review head\n');
+    git(lease.path, 'add', 'expected.txt');
+    git(lease.path, 'commit', '-m', 'expected review head');
+    const expectedSha = git(lease.path, 'rev-parse', 'HEAD');
+    writeFileSync(join(primary, 'competitor.txt'), 'competing local ref head\n');
+    git(primary, 'add', 'competitor.txt');
+    git(primary, 'commit', '-m', 'competing local ref head');
+    const competingSha = git(primary, 'rev-parse', 'HEAD');
+    const remoteBranch = 'reviewer/pardes/cas-review';
+    const remoteRef = `refs/remotes/origin/${remoteBranch}`;
+    git(primary, 'update-ref', remoteRef, baselineSha);
+    let raced = false;
+    let updateArgs: ReadonlyArray<string> | undefined;
+    const racingService = makeManagedWorktreeService({
+      publishedReviewBranchGit: (cwd, args, options) => {
+        if (args[0] !== 'update-ref' || raced) return worktreeGit(cwd, args, options);
+        raced = true;
+        updateArgs = args;
+        return Effect.sync(() => git(cwd, 'update-ref', remoteRef, competingSha, baselineSha)).pipe(
+          Effect.flatMap(() => worktreeGit(cwd, args, options)),
+        );
+      },
+    });
+
+    const contention = await Effect.runPromise(
+      racingService
+        .trackPublishedReviewBranch(leaseOwner, lease, {
+          headBranch: remoteBranch,
+          headSha: expectedSha,
+        })
+        .pipe(Effect.flip),
+    );
+
+    expect(contention._tag).toBe('WorktreeError');
+    expect(updateArgs).toEqual(['update-ref', '--no-deref', remoteRef, expectedSha, baselineSha]);
+    expect(git(lease.path, 'rev-parse', '--verify', `${remoteRef}^{commit}`)).toBe(competingSha);
+    expect(
+      git(
+        lease.path,
+        'for-each-ref',
+        '--format=%(upstream:remoteref)',
+        `refs/heads/${lease.branch}`,
+      ),
+    ).toBe('');
+    const converged = await Effect.runPromise(
+      baseService.trackPublishedReviewBranch(leaseOwner, lease, {
+        headBranch: remoteBranch,
+        headSha: expectedSha,
+      }),
+    );
+    expect(converged.status).toBe('configured');
+    expect(git(lease.path, 'rev-parse', '--verify', `${remoteRef}^{commit}`)).toBe(expectedSha);
+  });
+
+  test('reports a partial local config failure after ref materialization and converges on retry', async () => {
+    const fixture = copyOriginGitRepositoryFixture('pardes-worktree-tracking-partial-');
+    temporaryDirectories.push(fixture.root);
+    const primary = realpathSync(fixture.repo);
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const headSha = git(primary, 'rev-parse', 'HEAD');
+    const leaseOwner = owner(repo, 'manager-partial', 'agent-partial');
+    const remoteBranch = 'reviewer/pardes/partial-review';
+    const remoteRef = `refs/remotes/origin/${remoteBranch}`;
+    git(primary, 'push', 'origin', `${headSha}:refs/heads/${remoteBranch}`);
+    git(primary, 'update-ref', '-d', remoteRef);
+    const advertisedBefore = git(primary, 'ls-remote', '--heads', 'origin');
+    const failingService = makeManagedWorktreeService({
+      publishedReviewBranchGit: (cwd, args, options) =>
+        args[0] === 'branch'
+          ? Effect.fail(
+              new WorktreeError({
+                cause: 'fixture config failure',
+                operation: 'git branch --set-upstream-to',
+                path: cwd,
+              }),
+            )
+          : worktreeGit(cwd, args, options),
+    });
+    const lease = await Effect.runPromise(
+      failingService.create({
+        agentId: leaseOwner.agentId,
+        branchPointSha: headSha,
+        managerId: leaseOwner.managerId,
+        name: 'Tracking Partial',
+        repo,
+      }),
+    );
+
+    const partial = await Effect.runPromise(
+      failingService
+        .trackPublishedReviewBranch(leaseOwner, lease, { headBranch: remoteBranch, headSha })
+        .pipe(Effect.flip),
+    );
+
+    expect(partial._tag).toBe('WorktreeError');
+    expect(git(lease.path, 'rev-parse', '--verify', `${remoteRef}^{commit}`)).toBe(headSha);
+    expect(
+      git(
+        lease.path,
+        'for-each-ref',
+        '--format=%(upstream:remoteref)',
+        `refs/heads/${lease.branch}`,
+      ),
+    ).toBe('');
+    expect(git(primary, 'ls-remote', '--heads', 'origin')).toBe(advertisedBefore);
+    const retried = await Effect.runPromise(
+      makeManagedWorktreeService().trackPublishedReviewBranch(leaseOwner, lease, {
+        headBranch: remoteBranch,
+        headSha,
+      }),
+    );
+    expect(retried.status).toBe('configured');
+    expect(git(lease.path, 'rev-parse', '--verify', '@{upstream}^{commit}')).toBe(headSha);
   });
 
   test('uses readable workstream names locally and adds a short ID only for an actual collision', async () => {

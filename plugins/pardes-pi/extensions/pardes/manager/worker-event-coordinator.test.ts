@@ -41,6 +41,7 @@ describe('incoming worker-event coordinator', () => {
       revision: 0,
       schemaVersion: 1,
       verifications: {},
+      workstreamCompletionIntents: {},
       workstreams: {},
     };
     const state = { current: initial };
@@ -184,6 +185,7 @@ describe('incoming worker-event coordinator', () => {
       revision: 0,
       schemaVersion: 1,
       verifications: {},
+      workstreamCompletionIntents: {},
       workstreams: {},
     };
     const state = { current: initial };
@@ -363,6 +365,7 @@ describe('incoming worker-event coordinator', () => {
           workstreamId: 'ws-one',
         },
       },
+      workstreamCompletionIntents: {},
       workstreams: {
         'ws-one': {
           createdAt: timestamp,
@@ -573,6 +576,7 @@ describe('incoming worker-event coordinator', () => {
           workstreamId: 'ws-one',
         },
       },
+      workstreamCompletionIntents: {},
       workstreams: {},
     };
     const state = { current: initial };
@@ -755,6 +759,7 @@ describe('incoming worker-event coordinator', () => {
           workstreamId: 'ws-one',
         },
       },
+      workstreamCompletionIntents: {},
       workstreams: {},
     };
     const state = { current: initial };

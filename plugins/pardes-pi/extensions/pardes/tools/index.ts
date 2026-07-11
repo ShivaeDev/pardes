@@ -1,7 +1,6 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import type { ManagerController } from '../manager/index.ts';
 import { registerAgentDomainTools } from './agents.ts';
-import { registerAttentionHandoffTool } from './attention-handoff.ts';
 import {
   registerInboxAcknowledgeTool,
   registerInboxGetTool,
@@ -48,7 +47,6 @@ export function registerWorkstreamTools(
   const reportDelivery = registerReportTools(pi, manager);
   registerInboxGetTool(pi, manager);
   registerInboxAcknowledgeTool(pi, manager);
-  registerAttentionHandoffTool(pi, manager);
   return reportDelivery;
 }
 

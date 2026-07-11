@@ -18,6 +18,7 @@ const CLEANUP_RESOLVED_INBOX_EVENT_TYPES = new Set([
   'agent_git_audit_dirty',
   'agent_git_audit_failed',
   'pull_request_auto_sync_attention',
+  'worktree_bootstrap_interrupted',
 ]);
 
 export interface AgentLeaseCleanupProjection {

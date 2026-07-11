@@ -73,6 +73,7 @@ function commandDeliveryHarness() {
     revision: 0,
     schemaVersion: 1,
     verifications: {},
+    workstreamCompletionIntents: {},
     workstreams: {},
   } as ManagerState;
   let active = true;

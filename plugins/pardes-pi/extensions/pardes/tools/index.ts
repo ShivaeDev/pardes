@@ -8,6 +8,7 @@ import {
 } from './control-plane.ts';
 import { registerHostedDrilldownTools } from './hosted-drilldown.ts';
 import { registerPullRequestTools } from './pull-requests.ts';
+import type { ReportDeliveryCoordinator } from './report-delivery.ts';
 import { registerReportTools } from './reports.ts';
 import { registerVerificationTools } from './verifications.ts';
 import { registerWorkstreamDomainTools } from './workstreams.ts';
@@ -37,12 +38,16 @@ export {
 export { registerQuestionTool } from './question.ts';
 export { registerPullRequestTools };
 
-export function registerWorkstreamTools(pi: ExtensionAPI, manager: ManagerController): void {
+export function registerWorkstreamTools(
+  pi: ExtensionAPI,
+  manager: ManagerController,
+): ReportDeliveryCoordinator {
   registerPardesStatusTool(pi, manager);
   registerWorkstreamDomainTools(pi, manager);
-  registerReportTools(pi, manager);
+  const reportDelivery = registerReportTools(pi, manager);
   registerInboxGetTool(pi, manager);
   registerInboxAcknowledgeTool(pi, manager);
+  return reportDelivery;
 }
 
 export function registerAgentTools(pi: ExtensionAPI, manager: ManagerController): void {

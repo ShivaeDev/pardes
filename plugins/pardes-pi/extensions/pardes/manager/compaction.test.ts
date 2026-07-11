@@ -595,6 +595,39 @@ describe('Pardes coordinating-manager compaction', () => {
     expect(diagnostics[0].length).toBeLessThanOrEqual(MANAGER_COMPACTION_FALLBACK_MAX_CHARS);
   });
 
+  test('cancels unobservable built-in fallback and resumes active report delivery after custom failure', async () => {
+    const diagnostics: string[] = [];
+    const managerFailures: Array<ExtensionContext | undefined> = [];
+    const resumed: ExtensionContext[] = [];
+    const strategy = registeredStrategy(
+      {
+        observeCompactionFailure: (ctx) => {
+          managerFailures.push(ctx);
+          return true;
+        },
+      },
+      {
+        compactConversation: async () => {
+          throw new Error('fixture summarizer outage');
+        },
+        reportDeliveryLifecycle: {
+          isActive: true,
+          observeCompactionFailure: (ctx) => resumed.push(ctx),
+        },
+        reportFallback: (diagnostic) => diagnostics.push(diagnostic),
+      },
+    );
+    const ctx = context();
+
+    expect(await strategy.handler(event(), ctx)).toEqual({ cancel: true });
+    expect(resumed).toEqual([ctx]);
+    expect(managerFailures).toEqual([ctx]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain(
+      'canceling failed compaction so active canonical report delivery can resume safely',
+    );
+  });
+
   test('declines registration-path crashes so Pi still selects its built-in fallback', async () => {
     const diagnostics: string[] = [];
     const strategy = registeredStrategy(

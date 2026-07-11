@@ -140,7 +140,18 @@ interruption, but cannot observe or prove termination of a descendant that creat
 lifecycle-unsettled, and restart-interrupted checkout ownership is therefore
 retained for later inspection rather than declared safe. Use baseline branch
 overrides only intentionally. Worker reports are stored under the owning
-manager's `reports/` directory; concise summaries wake the manager.
+manager's `reports/` directory; concise summaries wake the manager. Retrieve a
+known report with `report_get({ reportId })`: Pardes selects `details` when
+present, otherwise `summary`, and automatically delivers the complete canonical
+body in bounded ordered settlement runs without field or pagination parameters.
+Separate runs permit compaction, retire prior raw parts from later model requests,
+and replace persisted report bodies with bounded identity metadata in compaction
+preparation without rewriting durable session history. A failed manager compaction
+is canceled so delivery can resume; unrelated input cancels rather than interleaves.
+`/pardes stop` is also a synchronous cancellation boundary: it retires every
+scheduled, in-flight, or compaction-held report identity and invalidates permits
+held by asynchronous artifact reads before deactivation. Restart issues a fresh
+monotonic delivery epoch, so late pre-stop reads cannot create delivery.
 
 Clean completion audits lead with bounded worker-branch non-merge change
 candidates from cooperative first-parent evidence; topology does not prove

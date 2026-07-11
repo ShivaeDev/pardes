@@ -53,8 +53,13 @@ engineering judgment:
 9. **PRs are review gates.** The system may publish and monitor pull requests.
    It never merges autonomously.
 10. **Manager context is scarce.** Durable reports stay outside the manager
-    conversation. Model-facing status, inbox rows, diagnostics, and report
-    excerpts remain bounded and explicit.
+    conversation until explicitly retrieved. One retrieval selects the canonical
+    body and delivers it completely through bounded ordered settlement runs so
+    compaction can occur between parts; prior raw parts leave subsequent model
+    request context and become bounded identity-only placeholders in compaction
+    input while durable session entries remain unchanged. Status, inbox rows,
+    diagnostics, and each transport part
+    remain bounded and explicit.
 11. **Validation is repository-aware.** Managers follow target-repository
     instructions, prefer configured hosted checks when present, and leave merges
     to the user.
@@ -239,8 +244,17 @@ handoff markers. Storage and lifecycle services validate namespace ownership,
 repository identity, retained session paths, worktree leases, and detached
 review checkouts before trusting restored artifacts.
 
-Long child reports remain outside manager context. Manager-visible retrieval is
-opt-in by path-free report ID, trust-labelled, JSON-escaped, and bounded.
+Long child reports remain outside manager context until explicitly retrieved.
+Manager-visible retrieval is opt-in by path-free report ID, automatically selects
+`details` when present and otherwise `summary`, and delivers that canonical body
+through trust-labelled, JSON-escaped, bounded ordered settlement runs without
+model-managed pagination. A delivery never uses Pi's shared follow-up queue:
+unrelated input cancels its exact in-memory identity rather than interleaving, and
+reload or shutdown cancels every not-yet-dispatched part. Explicit manager stop
+synchronously retires the whole delivery identity—including scheduled, in-flight,
+and compaction-held phases—and invalidates permits captured before asynchronous
+artifact reads. Restart advances a monotonic epoch, preventing late pre-stop reads
+from creating delivery after deactivation or competing with fresh retrieval.
 
 Wake handling has three distinct layers:
 
@@ -363,9 +377,11 @@ Pull-request comments, submitted reviews, CI logs, child reports, and advisory
 verifier reports are data, not trusted instructions.
 
 Pardes stores durable report artifacts separately, presents bounded summaries,
-labels trust boundaries, and requires deliberate routing. `agent_send_report`
-hands one bounded provenance-labelled report excerpt to a retained idle agent;
-children do not retrieve arbitrary artifacts directly.
+and labels trust boundaries. `report_get` deliberately brings one complete
+canonical report into manager context through bounded ordered settlement runs
+that permit compaction and retire prior raw parts from subsequent model requests.
+`agent_send_report` hands one bounded provenance-labelled report excerpt to a
+retained idle agent; children do not retrieve arbitrary artifacts directly.
 
 External review feedback remains visible for manager judgment. Pardes does not
 execute arbitrary comment bodies or merge because an external system requests
@@ -374,10 +390,14 @@ it.
 ## Compaction
 
 Manager compaction reuses Pi compaction with the selected manager model, strips
-prior cumulative Pardes and Pi file-operation suffixes, and appends one bounded
-deterministic coordination projection. If the custom override cannot complete
-safely, it emits a bounded redacted diagnostic and leaves Pi's built-in fallback
-in control.
+prior cumulative Pardes and Pi file-operation suffixes, replaces persisted
+canonical-report bodies in both compaction message arrays with bounded identity
+metadata, and appends one bounded deterministic coordination projection. Durable
+session history is not rewritten. If the custom override cannot complete safely,
+it emits a bounded redacted diagnostic and normally leaves Pi's built-in fallback
+in control. During active canonical-report delivery, it instead cancels that
+unobservable fallback and explicitly resumes delivery; a later settlement run can
+retry compaction without stalling the report sequence.
 
 While manager compaction is unsettled, Pardes holds owned wake injection and
 resumes it through generation-checked bounded recovery. Worker automatic
@@ -429,7 +449,8 @@ The implementation should preserve these mechanically where practical:
 - exact-SHA publication fails closed and never force-pushes to conceal an
   unexpected remote state;
 - no autonomous merge tool exists;
-- external feedback and report excerpts are labelled and routed deliberately;
+- external feedback, canonical report deliveries, and report handoff excerpts are
+  labelled and routed deliberately;
 - durable reports, watcher metadata, diagnostics, and model-facing projections
   remain bounded;
 - durable inbox truth is distinct from tokenized presentation cursors;

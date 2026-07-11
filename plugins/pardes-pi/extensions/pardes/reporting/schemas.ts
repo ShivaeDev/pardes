@@ -113,7 +113,7 @@ export const ReportExcerptRequestFields = {
   reportId: ReportIdSchema,
 } as const;
 
-export const ReportGetInputSchema = Schema.Struct(ReportExcerptRequestFields);
+export const ReportGetInputSchema = Schema.Struct({ reportId: ReportIdSchema });
 export type ReportGetInput = typeof ReportGetInputSchema.Type;
 
 export interface AgentReportCreateInput {
@@ -123,6 +123,17 @@ export interface AgentReportCreateInput {
   readonly details?: string;
   readonly createdAt: string;
 }
+
+export interface CanonicalReport {
+  readonly reportId: ReportId;
+  readonly agentId: string;
+  readonly status: AgentReportStatus;
+  readonly field: ReportExcerptField;
+  readonly content: string;
+  readonly totalChars: number;
+}
+
+export type CanonicalReportMetadata = Omit<CanonicalReport, 'content'>;
 
 export interface ReportExcerpt {
   readonly reportId: ReportId;

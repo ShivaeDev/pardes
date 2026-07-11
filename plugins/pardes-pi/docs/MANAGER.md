@@ -85,7 +85,10 @@ the sequence settles, then releases exactly the still-pending cursor from durabl
 state. A transient acquisition lease starts before report artifact I/O; failure
 or cancellation releases it for retry, while success converts it atomically into
 active delivery. Wake release rechecks that lease after cursor persistence and
-rolls back an unsent reservation if delivery won the race. A wake that wins the
+rolls back an unsent reservation if delivery won the race. After refresh,
+rollback completion re-evaluates durable wake scheduling; a read failure, abort,
+or agent settlement that observed the reservation cannot consume the sole retry
+edge. A wake that wins the
 serialized final boundary registers its one-time exact rendered identity
 synchronously with send. It blocks acquisition only while queued; after its
 exact `message_start`, the manager may retrieve one report in that wake turn.

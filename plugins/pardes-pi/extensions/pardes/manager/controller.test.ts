@@ -4711,6 +4711,8 @@ describe('manager controller', () => {
     let mode: 'held' | 'race' | 'open' = 'held';
     let boundaryReads = 0;
     let acceptRegistration = true;
+    let replayEarlyRetry = false;
+    let controller: ManagerController;
     const registrations: unknown[] = [];
     const inboxWakeHold = {
       get isHoldingOwnedWakes() {
@@ -4721,10 +4723,19 @@ describe('manager controller', () => {
       },
       registerOwnedWake(message: unknown) {
         registrations.push(message);
-        return acceptRegistration;
+        const accepted = acceptRegistration;
+        if (!accepted && replayEarlyRetry) {
+          // Model read failure, AbortSignal cancellation, and agent_end racing
+          // ahead of rollback. Every retry still sees the unsent durable cursor
+          // and is intentionally consumed without creating duplicate timers.
+          acceptRegistration = true;
+          for (const _edge of ['read_failure', 'abort', 'agent_end'])
+            controller.scheduleInboxWakeAfterIdle(fixture.ctx);
+        }
+        return accepted;
       },
     };
-    const controller = new ManagerController(fixture.pi, {
+    controller = new ManagerController(fixture.pi, {
       inboxWakeHold,
       makeWorkers: workers.makeWorkers,
     });
@@ -4753,20 +4764,21 @@ describe('manager controller', () => {
     mode = 'race';
     boundaryReads = 0;
     expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
-    expect(boundaryReads).toBe(2);
+    expect(boundaryReads).toBe(3);
     expect(controller.snapshot()).not.toHaveProperty('inboxWake');
     expect(registrations).toEqual([]);
     expect(fixture.messages).toEqual([]);
 
+    // Model the opposite ordering: rollback completed under the current hold,
+    // then lease release hands retry back after the hold clears. The first
+    // registration rejects and consumes an early retry before its own rollback;
+    // rollback completion must create the remaining retry edge.
     mode = 'open';
     acceptRegistration = false;
-    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
-    expect(controller.snapshot()).not.toHaveProperty('inboxWake');
-    expect(registrations).toHaveLength(1);
-    expect(fixture.messages).toEqual([]);
+    replayEarlyRetry = true;
+    controller.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await eventually(() => fixture.messages.length === 1);
 
-    acceptRegistration = true;
-    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(true);
     expect(controller.snapshot()?.inboxWake?.cursor).toBe(cursor);
     expect(registrations).toHaveLength(2);
     expect(registrations[0]).toEqual(registrations[1]);

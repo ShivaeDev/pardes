@@ -254,7 +254,9 @@ delivery completes or cancels. The hold starts with a transient acquisition
 lease before report artifact I/O and converts atomically into active delivery;
 read failure or cancellation releases it for durable retry. Wake release
 rechecks after cursor persistence and rolls back an unsent reservation when the
-lease wins. If wake injection wins, exact identity registration and send share
+lease wins. Rollback completion refreshes state and independently re-evaluates
+wake scheduling, closing any retry edge consumed while the reservation was still
+visible. If wake injection wins, exact identity registration and send share
 one synchronous final boundary. The queued wake blocks acquisition only until
 its exact `message_start`; one retrieval may then lease the wake turn, attach
 successful delivery to that interlude, and wait for `message_end` plus

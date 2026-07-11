@@ -965,7 +965,11 @@ export class ManagerController {
       const { inboxWake: _inboxWake, ...withoutReservation } = state;
       return Effect.succeed([true, withoutReservation] as const);
     });
-    if (this.active === active) yield* this.refreshActiveState(active, ctx);
+    if (this.active !== active) return;
+    yield* this.refreshActiveState(active, ctx);
+    // A lease-release callback may already have observed the unsent cursor and
+    // returned. Re-evaluate only after refresh makes reservation removal visible.
+    this.scheduleInboxWakeAfterIdle(ctx);
   });
 
   private readonly refreshActiveState = Effect.fnUntraced(function* (

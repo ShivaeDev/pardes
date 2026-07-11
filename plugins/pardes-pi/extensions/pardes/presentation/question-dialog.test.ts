@@ -166,6 +166,28 @@ describe('Pardes question decision dialog', () => {
     ]);
   });
 
+  test('clears overflow rejection after a corrective edit below the limit for typing and paste', () => {
+    const oversizedInputs = [
+      'x'.repeat(QUESTION_ANSWER_MAX_CHARS + 1),
+      `\x1b[200~${'x'.repeat(QUESTION_ANSWER_MAX_CHARS + 1)}\x1b[201~`,
+    ];
+
+    for (const oversizedInput of oversizedInputs) {
+      const { choices, dialog } = createDialog({ options: [] });
+      dialog.handleInput(oversizedInput);
+      expect(dialog.render(62).join('\n')).toContain('Answer exceeds');
+      dialog.handleInput('\x1b[D');
+      expect(dialog.render(62).join('\n')).toContain('Answer exceeds');
+
+      dialog.handleInput('\x7f');
+      expect(dialog.render(62).join('\n')).not.toContain('Answer exceeds');
+      dialog.handleInput('\r');
+      expect(choices).toEqual([
+        { kind: 'custom', value: 'x'.repeat(QUESTION_ANSWER_MAX_CHARS - 1) },
+      ]);
+    }
+  });
+
   test('starts a free-form-only question on the editable custom row', () => {
     const { choices, dialog } = createDialog({ options: [] });
 

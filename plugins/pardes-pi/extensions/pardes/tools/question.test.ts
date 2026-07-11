@@ -260,6 +260,38 @@ describe('question tool execution semantics', () => {
     expect(rpcFixture.disarmed).toHaveLength(1);
   });
 
+  test('accepts corrected TUI typing and paste after editing an overshoot below the limit', async () => {
+    const oversizedInputs = [
+      'x'.repeat(QUESTION_ANSWER_MAX_CHARS + 1),
+      `\x1b[200~${'x'.repeat(QUESTION_ANSWER_MAX_CHARS + 1)}\x1b[201~`,
+    ];
+
+    for (const [index, oversizedInput] of oversizedInputs.entries()) {
+      const fixture = managerFixture({ delivered: true });
+      const result = await questionTool(fixture.manager).execute(
+        `call-corrected-${index}`,
+        { options: [], question: 'Correct this bounded answer' },
+        signal,
+        onUpdate,
+        interactiveContext([oversizedInput, '\x7f', '\r']),
+      );
+
+      expect(result.content[0]?.text).toBe(
+        `User answered: ${'x'.repeat(QUESTION_ANSWER_MAX_CHARS - 1)}`,
+      );
+      expect(result.details).toMatchObject({
+        acknowledgedCount: 1,
+        answer: 'x'.repeat(QUESTION_ANSWER_MAX_CHARS - 1),
+        cursor: 'event-delivered',
+        staleCursor: false,
+        submitted: true,
+      });
+      expect(result.details).not.toHaveProperty('cursorPreserved');
+      expect(fixture.submitted).toHaveLength(1);
+      expect(fixture.disarmed).toEqual([]);
+    }
+  });
+
   test('supports a pure free-form prompt with an empty options array', async () => {
     const result = await questionTool().execute(
       'call-free-form',

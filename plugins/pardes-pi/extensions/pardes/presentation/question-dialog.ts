@@ -368,8 +368,9 @@ export class PardesQuestionDialog implements Component, Focusable {
       if (available > 0) this.customInput.handleInput(truncateQuestionAnswer(data, available));
       return;
     }
+    const beforeInput = this.customInput.getValue();
     this.customInput.handleInput(data);
-    this.enforceCustomInputBound();
+    this.enforceCustomInputBound(this.customInput.getValue() !== beforeInput);
   }
 
   private consumeBracketedPaste(data: string): void {
@@ -383,7 +384,7 @@ export class PardesQuestionDialog implements Component, Focusable {
       this.bracketedPasteBuffer = undefined;
       this.bracketedPasteContent = '';
       this.customInput.handleInput(`${BRACKETED_PASTE_START}${pasted}${BRACKETED_PASTE_END}`);
-      this.enforceCustomInputBound();
+      this.enforceCustomInputBound(false);
       if (remaining) this.handleCustomInput(remaining);
       return;
     }
@@ -400,13 +401,17 @@ export class PardesQuestionDialog implements Component, Focusable {
     if (available > 0) this.bracketedPasteContent += truncateQuestionAnswer(sanitized, available);
   }
 
-  private enforceCustomInputBound(): void {
+  private enforceCustomInputBound(allowOverflowRecovery: boolean): void {
     const value = this.customInput.getValue();
     const sanitized = sanitizeQuestionAnswer(value);
     if (sanitized !== value) this.customInput.setValue(sanitized);
-    if (sanitized.length <= QUESTION_ANSWER_MAX_CHARS) return;
-    this.customInputExceededMaxChars = true;
-    this.customInput.setValue(truncateQuestionAnswer(sanitized));
+    if (sanitized.length > QUESTION_ANSWER_MAX_CHARS) {
+      this.customInputExceededMaxChars = true;
+      this.customInput.setValue(truncateQuestionAnswer(sanitized));
+      return;
+    }
+    if (allowOverflowRecovery && sanitized.length < QUESTION_ANSWER_MAX_CHARS)
+      this.customInputExceededMaxChars = false;
   }
 
   private moveSelection(delta: number): void {

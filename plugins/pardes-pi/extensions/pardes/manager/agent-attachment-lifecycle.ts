@@ -10,12 +10,12 @@ import {
   type WorktreeServiceError,
 } from '../git/index.ts';
 import type { StateStoreShape, StoreError } from '../storage/index.ts';
-import type {
-  GuardedWorkerSupervisorShape,
-  WorkerRuntimeSnapshot,
-  WorkerSupervisorError,
-  WorkerThinkingLevel,
-  WorktreeBootstrapShape,
+import {
+  type GuardedWorkerSupervisorShape,
+  type WorkerRuntimeSnapshot,
+  type WorkerSupervisorError,
+  type WorkerThinkingLevel,
+  type WorktreeBootstrapShape,
   WorktreeUpdateError,
 } from '../worker-runtime/index.ts';
 import type {
@@ -78,13 +78,13 @@ function failedLeaseSummary(
     return `Failed to start ${agentId}; removed clean managed worktree ${leasePath}.`;
   if (cleanup === 'preserved_dirty')
     return `Failed to start ${agentId}; preserved dirty managed worktree ${leasePath}.`;
-  return `Failed to start ${agentId}; preserved managed worktree ${leasePath} after cleanup verification failed.`;
+  return `Failed to start ${agentId}; preserved managed worktree ${leasePath} because safe cleanup could not be established.`;
 }
 
 function leaseCleanupSummary(leasePath: string, cleanup: FailedLeaseCleanup): string {
   if (cleanup === 'removed_clean') return `Removed clean managed worktree ${leasePath}.`;
   if (cleanup === 'preserved_dirty') return `Preserved dirty managed worktree ${leasePath}.`;
-  return `Preserved managed worktree ${leasePath} because cleanup could not be verified.`;
+  return `Preserved managed worktree ${leasePath} because safe cleanup could not be established.`;
 }
 
 export interface AgentAttachmentSpawnInput {
@@ -290,6 +290,35 @@ export function makeAgentAttachmentLifecycleCoordinator(
     );
   });
 
+  const retainFailedBootstrapLease = Effect.fnUntraced(function* (
+    agent: AgentRecord,
+    cleanup: Exclude<FailedLeaseCleanup, 'removed_clean'>,
+    failedAt: string,
+  ) {
+    yield* namespace.store.mutate((state) => {
+      const current = state.agents[agent.id] ?? agent;
+      return Effect.succeed([
+        undefined,
+        {
+          ...state,
+          agents: {
+            ...state.agents,
+            [agent.id]: {
+              ...current,
+              lastError:
+                cleanup === 'preserved_dirty'
+                  ? 'Repository script/update failed and left a dirty managed worktree; durable lease ownership was retained for inspection and cleanup.'
+                  : 'Repository script/update failed and safe managed-worktree cleanup could not be established; durable lease ownership was retained.',
+              status: 'crashed' as const,
+              updatedAt: failedAt,
+            },
+          },
+        },
+      ] as const);
+    });
+    yield* callbacks.refresh();
+  });
+
   const handleRevivePersistenceFailure = Effect.fnUntraced(function* (
     agentId: string,
     cause: Cause.Cause<unknown>,
@@ -404,11 +433,18 @@ export function makeAgentAttachmentLifecycleCoordinator(
       }).pipe(Effect.exit);
       if (Exit.isFailure(bootstrapResult)) {
         const failedAt = yield* nowIso;
-        yield* rollbackProvisionalAgent(workstream, agentId);
-        const cleanup = yield* cleanupFailedLease(
-          { agentId, managerId: state.managerId, repo: state.repo },
-          lease,
-        );
+        const bootstrapError = Cause.squash(bootstrapResult.cause);
+        const cleanup =
+          bootstrapError instanceof WorktreeUpdateError &&
+          (bootstrapError.reason === 'timeout' ||
+            bootstrapError.reason === 'process_lifecycle_unsettled')
+            ? ('preserved_unverified' as const)
+            : yield* cleanupFailedLease(
+                { agentId, managerId: state.managerId, repo: state.repo },
+                lease,
+              );
+        if (cleanup === 'removed_clean') yield* rollbackProvisionalAgent(workstream, agentId);
+        else yield* retainFailedBootstrapLease(agent, cleanup, failedAt);
         yield* callbacks.appendEventSafely(
           makeEvent(
             'agent_spawn_failed',

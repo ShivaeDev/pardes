@@ -145,22 +145,38 @@ A writing-worker spawn:
 5. records the managed lease and a durable worktree-bootstrap state;
 6. if the fresh checkout has `script/update`, executes it directly from the
    checkout root (honoring its executable bit and shebang); absence is a no-op;
-7. launches a retained child Pi RPC process only after bootstrap succeeds;
-8. tracks lifecycle state and bounded activity telemetry;
-9. audits actual Git state at handoff and publication;
-10. preserves dirty or unverifiable worktrees;
-11. removes retained artifacts only through explicit conservative cleanup.
+7. for a verifier, re-inspects that the detached checkout is still clean at the
+   captured immutable head after bootstrap;
+8. launches a retained child Pi RPC process only after preparation succeeds;
+9. tracks lifecycle state and bounded activity telemetry;
+10. audits actual Git state at handoff and publication;
+11. preserves dirty or unverifiable worktrees;
+12. removes retained artifacts only through explicit conservative cleanup.
 
 Detached verifier checkout creation and refresh use the same pre-launch
 bootstrap convention. The hook inherits the manager process environment; Pardes
 does not inspect or copy repository secret files, though repository-owned hooks
 may deliberately symlink or generate local configuration. Hook output is
 bounded in memory, only body-free counts are durable, and terminal-only tails
-support local diagnosis. Failure or the fixed 15-minute timeout prevents child
-launch and enters the existing conservative writer-retention or
-disposable-verifier compensation path. Retained revive does not rerun
-bootstrap. After restoration, an observed
-in-flight bootstrap is marked interrupted and is never rerun automatically.
+support local diagnosis. Failure or timeout initiation at 15 minutes prevents
+child launch and enters conservative compensation. Writer failures retain a
+durable agent/lease whenever the checkout is dirty, cleanup is unverifiable, or
+process lifecycle/timeout leaves termination uncertain. Verifier uncertainty
+keeps retryable scratch ownership rather than immediately declaring disposal
+safe. Retained revive does not rerun bootstrap. After restoration, an observed in-flight
+bootstrap is marked interrupted, process completion/termination remains unknown,
+and repository code is never rerun automatically.
+
+The process adapter signals its directly spawned process group on POSIX (the
+direct child elsewhere) on timeout and Effect interruption, observes
+direct-child exit, and stops waiting after a
+bounded final drain or exit-confirmation window. This bounds manager
+orchestration only. A zero-exit hook whose inherited output pipes remain open
+past the final drain fails closed as lifecycle-unsettled. Pardes still cannot
+observe or prove termination of a descendant that creates a new session and
+closes those pipes, and abrupt manager death cannot perform reconciliation.
+A later explicit cleanup is therefore an operator-controlled retry edge, not
+proof that an escaped process previously stopped.
 
 This execution is not security isolation. Repository hooks and child Bash run as
 the same OS user as the manager and can access that user's files, credentials,

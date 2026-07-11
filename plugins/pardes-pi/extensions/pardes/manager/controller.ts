@@ -1341,7 +1341,7 @@ export class ManagerController {
                       ...agent,
                       lastError:
                         agent.worktreeBootstrap?.status === 'running'
-                          ? 'Manager ended during script/update; bootstrap was not rerun automatically. Inspect retained ownership before cleanup or a new attempt.'
+                          ? 'Manager ended during script/update; completion and process termination are unknown, and bootstrap was not rerun automatically. Inspect retained ownership before cleanup or a new attempt.'
                           : 'Worker runtime is not attached to this manager process.',
                       status: 'crashed' as const,
                       updatedAt: timestamp,
@@ -1350,7 +1350,7 @@ export class ManagerController {
                             worktreeBootstrap: {
                               completedAt: timestamp,
                               failureSummary:
-                                '[manager_restart] script/update completion was not observed; automatic rerun is disabled.',
+                                '[manager_restart] script/update completion and process termination were not observed; automatic rerun is disabled.',
                               script: 'script/update' as const,
                               startedAt: agent.worktreeBootstrap.startedAt,
                               status: 'interrupted' as const,

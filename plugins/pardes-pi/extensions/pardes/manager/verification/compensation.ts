@@ -14,6 +14,7 @@ export interface VerificationProvisioningCompensationShape {
     verification: VerificationRecord,
     reason: string,
     stopRuntime: boolean,
+    deferDiscard?: boolean,
   ) => Effect.Effect<void>;
   readonly discardReviewCheckoutSafely: (
     verification: VerificationRecord,
@@ -24,6 +25,7 @@ export interface VerificationProvisioningCompensationShape {
   readonly rollbackRequestedVerification: (
     verification: VerificationRecord,
     stopRuntime: boolean,
+    deferDiscard?: boolean,
   ) => Effect.Effect<void>;
   readonly stopVerifierRuntimeSafely: (agentId: string) => Effect.Effect<void>;
 }
@@ -228,6 +230,7 @@ export function makeVerificationProvisioningCompensation(
   const rollbackRequestedVerification = Effect.fnUntraced(function* (
     verification: VerificationRecord,
     stopRuntime: boolean,
+    deferDiscard = false,
   ) {
     if (stopRuntime) yield* stopVerifierRuntimeSafely(verification.verifierAgentId);
     if (
@@ -238,6 +241,7 @@ export function makeVerificationProvisioningCompensation(
       ))
     )
       return;
+    if (deferDiscard) return;
     if (!(yield* discardReviewCheckoutSafely(verification))) return;
     yield* removeRequestedVerificationAfterDiscard(verification);
   });
@@ -246,10 +250,11 @@ export function makeVerificationProvisioningCompensation(
     verification: VerificationRecord,
     reason: string,
     stopRuntime: boolean,
+    deferDiscard = false,
   ) {
     if (stopRuntime) yield* stopVerifierRuntimeSafely(verification.verifierAgentId);
     const marked = yield* markProvisioningFailed(verification, reason, 'refresh');
-    if (!marked) return;
+    if (!marked || deferDiscard) return;
     if (yield* discardReviewCheckoutSafely(verification))
       yield* clearScratchCleanupPending(verification.id);
   });

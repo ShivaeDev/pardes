@@ -111,7 +111,8 @@ function worktreeBootstrapLine(agent: AgentRecord): string {
     return `interrupted (${completeOrOmittedText(bootstrap.failureSummary, 80)})`;
   if (bootstrap.status === 'failed')
     return `failed (${completeOrOmittedText(bootstrap.failureSummary, 80)})`;
-  return `succeeded (output omitted; stdout chars:${bootstrap.output.stdoutChars}; stderr chars:${bootstrap.output.stderrChars})`;
+  const prefix = bootstrap.output.countAccuracy === 'lower_bound' ? '>=' : '';
+  return `succeeded (output omitted; stdout chars:${prefix}${bootstrap.output.stdoutChars}; stderr chars:${prefix}${bootstrap.output.stderrChars}; counts:${bootstrap.output.countAccuracy ?? 'legacy_unknown'})`;
 }
 
 function latestGitAuditLine(agent: AgentRecord): string {

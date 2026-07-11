@@ -48,13 +48,16 @@ async function withoutConsoleError<A>(run: () => Promise<A>): Promise<A> {
 }
 
 interface VerificationFixtureOptions {
+  readonly changedReviewHeadInspectAt?: number;
   readonly dirtyReviewCheckout?: boolean;
+  readonly dirtyReviewInspectAt?: number;
   readonly failMutationAt?: number;
   readonly failCallbackRefreshAt?: number;
   readonly failSpawnAt?: number;
   readonly failRefresh?: boolean;
   readonly failReviewCreate?: boolean;
   readonly failReviewInspect?: boolean;
+  readonly failReviewInspectAt?: number;
   readonly failReviewProvisionAfterAllocation?: boolean;
   readonly failDiscard?: boolean;
   readonly createDelay?: Duration.Input;
@@ -141,6 +144,8 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
   let reviewCreates = 0;
   let reviewRefreshes = 0;
   let reviewDiscards = 0;
+  let reviewInspections = 0;
+  let spawn = 0;
   let failDiscard = options.failDiscard === true;
   let failRefresh = options.failRefresh === true;
   let activeReviewCreates = 0;
@@ -192,19 +197,30 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
     inspect: (_owner, lease) =>
       Effect.succeed({ changedPaths: [], dirty: false, headSha: sourceHeadSha, path: lease.path }),
     inspectDetachedReviewCheckout: (_owner, lease) =>
-      options.failReviewInspect
-        ? Effect.fail(
+      Effect.sync(() => {
+        reviewInspections += 1;
+        const fail =
+          options.failReviewInspectAt === reviewInspections ||
+          (options.failReviewInspect === true && spawn > 0);
+        if (fail)
+          return Effect.fail(
             new WorktreeError({
               cause: 'fixture failure',
               operation: 'fixture checkout inspect',
               path: lease.path,
             }),
-          )
-        : Effect.succeed({
-            dirty: options.dirtyReviewCheckout === true,
-            headSha: lease.reviewedHeadSha,
-            path: lease.path,
-          }),
+          );
+        return Effect.succeed({
+          dirty:
+            options.dirtyReviewInspectAt === reviewInspections ||
+            (options.dirtyReviewCheckout === true && spawn > 0),
+          headSha:
+            options.changedReviewHeadInspectAt === reviewInspections
+              ? 'c'.repeat(40)
+              : lease.reviewedHeadSha,
+          path: lease.path,
+        });
+      }).pipe(Effect.flatten),
     prepareDetachedReviewCheckout: (input) =>
       Effect.succeed(reviewLease(input.verificationId, input.reviewedHeadSha)),
     provisionDetachedReviewCheckout: (_owner, lease) =>
@@ -257,7 +273,6 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
       ),
   } satisfies Partial<ManagedWorktreeShape>;
   const runtimes = new Map<string, WorkerRuntimeSnapshot>();
-  let spawn = 0;
   const stops: string[] = [];
   const workers = {
     spawn: (input) =>
@@ -485,6 +500,37 @@ describe('advisory verification lifecycle', () => {
     expect(refreshedPrompt).toContain('This review is advisory evidence only');
   });
 
+  test('rejects a successful bootstrap that dirties the initial detached checkout before verifier launch', async () => {
+    const fixture = await verificationFixture({ dirtyReviewInspectAt: 1 });
+
+    const failure = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }).pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'VerificationRequestRejectedError',
+      reason: 'repository script/update left the detached verifier checkout dirty before launch',
+    });
+    expect(fixture.spawns()).toBe(0);
+    expect(fixture.reviewDiscards()).toBe(1);
+    expect(Object.keys(fixture.namespace.state.verifications)).toEqual([]);
+  });
+
+  test('rejects a successful bootstrap that changes the detached checkout head before verifier launch', async () => {
+    const fixture = await verificationFixture({ changedReviewHeadInspectAt: 1 });
+
+    const failure = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }).pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'VerificationRequestRejectedError',
+      reason: 'repository script/update changed the detached verifier checkout head before launch',
+    });
+    expect(fixture.spawns()).toBe(0);
+    expect(fixture.reviewDiscards()).toBe(1);
+  });
+
   test('runs detached verifier checkout bootstrap before launch and compensates cleanly on failure', async () => {
     let bootstrapCwd: string | undefined;
     const fixture = await verificationFixture({
@@ -520,6 +566,46 @@ describe('advisory verification lifecycle', () => {
     expect(fixture.reviewDiscards()).toBe(1);
     expect(Object.keys(fixture.namespace.state.verifications)).toEqual([]);
     expect(existsSync(fixture.sourcePath)).toBe(true);
+  });
+
+  test('retains retryable verifier scratch ownership when timeout cannot prove process termination', async () => {
+    const fixture = await verificationFixture({
+      worktreeBootstrap: {
+        run: (cwd) =>
+          Effect.fail(
+            new WorktreeUpdateError({
+              cwd,
+              diagnostic: {
+                countAccuracy: 'lower_bound',
+                stderrChars: 0,
+                stderrTail: '',
+                stdoutChars: 0,
+                stdoutTail: '',
+              },
+              directExitObserved: false,
+              reason: 'timeout',
+            }),
+          ),
+      },
+    });
+
+    await expect(
+      withoutConsoleError(() =>
+        Effect.runPromise(
+          fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }).pipe(Effect.flip),
+        ),
+      ),
+    ).resolves.toBeInstanceOf(WorktreeUpdateError);
+    expect(fixture.spawns()).toBe(0);
+    expect(fixture.reviewDiscards()).toBe(0);
+    const [verification] = Object.values(fixture.namespace.state.verifications);
+    expect(verification).toMatchObject({ scratchCleanupPending: true });
+    expect(
+      fixture.namespace.state.agents[requiredValue(verification).verifierAgentId],
+    ).toMatchObject({
+      status: 'crashed',
+      worktreeBootstrap: { status: 'failed' },
+    });
   });
 
   test('discards detached scratch and removes provisional records when request runtime provisioning fails without touching writer files', async () => {
@@ -799,6 +885,31 @@ describe('advisory verification lifecycle', () => {
     );
     expect(existsSync(currentVerificationAttempt(verification).reviewCheckout.path)).toBe(true);
     expect(existsSync(fixture.sourcePath)).toBe(true);
+  });
+
+  test('rejects a successful refresh bootstrap that dirties the captured checkout before relaunch', async () => {
+    const fixture = await verificationFixture({ dirtyReviewInspectAt: 2 });
+    const verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+    fixture.setVerifierIdle(verification);
+
+    const failure = await Effect.runPromise(
+      fixture.coordinator.refresh(verification.id).pipe(Effect.flip),
+    );
+
+    expect(failure).toMatchObject({
+      _tag: 'VerificationRefreshRejectedError',
+      reason: 'repository script/update left the detached verifier checkout dirty before launch',
+    });
+    expect(fixture.spawns()).toBe(1);
+    expect(fixture.reviewRefreshes()).toBe(1);
+    expect(fixture.reviewDiscards()).toBe(1);
+    expect(
+      currentVerificationAttempt(
+        requiredValue(fixture.namespace.state.verifications[verification.id]),
+      ),
+    ).toMatchObject({ evidenceStatus: 'stale', status: 'crashed' });
   });
 
   test('reruns bootstrap for a freshly refreshed verifier checkout and skips relaunch on failure', async () => {

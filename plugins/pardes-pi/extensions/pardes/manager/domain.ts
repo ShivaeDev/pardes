@@ -92,6 +92,7 @@ export const AgentLeaseCleanupSchema = Schema.Struct({
 export type AgentLeaseCleanup = typeof AgentLeaseCleanupSchema.Type;
 
 const WorktreeUpdateOutputSchema = Schema.Struct({
+  countAccuracy: Schema.optionalKey(Schema.Literals(['exact', 'lower_bound'])),
   stderrChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   stdoutChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
 });

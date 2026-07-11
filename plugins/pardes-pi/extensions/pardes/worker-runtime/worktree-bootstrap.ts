@@ -8,11 +8,14 @@ import { gitEnvironmentForExplicitCwd } from '../git/index.ts';
 export const WORKTREE_UPDATE_SCRIPT = 'script/update';
 export const WORKTREE_UPDATE_TIMEOUT_MS = 15 * 60_000;
 export const WORKTREE_UPDATE_DIAGNOSTIC_TAIL_MAX_CHARS = 4_000;
-const TERMINATION_GRACE_MS = 2_000;
+export const WORKTREE_UPDATE_FINAL_DRAIN_MS = 100;
+export const WORKTREE_UPDATE_TIMEOUT_EXIT_CONFIRM_MS = 500;
 
 export interface WorktreeUpdateOutput {
   readonly stdoutChars: number;
   readonly stderrChars: number;
+  /** Lower-bound means inherited pipes were force-closed after a bounded final drain. */
+  readonly countAccuracy?: 'exact' | 'lower_bound';
 }
 
 export interface WorktreeUpdateDiagnostic extends WorktreeUpdateOutput {
@@ -26,6 +29,7 @@ export type WorktreeUpdateFailureReason =
   | 'not_executable'
   | 'spawn_failed'
   | 'nonzero_exit'
+  | 'process_lifecycle_unsettled'
   | 'signaled'
   | 'timeout';
 
@@ -35,6 +39,8 @@ export class WorktreeUpdateError extends Data.TaggedError('WorktreeUpdateError')
   readonly exitCode?: number;
   readonly reason: WorktreeUpdateFailureReason;
   readonly signal?: NodeJS.Signals;
+  /** False means the timeout bound elapsed after group signaling without observing direct-child exit. */
+  readonly directExitObserved?: boolean;
   readonly cause?: unknown;
 }> {}
 
@@ -69,8 +75,11 @@ function appendTail(current: string, chunk: string): string {
   return `${current}${chunk}`.slice(-WORKTREE_UPDATE_DIAGNOSTIC_TAIL_MAX_CHARS);
 }
 
-function snapshotDiagnostic(diagnostic: MutableDiagnostic): WorktreeUpdateDiagnostic {
-  return { ...diagnostic };
+function snapshotDiagnostic(
+  diagnostic: MutableDiagnostic,
+  countAccuracy: WorktreeUpdateOutput['countAccuracy'] = 'exact',
+): WorktreeUpdateDiagnostic {
+  return { ...diagnostic, countAccuracy };
 }
 
 function emptyDiagnostic(): WorktreeUpdateDiagnostic {
@@ -87,14 +96,6 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
     }
   }
   child.kill(signal);
-}
-
-function terminate(child: ChildProcess): void {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  signalProcessTree(child, 'SIGTERM');
-  const force = setTimeout(() => signalProcessTree(child, 'SIGKILL'), TERMINATION_GRACE_MS);
-  child.once('close', () => clearTimeout(force));
-  force.unref();
 }
 
 function executeUpdate(
@@ -129,17 +130,58 @@ function executeUpdate(
 
     let settled = false;
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      signalProcessTree(child, 'SIGKILL');
-    }, timeoutMs);
+    let directExitObserved = false;
+    let finalDrain: ReturnType<typeof setTimeout> | undefined;
+    let timeoutConfirmation: ReturnType<typeof setTimeout> | undefined;
+    let pendingCompletion:
+      | ((
+          accuracy: 'exact' | 'lower_bound',
+        ) => Effect.Effect<WorktreeUpdateOutcome, WorktreeUpdateError>)
+      | undefined;
+
+    const clearTimers = () => {
+      clearTimeout(timeout);
+      if (finalDrain) clearTimeout(finalDrain);
+      if (timeoutConfirmation) clearTimeout(timeoutConfirmation);
+      finalDrain = undefined;
+      timeoutConfirmation = undefined;
+    };
     const finish = (effect: Effect.Effect<WorktreeUpdateOutcome, WorktreeUpdateError>) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearTimers();
       resume(effect);
     };
+    const forceBoundedCompletion = () => {
+      const completion = pendingCompletion;
+      if (!completion || settled) return;
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish(completion('lower_bound'));
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      signalProcessTree(child, 'SIGKILL');
+      timeoutConfirmation = setTimeout(() => {
+        if (settled) return;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(
+          Effect.fail(
+            new WorktreeUpdateError({
+              cwd,
+              diagnostic: snapshotDiagnostic(diagnostic, 'lower_bound'),
+              directExitObserved,
+              reason: 'timeout',
+            }),
+          ),
+        );
+      }, WORKTREE_UPDATE_TIMEOUT_EXIT_CONFIRM_MS);
+      timeoutConfirmation.unref();
+    }, timeoutMs);
+
     child.once('error', (cause) => {
+      if (settled) return;
       finish(
         Effect.fail(
           new WorktreeUpdateError({
@@ -151,49 +193,81 @@ function executeUpdate(
         ),
       );
     });
-    child.once('close', (exitCode, signal) => {
-      const captured = snapshotDiagnostic(diagnostic);
-      if (timedOut) {
-        finish(
-          Effect.fail(new WorktreeUpdateError({ cwd, diagnostic: captured, reason: 'timeout' })),
-        );
-      } else if (signal !== null) {
-        finish(
-          Effect.fail(
+    child.once('exit', (exitCode, signal) => {
+      if (settled) return;
+      directExitObserved = true;
+      // Signal descendants that remain in the managed process group. A descendant
+      // that creates a new session is outside this observable cleanup boundary.
+      signalProcessTree(child, 'SIGKILL');
+      pendingCompletion = (accuracy) => {
+        const captured = snapshotDiagnostic(diagnostic, accuracy);
+        if (timedOut) {
+          return Effect.fail(
             new WorktreeUpdateError({
               cwd,
               diagnostic: captured,
+              directExitObserved: true,
+              reason: 'timeout',
+            }),
+          );
+        }
+        if (accuracy === 'lower_bound') {
+          return Effect.fail(
+            new WorktreeUpdateError({
+              cwd,
+              diagnostic: captured,
+              directExitObserved: true,
+              ...(exitCode === null || exitCode === 0 ? {} : { exitCode }),
+              reason: 'process_lifecycle_unsettled',
+              ...(signal === null ? {} : { signal }),
+            }),
+          );
+        }
+        if (signal !== null) {
+          return Effect.fail(
+            new WorktreeUpdateError({
+              cwd,
+              diagnostic: captured,
+              directExitObserved: true,
               reason: 'signaled',
               signal,
             }),
-          ),
-        );
-      } else if (exitCode !== 0) {
-        finish(
-          Effect.fail(
+          );
+        }
+        if (exitCode !== 0) {
+          return Effect.fail(
             new WorktreeUpdateError({
               cwd,
               diagnostic: captured,
+              directExitObserved: true,
               ...(exitCode === null ? {} : { exitCode }),
               reason: 'nonzero_exit',
             }),
-          ),
-        );
-      } else {
-        finish(
-          Effect.succeed({
-            output: {
-              stderrChars: captured.stderrChars,
-              stdoutChars: captured.stdoutChars,
-            },
-            status: 'succeeded',
-          }),
-        );
-      }
+          );
+        }
+        return Effect.succeed({
+          output: {
+            countAccuracy: accuracy,
+            stderrChars: captured.stderrChars,
+            stdoutChars: captured.stdoutChars,
+          },
+          status: 'succeeded',
+        });
+      };
+      finalDrain = setTimeout(forceBoundedCompletion, WORKTREE_UPDATE_FINAL_DRAIN_MS);
+      finalDrain.unref();
+    });
+    child.once('close', () => {
+      if (settled) return;
+      const completion = pendingCompletion;
+      if (completion) finish(completion('exact'));
     });
     return Effect.sync(() => {
-      clearTimeout(timer);
-      terminate(child);
+      settled = true;
+      clearTimers();
+      signalProcessTree(child, 'SIGKILL');
+      child.stdout.destroy();
+      child.stderr.destroy();
     });
   });
 }
@@ -257,7 +331,12 @@ export function worktreeUpdateFailureSummary(error: WorktreeUpdateError): string
         ? ''
         : ` signal=${error.signal}`
       : ` exitCode=${error.exitCode}`;
-  return `[${error.reason}] ${WORKTREE_UPDATE_SCRIPT} failed.${suffix} chars(stdout=${error.diagnostic.stdoutChars}, stderr=${error.diagnostic.stderrChars}, shown=0).`;
+  const process =
+    error.directExitObserved === undefined
+      ? 'process=not_started_or_unavailable'
+      : `process=direct_exit_${error.directExitObserved ? 'observed' : 'unobserved'}, managed_group_signal=attempted, escaped_descendants=not_observable`;
+  const accuracy = error.diagnostic.countAccuracy === 'lower_bound' ? '>=' : '';
+  return `[${error.reason}] ${WORKTREE_UPDATE_SCRIPT} failed.${suffix} chars(stdout=${accuracy}${error.diagnostic.stdoutChars}, stderr=${accuracy}${error.diagnostic.stderrChars}, shown=0); ${process}.`;
 }
 
 export function renderWorktreeUpdateTerminalDiagnostic(error: WorktreeUpdateError): string {

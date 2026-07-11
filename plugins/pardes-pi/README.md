@@ -108,15 +108,25 @@ that checkout's executable `script/update` directly from the checkout root when
 present; absence is a no-op. The hook inherits the manager environment, and its
 shebang selects its interpreter. Pardes does not copy `.env` files or other
 secrets; repository-owned hooks may implement their own worktree-aware setup.
-A nonzero exit, signal, launch error, or 15-minute timeout fails provisioning
-before Pi is launched. Status and output counts are durable, while bounded output tails are
-terminal-only. Retained revive does not rerun the hook, and restoration never
-automatically reruns a hook whose completion was not observed.
+A nonzero exit, signal, launch error, or timeout initiated at 15 minutes fails
+provisioning before Pi is launched. The manager stops waiting after a bounded
+final drain/exit-confirmation window; a nominally successful hook whose
+inherited pipes do not settle also fails closed. This bounds orchestration, not
+the lifetime of an escaped OS descendant. Status and output counts are durable, while bounded
+output tails are terminal-only. A verifier checkout must also still be clean at
+the captured head after the hook and before launch. Retained revive does not
+rerun the hook, and restoration never automatically reruns a hook whose
+completion was not observed.
 
 Managed worktrees and verifier tool restrictions are workflow guardrails, not a
 security sandbox: repository hooks, child Bash, and other same-user processes
-can access resources available to that OS user. Use baseline branch overrides
-only intentionally. Worker reports are stored under the owning manager's
+can access resources available to that OS user. Pardes signals the directly
+spawned process group on POSIX (the direct child elsewhere) on timeout or
+interruption, but cannot observe or prove
+termination of a descendant that creates a new session. Timeout-uncertain,
+lifecycle-unsettled, and restart-interrupted checkout ownership is therefore
+retained for later inspection rather than declared safe. Use baseline branch
+overrides only intentionally. Worker reports are stored under the owning manager's
 `reports/` directory; concise summaries wake the manager.
 
 `pull_request_create` publishes a clean committed worker state as a

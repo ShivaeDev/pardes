@@ -40,12 +40,23 @@ Fresh writer and detached-verifier checkouts are prepared before child launch.
 If the target repository has executable `script/update`, Pardes runs it from the
 fresh checkout root; otherwise preparation is a no-op. A failed or timed-out
 hook means no child was launched. Inspect the bounded error and `agent_status`
-bootstrap row rather than rerunning repository code manually. Writer cleanup
-removes only a verified-clean failed lease and retains dirty or unverifiable
-work; verifier compensation may retain retryable scratch ownership. A retained
-revive does not rerun preparation. Restoration marks an unobserved in-flight
-hook interrupted and never reruns it automatically; inspect retained ownership,
-then use conservative cleanup or make a deliberate fresh request/spawn.
+bootstrap row rather than rerunning repository code manually. A verifier is
+launched only after its post-hook checkout is reverified clean at the captured
+head. Writer cleanup removes only a verified-clean failed lease and retains
+durable agent ownership for dirty, unverifiable, timeout-uncertain, or
+lifecycle-unsettled work; verifier process uncertainty retains retryable scratch
+ownership. A retained revive does not rerun preparation. Restoration marks an unobserved in-flight hook interrupted,
+leaves process completion/termination explicitly unknown, and never reruns it
+automatically; inspect retained ownership, then use conservative cleanup or make
+a deliberate fresh request/spawn.
+
+The 15-minute timeout bounds manager waiting through a short final drain and
+exit-confirmation window; it does not prove every OS descendant stopped. Pardes
+signals the managed process group on POSIX (the direct child elsewhere), but a
+same-user descendant can create a new
+session and escape that boundary. A later Pardes checkout inspection still does
+not prove that escaped process stopped; when this risk is material, surface the
+limitation for user-led OS-process inspection before destructive cleanup.
 
 This convention is convenience and correctness policy, not a sandbox.
 Repository hooks, worker Bash, and verifier Bash are same-user processes with

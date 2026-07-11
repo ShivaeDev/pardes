@@ -65,6 +65,9 @@ export const runDurableWorktreeBootstrap = Effect.fnUntraced(function* (
                     completedAt,
                     failureSummary,
                     output: {
+                      ...(error.diagnostic.countAccuracy === undefined
+                        ? {}
+                        : { countAccuracy: error.diagnostic.countAccuracy }),
                       stderrChars: error.diagnostic.stderrChars,
                       stdoutChars: error.diagnostic.stdoutChars,
                     },

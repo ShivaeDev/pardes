@@ -7822,7 +7822,9 @@ describe('manager controller', () => {
     process.env.PARDES_PI_STATE_DIR = stateRoot;
     const fixture = harness(repo);
     const workers = stubWorkers();
-    const github = stubGithub();
+    const github = stubGithub((publicationIndex) => ({
+      action: publicationIndex === 0 ? 'created' : 'updated',
+    }));
     const browser = recordingBrowserHandoff();
     const controller = new ManagerController(fixture.pi, {
       browserHandoff: browser.browserHandoff,
@@ -7887,6 +7889,20 @@ describe('manager controller', () => {
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
+    expect(published.localTracking).toEqual({
+      localBranch: requiredValue(agent.worktree).branch,
+      remote: 'origin',
+      remoteBranch: publishedHeadBranch,
+      status: 'configured',
+    });
+    expect(
+      git(
+        requiredValue(agent.worktree).path,
+        'config',
+        '--get',
+        `branch.${requiredValue(agent.worktree).branch}.merge`,
+      ),
+    ).toBe(`refs/heads/${publishedHeadBranch}`);
     expect(published.browserHandoff).toEqual({
       openedMode: 'background',
       requestedMode: 'background',
@@ -7921,7 +7937,7 @@ describe('manager controller', () => {
       readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
     ).toContain('pull_request_published');
 
-    await Effect.runPromise(
+    const republished = await Effect.runPromise(
       controller.createPullRequest(
         {
           agentId: agent.id,
@@ -7934,10 +7950,61 @@ describe('manager controller', () => {
       ),
     );
     expect(github.publications[1]?.headBranch).toBe(publishedHeadBranch);
+    expect(republished.action).toBe('updated');
+    expect(republished.localTracking.status).toBe('already_configured');
     expect(github.candidateRequests).toHaveLength(1);
     expect(github.reservations).toHaveLength(1);
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('reports local tracking failure without downgrading verified remote publication', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const baseWorktrees = makeManagedWorktreeService();
+    const worktrees: ManagedWorktreeShape = {
+      ...baseWorktrees,
+      trackPublishedReviewBranch: (_owner, lease) =>
+        Effect.fail(
+          new WorktreeError({
+            cause: 'fixture local tracking failure',
+            operation: 'configure published review branch tracking',
+            path: lease.path,
+          }),
+        ),
+    };
+    const github = stubGithub((_index) => ({ action: 'updated' }));
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: stubWorkers().makeWorkers,
+      worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+
+    expect(published.action).toBe('updated');
+    expect(published.localTracking).toEqual({
+      reason: 'local_tracking_failed',
+      remote: 'origin',
+      remoteBranch: published.pullRequest.headBranch,
+      status: 'failed',
+    });
+    expect(published.pullRequest).toMatchObject({
+      lastPushedHeadSha: git(
+        requiredValue(controller.snapshot()?.agents[published.pullRequest.agentId]?.worktree).path,
+        'rev-parse',
+        'HEAD',
+      ),
+      status: 'open',
+    });
+    expect(github.publications).toHaveLength(1);
+    expect(
+      readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
+    ).toContain('pull_request_local_tracking_failed');
   });
 
   test('persists and settles a verified review gate before handing off its exact verified URL', async () => {
@@ -8435,6 +8502,64 @@ describe('manager controller', () => {
     ).toEqual([]);
   });
 
+  test('orders exact publication and auto-sync returns before local tracking', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const baseWorktrees = makeManagedWorktreeService();
+    const calls: string[] = [];
+    const worktrees: ManagedWorktreeShape = {
+      ...baseWorktrees,
+      trackPublishedReviewBranch: (owner, lease, input) =>
+        Effect.sync(() => calls.push(`track:${input.headSha}`)).pipe(
+          Effect.flatMap(() => baseWorktrees.trackPublishedReviewBranch(owner, lease, input)),
+        ),
+    };
+    const orderedGithub: GitHubPublicationShape = {
+      ...github.github,
+      publish: (input) =>
+        github.github
+          .publish(input)
+          .pipe(
+            Effect.tap(() => Effect.sync(() => calls.push(`publish-verified:${input.headSha}`))),
+          ),
+      syncExisting: (input) =>
+        github.github
+          .syncExisting(input)
+          .pipe(Effect.tap(() => Effect.sync(() => calls.push(`sync-verified:${input.headSha}`)))),
+    };
+    const controller = new ManagerController(fixture.pi, {
+      github: orderedGithub,
+      makeWorkers: workers.makeWorkers,
+      worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const publishedSha = requiredValue(published.pullRequest.lastPushedHeadSha);
+    expect(calls).toEqual([`publish-verified:${publishedSha}`, `track:${publishedSha}`]);
+
+    calls.length = 0;
+    writeFileSync(join(requiredValue(agent.worktree).path, 'ordered-sync.txt'), 'ordered sync\n');
+    git(requiredValue(agent.worktree).path, 'add', 'ordered-sync.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'ordered sync');
+    const syncSha = git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD');
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Prove hosted sync returns before local tracking.',
+        type: 'report',
+      }),
+    );
+
+    expect(calls).toEqual([`sync-verified:${syncSha}`, `track:${syncSha}`]);
+  });
+
   test('auto-syncs one persisted open review gate to the exact fresh SHA, resets stale open checks, and no-ops at the publication cursor', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -8512,6 +8637,70 @@ describe('manager controller', () => {
       }),
     );
     expect(github.syncs).toHaveLength(1);
+  });
+
+  test('keeps successful auto-sync durable when follow-up local tracking fails', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const baseWorktrees = makeManagedWorktreeService();
+    let trackingCalls = 0;
+    const worktrees: ManagedWorktreeShape = {
+      ...baseWorktrees,
+      trackPublishedReviewBranch: (owner, lease, input) => {
+        trackingCalls += 1;
+        return trackingCalls === 1
+          ? baseWorktrees.trackPublishedReviewBranch(owner, lease, input)
+          : Effect.fail(
+              new WorktreeError({
+                cause: 'fixture auto-sync tracking failure',
+                operation: 'configure auto-synced review tracking',
+                path: lease.path,
+              }),
+            );
+      },
+    };
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+      worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    writeFileSync(join(requiredValue(agent.worktree).path, 'tracking-failure.txt'), 'follow-up\n');
+    git(requiredValue(agent.worktree).path, 'add', 'tracking-failure.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'tracking failure follow-up');
+    const followUpSha = git(requiredValue(agent.worktree).path, 'rev-parse', 'HEAD');
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Remote auto-sync succeeds despite local tracking failure.',
+        type: 'report',
+      }),
+    );
+
+    expect(github.syncs).toHaveLength(1);
+    expect(trackingCalls).toBe(2);
+    expect(controller.snapshot()?.pullRequests[published.pullRequest.id]).toMatchObject({
+      lastPushedHeadSha: followUpSha,
+      status: 'open',
+    });
+    const attention = controller
+      .snapshot()
+      ?.inbox.filter(({ type }) => type === 'pull_request_auto_sync_attention');
+    expect(attention).toHaveLength(1);
+    expect(attention?.[0]?.summary).toContain('remote publication remains verified');
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'pull_request_auto_synced',
+      ),
+    ).toHaveLength(1);
   });
 
   test('drops delayed watcher discussion completion captured before an audited association head advances', async () => {

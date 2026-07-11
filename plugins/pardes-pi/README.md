@@ -108,7 +108,12 @@ branch overrides only intentionally. Worker reports are stored under the owning
 manager's `reports/` directory; concise summaries wake the manager.
 
 `pull_request_create` publishes a clean committed worker state as a
-user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`
+user-controlled review gate. After the exact pushed SHA is verified as the
+hosted head, Pardes makes the retained local worker branch track the managed
+`origin` review branch, including when their names differ. This local-only step
+never pushes again; a bounded tracking failure is reported separately without
+turning verified remote publication into failure. Browser handoff is explicit:
+`browserMode: 'none'`
 (the default), `'background'` (macOS `open -g`, with a portable ordinary-opener
 fallback elsewhere), or `'foreground'`. The legacy `openInBrowser` boolean
 remains a compatibility alias. Browser launch runs only after durable review-gate

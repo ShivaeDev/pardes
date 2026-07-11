@@ -42,8 +42,11 @@ When independent evidence is needed, call
 `verification_request({ sourceAgentId, ... })`. Wait for durable inbox delivery;
 do not poll. Inspect bounded `verification_status({ verificationId })` and call
 `report_get({ reportId })` only when the result or a concrete decision requires
-detail. After fixes, call `verification_refresh({ verificationId })` so the same
-retained verifier checks the latest clean HEAD. Verification is advisory and
+detail. Call it once with only the report ID: Pardes selects `details` when
+present, otherwise `summary`, and delivers the complete canonical body in
+bounded ordered parts without pagination calls. After fixes, call
+`verification_refresh({ verificationId })` so the same retained verifier checks
+the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering
 slices and when a concrete review question remains. Skip trivial documentation
 or test-only maintenance unless risk justifies it. Do not recreate verification

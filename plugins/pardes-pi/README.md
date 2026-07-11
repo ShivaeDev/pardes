@@ -105,7 +105,10 @@ Writing-worker spawns require a reachable `origin` with a configured default
 branch. Pardes resolves an immutable baseline, creates an isolated managed
 worktree, and retains the child Pi conversation for follow-up. Use baseline
 branch overrides only intentionally. Worker reports are stored under the owning
-manager's `reports/` directory; concise summaries wake the manager.
+manager's `reports/` directory; concise summaries wake the manager. Retrieve a
+known report with `report_get({ reportId })`: Pardes selects `details` when
+present, otherwise `summary`, and automatically delivers the complete canonical
+body in bounded ordered parts without field or pagination parameters.
 
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`

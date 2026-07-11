@@ -508,7 +508,7 @@ describe('worker-event summary policy', () => {
     });
     expect(projected?.summary).not.toContain('report-one');
     expect(projected?.summary).toContain(
-      '[omitted reason=report_summary_preview_limit originalChars=241 shownChars=240 omittedChars=1; durable report available via associated reportId and paginated report_get]',
+      '[omitted reason=report_summary_preview_limit originalChars=241 shownChars=240 omittedChars=1; canonical full report available via one report_get({ reportId }) call]',
     );
   });
 

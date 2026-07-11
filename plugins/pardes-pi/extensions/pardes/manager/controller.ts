@@ -1779,7 +1779,7 @@ export class ManagerController {
 
   readonly getReport = Effect.fnUntraced(function* (this: ManagerController, rawInput: unknown) {
     const active = yield* this.requireActive();
-    return yield* active.reporting.getExcerpt(rawInput);
+    return yield* active.reporting.getReport(rawInput);
   });
 
   private readonly createPullRequestUnlocked = Effect.fnUntraced(function* (

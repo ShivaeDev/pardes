@@ -139,7 +139,7 @@ function reportSummaryPreview(
   const counts = reference?.summaryChars ?? reportPreviewCounts(summary);
   if (counts.omittedChars === 0) return normalizeModelFacingText(summary);
   const normalized = normalizeModelFacingText(summary);
-  return `${normalized.slice(0, counts.shownChars)} [omitted reason=${reference?.summaryOmissionReason ?? REPORT_SUMMARY_PREVIEW_OMISSION_REASON} originalChars=${counts.originalChars} shownChars=${counts.shownChars} omittedChars=${counts.omittedChars}; durable report available via associated reportId and paginated report_get]`;
+  return `${normalized.slice(0, counts.shownChars)} [omitted reason=${reference?.summaryOmissionReason ?? REPORT_SUMMARY_PREVIEW_OMISSION_REASON} originalChars=${counts.originalChars} shownChars=${counts.shownChars} omittedChars=${counts.omittedChars}; canonical full report available via one report_get({ reportId }) call]`;
 }
 
 export function boundedFailureSummary(error: unknown): string {

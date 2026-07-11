@@ -7,45 +7,45 @@ import {
   REPORT_HANDOFF_NOTE_MAX_CHARS,
   REPORT_ID_MAX_LENGTH,
   REPORT_ID_PATTERN,
-  renderReportExcerpt,
-  reportExcerptMetadata,
 } from '../reporting/index.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
+import { registerReportDelivery } from './report-delivery.ts';
+
+function prepareLegacyReportGetArguments(args: unknown): { readonly reportId: string } {
+  if (!args || typeof args !== 'object' || Array.isArray(args))
+    return args as { readonly reportId: string };
+  const {
+    field: _field,
+    maxChars: _maxChars,
+    offset: _offset,
+    ...current
+  } = args as Record<string, unknown>;
+  return current as { readonly reportId: string };
+}
 
 export function registerReportTools(pi: ExtensionAPI, manager: ManagerController): void {
+  const delivery = registerReportDelivery(pi);
   registerPardesTool(pi, {
     description:
-      'Read one known manager-scoped durable worker or advisory-verifier report by reportId. Returns one trust-labelled JSON-escaped bounded excerpt plus allowlisted pagination metadata; never lists, guesses, or bulk-loads artifacts.',
+      'Retrieve one known manager-scoped durable worker or advisory-verifier report by reportId. Automatically selects the canonical full body (details when present, otherwise summary) and delivers every trust-labelled bounded part in order; never choose fields, offsets, page sizes, or continuation calls, and never lists, guesses, or loads other artifacts.',
     async execute(_toolCallId, params) {
+      if (delivery.activeReportId)
+        return textResult(
+          `Error: Canonical report ${delivery.activeReportId} is still being delivered; wait for its final automatic part before retrieving another report.`,
+        );
       const result = await runTool(manager.getReport(params));
-      return result.ok
-        ? textResult(renderReportExcerpt(result.value), reportExcerptMetadata(result.value))
-        : textResult(`Error: ${result.error}`);
+      if (!result.ok) return textResult(`Error: ${result.error}`);
+      try {
+        const first = delivery.start(result.value);
+        return textResult(first.text, first.metadata);
+      } catch (error) {
+        return textResult(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
     },
-    label: 'Get Durable Child Report Excerpt',
+    label: 'Get Full Durable Child Report',
     name: 'report_get',
     parameters: Type.Object(
       {
-        field: Type.Optional(
-          Type.Union([Type.Literal('summary'), Type.Literal('details')], {
-            description:
-              'Optional artifact field. Defaults to details when present, otherwise summary.',
-          }),
-        ),
-        maxChars: Type.Optional(
-          Type.Integer({
-            description: `Maximum raw characters returned in this bounded excerpt, hard-capped at ${REPORT_EXCERPT_MAX_CHARS}.`,
-            maximum: REPORT_EXCERPT_MAX_CHARS,
-            minimum: 1,
-          }),
-        ),
-        offset: Type.Optional(
-          Type.Integer({
-            description: 'Character offset into the selected field. Defaults to 0.',
-            maximum: REPORT_EXCERPT_MAX_OFFSET,
-            minimum: 0,
-          }),
-        ),
         reportId: Type.String({
           description: 'Path-free report id copied from an inbox row or agent status projection',
           maxLength: REPORT_ID_MAX_LENGTH,
@@ -55,14 +55,13 @@ export function registerReportTools(pi: ExtensionAPI, manager: ManagerController
       },
       { additionalProperties: false },
     ),
-    preview: (args) => [
-      { name: 'reportId', value: args.reportId },
-      { name: 'field', value: args.field },
-      { name: 'offset', value: args.offset },
-      { name: 'maxChars', value: args.maxChars },
+    prepareArguments: prepareLegacyReportGetArguments,
+    preview: (args) => [{ name: 'reportId', value: args.reportId }],
+    promptGuidelines: [
+      'Call report_get once with only reportId; Pardes selects the canonical full body and delivers every bounded continuation automatically.',
     ],
     promptSnippet:
-      'Retrieve one bounded trust-labelled excerpt from a known durable Pardes child report',
+      'Retrieve the complete canonical trust-labelled body of one known durable Pardes child report by reportId',
   });
 
   registerPardesTool(pi, {

@@ -4834,20 +4834,17 @@ describe('manager controller', () => {
       id: durableAttention?.reportId,
       summary: fullReportSummary,
     });
-    const reportExcerpt = await Effect.runPromise(
-      controller.getReport({ maxChars: 64, reportId: durableAttention?.reportId }),
+    const canonicalReport = await Effect.runPromise(
+      controller.getReport({ reportId: durableAttention?.reportId }),
     );
-    expect(reportExcerpt).toMatchObject({
+    expect(canonicalReport).toMatchObject({
       agentId: agent.id,
+      content: durableReportDetails,
       field: 'details',
-      hasMore: true,
-      offset: 0,
       reportId: durableAttention?.reportId,
-      returnedChars: 64,
       status: 'completed',
       totalChars: durableReportDetails.length,
     });
-    expect(reportExcerpt.excerpt).toBe(durableReportDetails.slice(0, 64));
     expect(fixture.messages).toHaveLength(1);
     expect(fixture.messages[0]?.options).toMatchObject({
       deliverAs: 'followUp',

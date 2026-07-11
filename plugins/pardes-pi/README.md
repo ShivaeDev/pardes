@@ -92,7 +92,7 @@ The manager-visible tools are grouped by purpose:
 
 ```text
 question
-pardes_status · inbox_get · inbox_acknowledge · await_user_feedback
+pardes_status · inbox_get · inbox_acknowledge
 workstream_create · workstream_list · workstream_get · workstream_complete
 report_get
 pull_request_create
@@ -100,6 +100,12 @@ verification_request · verification_refresh · verification_status
 agent_spawn · agent_status · agent_send · agent_send_report
 agent_compact · agent_reload · agent_revive · agent_stop · agent_lease_cleanup
 ```
+
+`question` is the single user-judgment surface. Its options array may be empty
+for pure free-form input, and custom input is always available. If attention was
+delivered when the question opened, only that exact cursor is consumed after a
+submitted non-blank answer; cancellation, failure, blank input, and queued or
+later attention remain pending.
 
 Writing-worker spawns require a reachable `origin` with a configured default
 branch. Pardes resolves an immutable baseline, creates an isolated managed

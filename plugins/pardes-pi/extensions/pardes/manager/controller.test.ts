@@ -3302,7 +3302,7 @@ describe('manager controller', () => {
       deliveredCursorAgeMs: expect.any(Number),
       pendingCount: 2,
       queuedSuffixCount: 2,
-      reason: 'feedback_tool_submitted',
+      reason: 'question_answer_submitted',
       staleCursor: false,
     });
 
@@ -3394,7 +3394,7 @@ describe('manager controller', () => {
     expect(JSON.parse(readFileSync(statePath, 'utf8')).inbox[0].summary).toBe(summary);
   });
 
-  test('scopes feedback-tool and next-normal-user-message handoffs to the surfaced cursor', async () => {
+  test('scopes question-answer and next-normal-user-message handoffs to the surfaced cursor', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -3403,6 +3403,10 @@ describe('manager controller', () => {
     const workers = stubWorkers();
     const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
     await Effect.runPromise(controller.activate(fixture.ctx));
+    expect(
+      await Effect.runPromise(controller.beginInboxHandoffIfAvailable(fixture.ctx)),
+    ).toBeUndefined();
+    expect(controller.snapshot()).not.toHaveProperty('inboxHandoff');
     const stateDir = activationStateDir(fixture.entries);
     const workstream = await Effect.runPromise(
       controller.createWorkstream(
@@ -3452,7 +3456,7 @@ describe('manager controller', () => {
       deliveredCursorAgeMs: expect.any(Number),
       pendingCount: 1,
       queuedSuffixCount: 1,
-      reason: 'feedback_tool_submitted',
+      reason: 'question_answer_submitted',
       staleCursor: false,
     });
     expect(controller.snapshot()?.inbox).toHaveLength(1);
@@ -3490,7 +3494,7 @@ describe('manager controller', () => {
     const audit = managerEvents(stateDir)
       .filter(({ type }) => type === 'inbox_cursor_acknowledged')
       .map(({ summary }) => summary);
-    expect(audit.some((summary) => summary.includes('(feedback_tool_submitted)'))).toBe(true);
+    expect(audit.some((summary) => summary.includes('(question_answer_submitted)'))).toBe(true);
     expect(audit.some((summary) => summary.includes('(user_message_after_handoff)'))).toBe(true);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
@@ -3515,7 +3519,7 @@ describe('manager controller', () => {
     );
     const agent = await Effect.runPromise(
       controller.spawnAgent(
-        { task: 'Emit attention around a cancelled feedback dialog.', workstreamId: workstream.id },
+        { task: 'Emit attention around a cancelled question dialog.', workstreamId: workstream.id },
         fixture.ctx,
       ),
     );
@@ -3816,7 +3820,7 @@ describe('manager controller', () => {
       deliveredCursorAgeMs: expect.any(Number),
       pendingCount: 2,
       queuedSuffixCount: 1,
-      reason: 'feedback_tool_submitted',
+      reason: 'question_answer_submitted',
       staleCursor: true,
     });
     expect(restored.snapshot()?.inbox).toEqual(durableRows);

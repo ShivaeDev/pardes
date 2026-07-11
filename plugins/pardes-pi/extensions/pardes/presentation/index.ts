@@ -2,12 +2,6 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { type ManagerPresentation, makeManagerPresentation } from './pi-dashboard.ts';
 import { registerWorkerEventRenderer } from './worker-events.ts';
 
-export {
-  ATTENTION_HANDOFF_FEEDBACK_MAX_CHARS,
-  ATTENTION_HANDOFF_PROMPT_MAX_CHARS,
-  inputPardesAttentionFeedback,
-  sanitizeAttentionHandoffPrompt,
-} from './attention-dialog.ts';
 export type { BridgeMonitorWorker, TerminalTextLayout } from './bridge-monitor.ts';
 export { attachedBridgeMonitorWorkers, renderBridgeMonitorLines } from './bridge-monitor.ts';
 export {

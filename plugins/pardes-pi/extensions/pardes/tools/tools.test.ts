@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
 import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 import {
@@ -11,6 +15,7 @@ import {
   type GitHubIntegrationHealthInspection,
   GitHubResponseError,
 } from '../github/index.ts';
+import { createPardesCommandHandler } from '../index.ts';
 import {
   type AgentRecord,
   type AgentStatus,
@@ -29,11 +34,8 @@ import {
   type VerificationRecord,
   type Workstream,
 } from '../manager/index.ts';
-import {
-  REPORT_EXCERPT_MAX_CHARS,
-  REPORT_EXCERPT_TRUST_LABEL,
-  REPORT_HANDOFF_NOTE_MAX_CHARS,
-} from '../reporting/index.ts';
+import type { ManagerPresentation } from '../presentation/index.ts';
+import { REPORT_EXCERPT_MAX_CHARS, REPORT_HANDOFF_NOTE_MAX_CHARS } from '../reporting/index.ts';
 import {
   STORAGE_EVENT_SCAN_MAX_BYTES,
   STORAGE_REPORT_SCAN_MAX_ENTRIES,
@@ -92,6 +94,7 @@ interface RegisteredTool {
     >;
     readonly required?: ReadonlyArray<string>;
   };
+  readonly prepareArguments?: (args: unknown) => unknown;
   readonly execute: (
     toolCallId: string,
     params: Record<string, unknown>,
@@ -103,16 +106,44 @@ interface RegisteredTool {
 
 function registry() {
   const tools = new Map<string, RegisteredTool>();
+  const handlers = new Map<
+    string,
+    Array<
+      (
+        event: { readonly message?: unknown; readonly messages?: unknown[] },
+        ctx: ExtensionContext,
+      ) => unknown
+    >
+  >();
+  const messages: Array<{ readonly message: unknown; readonly options: unknown }> = [];
   const pi = {
+    on(
+      eventName: string,
+      handler: (
+        event: { readonly message?: unknown; readonly messages?: unknown[] },
+        ctx: ExtensionContext,
+      ) => unknown,
+    ) {
+      handlers.set(eventName, [...(handlers.get(eventName) ?? []), handler]);
+    },
     registerTool(tool: unknown) {
       const registered = tool as RegisteredTool;
       tools.set(registered.name, registered);
     },
+    sendMessage(message: unknown, options: unknown) {
+      messages.push({ message, options });
+    },
   } as unknown as ExtensionAPI;
-  return { pi, tools };
+  const emit = (
+    eventName: string,
+    event: { readonly message?: unknown; readonly messages?: unknown[] },
+  ) => {
+    for (const handler of handlers.get(eventName) ?? []) handler(event, ctx);
+  };
+  return { emit, messages, pi, tools };
 }
 
-const ctx = {} as ExtensionContext;
+const ctx = { isIdle: () => true } as ExtensionContext;
 const signal = new AbortController().signal;
 const onUpdate = (_update: unknown) => {};
 const createdAt = '2026-06-01T00:00:00.000Z';
@@ -260,11 +291,8 @@ describe('Pardes model-visible tools', () => {
       minLength: 1,
       pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]*$',
     });
-    expect(tools.get('report_get')?.parameters.properties.offset).toMatchObject({ minimum: 0 });
-    expect(tools.get('report_get')?.parameters.properties.maxChars).toMatchObject({
-      maximum: REPORT_EXCERPT_MAX_CHARS,
-      minimum: 1,
-    });
+    expect(Object.keys(tools.get('report_get')?.parameters.properties ?? {})).toEqual(['reportId']);
+    expect(tools.get('report_get')?.parameters.required).toEqual(['reportId']);
     assertLexicalId('agent_send_report', 'agentId');
     expect(tools.get('agent_send_report')?.parameters.properties.reportId).toMatchObject({
       maxLength: 100,
@@ -1707,7 +1735,7 @@ describe('Pardes model-visible tools', () => {
 
     expect(agentStatus.description).toContain('Defaults to a concise summary');
     expect(agentStatus.description).toContain(
-      'Retrieve durable report details separately with report_get',
+      "Retrieve a durable report's complete canonical body separately with one report_get({ reportId }) call",
     );
     expect(agentStatus.description).not.toContain('Full diagnostics');
     const concise = await agentStatus.execute(
@@ -1848,7 +1876,7 @@ describe('Pardes model-visible tools', () => {
       'latest git audit: succeeded · completion · dirty worktree',
     );
     expect(audit.content[0]?.text).toContain(
-      'changed paths: 2 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
+      'total audited changed paths: 2 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
     );
     expect(audit.content[0]?.text).toContain('↳ extensions/pardes/tools/index.ts');
     expect(audit.content[0]?.text).toContain('↳ extensions/pardes/tools/tools.test.ts');
@@ -1935,18 +1963,21 @@ describe('Pardes model-visible tools', () => {
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain(
-      'commit provenance: cooperative first-parent graph · non-merge rows are worker-branch candidates; merge rows are integration context only · bounds:first 200 commits/512 paths/category',
-    );
-    expect(text).toContain('commits: first-parent non-merge:2 · merge-context:1 · total branch:3');
-    expect(text).toContain(`latest delta: merge_commit commit:${headSha} · 1 changed path`);
-    expect(text).toContain(
-      `total branch delta: ${baselineSha}..${headSha} · 7 changed paths · 1 merge-context path`,
+      'worker-branch non-merge change candidates: 2 commits · 6 paths · cooperative first-parent evidence',
     );
     expect(text).toContain(
-      'cooperative first-parent non-merge paths: 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
+      'merge context: 1 merge commit · 1 first-parent-diff path · exact conflict-resolution ownership not inferred',
+    );
+    expect(text).toContain(
+      `total branch-point delta: 3 first-parent commits · 7 paths · ${baselineSha}..${headSha}`,
+    );
+    expect(text).toContain(`latest delta: merge_commit commit:${headSha} · 1 path`);
+    expect(text).toContain(
+      'worker-branch non-merge candidate paths: 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
     );
     for (const path of authoredPaths.slice(0, 3)) expect(text).toContain(`↳ ${path}`);
-    expect(text).toContain('… +3 more cooperative first-parent non-merge paths omitted');
+    expect(text).toContain('… +3 more worker-branch non-merge candidate paths omitted');
+    expect(text).not.toMatch(/worker feature|worker-authored|authored by/);
     expect(text).not.toContain('src/authored-d.ts');
     expect(text).not.toContain('src/main-only.ts');
     expect(text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
@@ -1996,7 +2027,7 @@ describe('Pardes model-visible tools', () => {
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain(
-      'commit provenance: unavailable · reason:dirty_worktree · bounds:first 200 first-parent commits/512 paths/category',
+      'worker-branch non-merge candidate provenance: unavailable · reason:dirty_worktree · bounds:first 200 first-parent commits/512 paths/category',
     );
     expect(text).toContain('dirty paths: 5 paths');
     for (const path of dirtyPaths.slice(0, 4)) expect(text).toContain(`↳ ${path}`);
@@ -2591,19 +2622,16 @@ describe('Pardes model-visible tools', () => {
     }
   });
 
-  test('registers report_get as one bounded trust-labelled excerpt retrieval with metadata but no raw structured artifact content', async () => {
-    const excerpt = {
+  test('registers report_get as reportId-only canonical full retrieval with metadata-only results', async () => {
+    const canonical = {
       agentId: 'agent-one',
-      excerpt: 'private\n"detail"',
+      content: 'private\n"detail"',
       field: 'details' as const,
-      hasMore: true,
-      offset: 0,
       reportId: 'report-123',
-      returnedChars: 16,
       status: 'completed' as const,
-      totalChars: 32,
+      totalChars: 16,
     };
-    const manager = { getReport: () => Effect.succeed(excerpt) } as unknown as ManagerController;
+    const manager = { getReport: () => Effect.succeed(canonical) } as unknown as ManagerController;
     const { pi, tools } = registry();
     registerWorkstreamTools(pi, manager);
     const reportGet = requiredValue(tools.get('report_get'));
@@ -2611,7 +2639,24 @@ describe('Pardes model-visible tools', () => {
     expect(reportGet.description).toContain(
       'one known manager-scoped durable worker or advisory-verifier report by reportId',
     );
-    expect(reportGet.description).toContain('never lists, guesses, or bulk-loads artifacts');
+    expect(reportGet.description).toContain('details when present, otherwise summary');
+    expect(reportGet.description).toContain(
+      'never choose fields, offsets, page sizes, or continuation calls',
+    );
+    expect(Object.keys(reportGet.parameters.properties)).toEqual(['reportId']);
+    expect(reportGet.parameters.required).toEqual(['reportId']);
+    expect(
+      reportGet.prepareArguments?.({
+        field: 'summary',
+        maxChars: 12,
+        offset: 4,
+        reportId: 'report-123',
+      }),
+    ).toEqual({ reportId: 'report-123' });
+    expect(reportGet.prepareArguments?.({ reportId: 'report-123', unexpected: true })).toEqual({
+      reportId: 'report-123',
+      unexpected: true,
+    });
     const result = await reportGet.execute(
       'call-1',
       { reportId: 'report-123' },
@@ -2620,19 +2665,195 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
 
-    expect(result.content[0]?.text).toContain(`[${REPORT_EXCERPT_TRUST_LABEL}]`);
-    expect(result.content[0]?.text).toContain('excerpt(JSON string): "private\\n\\"detail\\""');
+    expect(result.content[0]?.text).toContain('[Pardes canonical report delivery scheduled]');
+    expect(result.content[0]?.text).toContain('after this agent run settles');
+    expect(result.content[0]?.text).not.toContain('private');
     expect(result.details).toEqual({
       agentId: 'agent-one',
+      automaticContinuation: true,
+      deliveryId: expect.stringMatching(/^report-delivery-[a-f0-9]{24}$/),
       field: 'details',
-      hasMore: true,
-      offset: 0,
+      parts: 1,
       reportId: 'report-123',
-      returnedChars: 16,
       status: 'completed',
-      totalChars: 32,
+      totalChars: 16,
     });
     expect(JSON.stringify(result.details)).not.toContain('private');
+  });
+
+  test('rejects a delayed report read that resolves after delivery deactivation', async () => {
+    const resolvers: Array<() => void> = [];
+    const canonical = {
+      agentId: 'agent-one',
+      content: 'late report body',
+      field: 'details' as const,
+      reportId: 'report-late',
+      status: 'completed' as const,
+      totalChars: 16,
+    };
+    const manager = {
+      deactivate: () => Effect.sync(() => undefined),
+      getReport: () =>
+        Effect.promise(
+          () =>
+            new Promise<typeof canonical>((resolve) => {
+              resolvers.push(() => resolve(canonical));
+            }),
+        ),
+      snapshot: () => managerState(),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const command = createPardesCommandHandler(pi, manager, {} as ManagerPresentation, delivery);
+    const commandCtx = {
+      ...ctx,
+      ui: { notify() {} },
+    } as unknown as ExtensionCommandContext;
+    const pending = requiredValue(tools.get('report_get')).execute(
+      'call-late',
+      { reportId: 'report-late' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (resolvers.length < 1) await Promise.resolve();
+
+    await command('stop', commandCtx);
+    requiredValue(resolvers[0])();
+    const result = await pending;
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('canceled by a manager lifecycle change');
+    expect(text.length).toBeLessThan(300);
+    expect(delivery.isActive).toBe(false);
+  });
+
+  test('keeps an old delayed read stale across restart while a fresh retrieval enters compaction', async () => {
+    const resolvers = new Map<string, () => void>();
+    let active = true;
+    const manager = {
+      activate: () =>
+        Effect.sync(() => {
+          active = true;
+          return managerState();
+        }),
+      deactivate: () =>
+        Effect.sync(() => {
+          active = false;
+        }),
+      getReport: (input: { readonly reportId: string }) => {
+        const canonical = {
+          agentId: 'agent-one',
+          content: `${input.reportId} body`,
+          field: 'details' as const,
+          reportId: input.reportId,
+          status: 'completed' as const,
+          totalChars: input.reportId.length + 5,
+        };
+        return Effect.promise(
+          () =>
+            new Promise<typeof canonical>((resolve) => {
+              resolvers.set(input.reportId, () => resolve(canonical));
+            }),
+        );
+      },
+      runtimeSnapshots: () => new Map(),
+      snapshot: () => (active ? managerState() : undefined),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const command = createPardesCommandHandler(pi, manager, {} as ManagerPresentation, delivery);
+    const commandCtx = {
+      ...ctx,
+      ui: { notify() {} },
+    } as unknown as ExtensionCommandContext;
+    const reportGet = requiredValue(tools.get('report_get'));
+    const oldPending = reportGet.execute(
+      'call-old',
+      { reportId: 'report-old' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolvers.has('report-old')) await Promise.resolve();
+
+    await command('stop', commandCtx);
+    await command('start', commandCtx);
+    const freshPending = reportGet.execute(
+      'call-fresh',
+      { reportId: 'report-fresh' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolvers.has('report-fresh')) await Promise.resolve();
+    requiredValue(resolvers.get('report-fresh'))();
+    const fresh = await freshPending;
+    delivery.observeCompactionStart();
+    requiredValue(resolvers.get('report-old'))();
+    const old = await oldPending;
+
+    expect(fresh.details).toMatchObject({ reportId: 'report-fresh' });
+    expect(old.content[0]?.text).toContain('canceled by a manager lifecycle change');
+    expect(delivery.activeReportId).toBe('report-fresh');
+    delivery.clear();
+  });
+
+  test('automatically serializes every oversized canonical report part without model pagination calls', async () => {
+    const content = 'report-body\n'.repeat(10_000);
+    const canonical = {
+      agentId: 'agent-one',
+      content,
+      field: 'details' as const,
+      reportId: 'report-large',
+      status: 'completed' as const,
+      totalChars: content.length,
+    };
+    const manager = { getReport: () => Effect.succeed(canonical) } as unknown as ManagerController;
+    const { emit, messages, pi, tools } = registry();
+    registerWorkstreamTools(pi, manager);
+    const reportGet = requiredValue(tools.get('report_get'));
+
+    const result = await reportGet.execute(
+      'call-large',
+      { reportId: 'report-large' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    const metadata = result.details as { readonly deliveryId: string; readonly parts: number };
+    expect(metadata.parts).toBeGreaterThan(1);
+    expect(messages).toEqual([]);
+
+    emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let part = 1; part <= metadata.parts; part += 1) {
+      const dispatched = requiredValue(messages[part - 1]);
+      expect(dispatched.options).toEqual({ triggerTurn: true });
+      expect(dispatched.message).toMatchObject({
+        details: {
+          deliveryId: metadata.deliveryId,
+          part,
+          parts: metadata.parts,
+          reportId: 'report-large',
+        },
+        display: false,
+      });
+      const message = { ...(dispatched.message as object), role: 'custom' };
+      emit('message_start', { message });
+      emit('message_end', { message });
+      emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] });
+      if (part < metadata.parts) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    const repeated = await reportGet.execute(
+      'call-repeat',
+      { reportId: 'report-large' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(repeated.content[0]?.text).not.toContain('still being delivered');
   });
 
   test('registers agent_send_report as one intentional bounded manager-controlled handoff with metadata-only output', async () => {

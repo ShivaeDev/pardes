@@ -767,6 +767,14 @@ export class ManagerController {
     return true;
   }
 
+  /** Release the exact hold when Pardes itself cancels a known failed compaction. */
+  observeCompactionFailure(ctx = this.latestContext): boolean {
+    const marker = this.compactionSafety;
+    if (!marker) return false;
+    this.resumeHeldInboxWake(marker.generation, ctx);
+    return true;
+  }
+
   /**
    * Pi 0.75.5 awaits extension `session_compact` handlers, then synchronously
    * emits its internal `compaction_end` and clears the compaction controller in
@@ -2201,7 +2209,7 @@ export class ManagerController {
 
   readonly getReport = Effect.fnUntraced(function* (this: ManagerController, rawInput: unknown) {
     const active = yield* this.requireActive();
-    return yield* active.reporting.getExcerpt(rawInput);
+    return yield* active.reporting.getReport(rawInput);
   });
 
   private readonly createPullRequestUnlocked = Effect.fnUntraced(function* (

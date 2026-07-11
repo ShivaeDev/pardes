@@ -379,21 +379,29 @@ function toggledInspectionWorktrees() {
   const service = makeManagedWorktreeService();
   let failInspections = false;
   let inspections = 0;
+  const inspect = (
+    owner: Parameters<ManagedWorktreeShape['inspect']>[0],
+    lease: Parameters<ManagedWorktreeShape['inspect']>[1],
+    withProvenance: boolean,
+  ) =>
+    Effect.sync(() => {
+      inspections += 1;
+      if (failInspections)
+        return Effect.fail(
+          new WorktreeError({
+            cause: 'fixture failure',
+            operation: 'fixture inspection',
+            path: lease.path,
+          }),
+        );
+      return withProvenance && service.inspectWithProvenance
+        ? service.inspectWithProvenance(owner, lease)
+        : service.inspect(owner, lease);
+    }).pipe(Effect.flatten);
   const worktrees: ManagedWorktreeShape = {
     ...service,
-    inspect: (owner, lease) =>
-      Effect.sync(() => {
-        inspections += 1;
-        if (failInspections)
-          return Effect.fail(
-            new WorktreeError({
-              cause: 'fixture failure',
-              operation: 'fixture inspection',
-              path: lease.path,
-            }),
-          );
-        return service.inspect(owner, lease);
-      }).pipe(Effect.flatten),
+    inspect: (owner, lease) => inspect(owner, lease, false),
+    inspectWithProvenance: (owner, lease) => inspect(owner, lease, true),
   };
   return {
     failInspections: () => {
@@ -5880,6 +5888,325 @@ describe('manager controller', () => {
     expect(fixture.messages).toEqual([]);
   });
 
+  test('projects merge-heavy completion from the established first-parent evidence without claiming conflict ownership', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Separate feature work from merge context', title: 'Merge provenance' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Create feature commits around two integrations.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktreeLease = requiredValue(agent.worktree);
+    const worktree = worktreeLease.path;
+    for (const [path, contents, message] of [
+      ['feature-a.txt', 'feature a\n', 'feature a'],
+      ['main-a.txt', 'main a\n', 'main context a'],
+    ] as const) {
+      const cwd = path.startsWith('feature') ? worktree : repo;
+      writeFileSync(join(cwd, path), contents);
+      git(cwd, 'add', path);
+      git(cwd, 'commit', '-m', message);
+    }
+    git(worktree, 'merge', '--no-edit', 'main');
+    writeFileSync(join(worktree, 'feature-b.txt'), 'feature b\n');
+    git(worktree, 'add', 'feature-b.txt');
+    git(worktree, 'commit', '-m', 'feature b');
+    writeFileSync(join(repo, 'main-b.txt'), 'main b\n');
+    git(repo, 'add', 'main-b.txt');
+    git(repo, 'commit', '-m', 'main context b');
+    git(worktree, 'merge', '--no-edit', 'main');
+    const headSha = git(worktree, 'rev-parse', 'HEAD');
+    expect(
+      Number(git(worktree, 'rev-list', '--count', `${worktreeLease.branchPointSha}..${headSha}`)),
+    ).toBe(6);
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Merge-heavy fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.gitAudit).toMatchObject({
+      dirty: false,
+      provenance: {
+        firstParentNonMergeCommitCount: 2,
+        firstParentNonMergePaths: ['feature-a.txt', 'feature-b.txt'],
+        headSha,
+        latestDelta: { changedPaths: ['main-b.txt'], commitSha: headSha, kind: 'merge_commit' },
+        mergeCommitCount: 2,
+        mergePaths: ['main-a.txt', 'main-b.txt'],
+        status: 'available',
+        totalBranchCommitCount: 4,
+        totalBranchDeltaPaths: ['feature-a.txt', 'feature-b.txt', 'main-a.txt', 'main-b.txt'],
+      },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    expect(persisted.changedPaths).toEqual([
+      'feature-a.txt',
+      'feature-b.txt',
+      'main-a.txt',
+      'main-b.txt',
+    ]);
+    const summary = requiredValue(controller.snapshot()?.inbox.at(-1)).summary;
+    expect(summary).toContain('worker-branch non-merge change candidates: 2 paths/2 commits');
+    expect(summary).toContain('Merge context: 2 first-parent-diff paths/2 merge commits');
+    expect(summary).toContain('exact conflict-resolution ownership not inferred');
+    expect(summary).toContain('Total branch-point delta: 4 paths/4 first-parent commits');
+    expect(summary).toContain(`Latest delta: merge_commit ${headSha}; 1 path.`);
+    expect(summary.length).toBeLessThanOrEqual(900);
+  });
+
+  test('degrades over-bound completion provenance while retaining total audited path data', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceMaxPaths: 1 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Degrade bounded provenance explicitly', title: 'Bounded provenance' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Commit two paths beyond the fixture bound.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    writeFileSync(join(worktree, 'first.txt'), 'first\n');
+    writeFileSync(join(worktree, 'second.txt'), 'second\n');
+    git(worktree, 'add', 'first.txt', 'second.txt');
+    git(worktree, 'commit', '-m', 'over-bound fixture');
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: `Bounded fixture complete. ${'x'.repeat(2_000)}`,
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['first.txt', 'second.txt']);
+    expect(persisted.gitAudit).toMatchObject({
+      provenance: { bounds: { maxPaths: 1 }, reason: 'bounds_exceeded', status: 'unavailable' },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    const summary = requiredValue(controller.snapshot()?.inbox.at(-1)).summary;
+    expect(summary).toContain(
+      'worker-branch non-merge change candidates unavailable (bounds_exceeded)',
+    );
+    expect(summary).toContain('Total audited change set: 2 paths');
+    expect(summary).toContain(
+      'canonical full report available via one report_get({ reportId }) call',
+    );
+    expect(summary.length).toBeLessThanOrEqual(900);
+  });
+
+  test('persists over-bound dirty completion with committed and dirty safety paths intact', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceMaxPaths: 1 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retain dirty completion safety data', title: 'Dirty bounded provenance' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Commit one path and leave two dirty paths.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    writeFileSync(join(worktree, 'committed.txt'), 'committed\n');
+    git(worktree, 'add', 'committed.txt');
+    git(worktree, 'commit', '-m', 'committed fixture');
+    writeFileSync(join(worktree, 'dirty-a.txt'), 'dirty a\n');
+    writeFileSync(join(worktree, 'dirty-b.txt'), 'dirty b\n');
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Dirty bounded fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['committed.txt', 'dirty-a.txt', 'dirty-b.txt']);
+    expect(persisted.latestReport?.status).toBe('completed');
+    expect(persisted.gitAudit).toMatchObject({
+      dirty: true,
+      provenance: {
+        bounds: { maxPaths: 1 },
+        dirtyPaths: [],
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    const attention = requiredValue(controller.snapshot()?.inbox.at(-1));
+    expect(attention.type).toBe('agent_report_completed');
+    expect(attention.summary).toContain(
+      'worker-branch non-merge change candidates unavailable (bounds_exceeded)',
+    );
+    expect(attention.summary).toContain('Total audited change set: 3 paths');
+    expect(attention.summary).toContain('Worktree is dirty');
+  });
+
+  test('retains total paths when completion provenance exceeds the first-parent commit bound', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceMaxFirstParentCommits: 1 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retain total paths after graph bounds', title: 'Commit bounded provenance' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Create two commits beyond the fixture graph bound.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    for (const path of ['first.txt', 'second.txt']) {
+      writeFileSync(join(worktree, path), `${path}\n`);
+      git(worktree, 'add', path);
+      git(worktree, 'commit', '-m', `${path} fixture`);
+    }
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Commit-bounded fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['first.txt', 'second.txt']);
+    expect(persisted.gitAudit).toMatchObject({
+      provenance: {
+        bounds: { maxFirstParentCommits: 1 },
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    expect(requiredValue(controller.snapshot()?.inbox.at(-1)).summary).toContain(
+      'Total audited change set: 2 paths',
+    );
+  });
+
+  test('persists an honest incomplete completion audit when the bounded total diff exceeds its buffer', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceTotalDiffGitMaxBufferBytes: 65 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Bound total completion diff', title: 'Total diff buffer' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Exceed the total diff output bound.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    const committedPath = `${'long-committed-path-'.repeat(8)}.txt`;
+    writeFileSync(join(worktree, committedPath), 'committed\n');
+    git(worktree, 'add', committedPath);
+    git(worktree, 'commit', '-m', 'long committed fixture');
+    writeFileSync(join(worktree, 'dirty.txt'), 'dirty\n');
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Bounded total diff fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['dirty.txt']);
+    expect(persisted.latestReport?.status).toBe('completed');
+    expect(persisted.gitAudit).toMatchObject({
+      dirty: true,
+      provenance: { reason: 'total_diff_unavailable', status: 'unavailable' },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    const attention = requiredValue(controller.snapshot()?.inbox.at(-1));
+    expect(attention.type).toBe('agent_report_completed');
+    expect(attention.summary).toContain('bounded total diff failed');
+    expect(attention.summary).toContain('Total audited change set unavailable');
+    expect(attention.summary).toContain('1 known live path');
+    expect(attention.summary).not.toContain('Total audited change set: 1 path');
+  });
+
   test('persists a completion audit failure, clears stale paths, and combines bounded report fallback warnings', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -6357,6 +6684,8 @@ describe('manager controller', () => {
       join(requiredValue(agent.worktree).path, 'discovered-change.txt'),
       'discovered change fixture\n',
     );
+    git(requiredValue(agent.worktree).path, 'add', 'discovered-change.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'discovered completion fixture');
     const fullReportSummary = `Fixture implementation complete. ${'detail '.repeat(60)}durable-summary-tail`;
     const durableReportDetails = `Durable fixture details. ${'d'.repeat(2 * 1_024 * 1_024)} durable-details-tail`;
     await Effect.runPromise(
@@ -6372,7 +6701,12 @@ describe('manager controller', () => {
       'Fixture implementation complete.',
     );
     expect(controller.snapshot()?.inbox.at(-1)?.summary).not.toContain('durable-summary-tail');
-    expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain('Git audit: 1 changed path.');
+    expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain(
+      'Git audit — worker-branch non-merge change candidates: 1 path/1 commit.',
+    );
+    expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain(
+      'Merge context: 0 first-parent-diff paths/0 merge commits',
+    );
     const durableAttention = controller.snapshot()?.inbox.at(-1);
     expect(durableAttention).toMatchObject({
       agentId: agent.id,
@@ -6399,20 +6733,17 @@ describe('manager controller', () => {
       id: durableAttention?.reportId,
       summary: fullReportSummary,
     });
-    const reportExcerpt = await Effect.runPromise(
-      controller.getReport({ maxChars: 64, reportId: durableAttention?.reportId }),
+    const canonicalReport = await Effect.runPromise(
+      controller.getReport({ reportId: durableAttention?.reportId }),
     );
-    expect(reportExcerpt).toMatchObject({
+    expect(canonicalReport).toMatchObject({
       agentId: agent.id,
+      content: durableReportDetails,
       field: 'details',
-      hasMore: true,
-      offset: 0,
       reportId: durableAttention?.reportId,
-      returnedChars: 64,
       status: 'completed',
       totalChars: durableReportDetails.length,
     });
-    expect(reportExcerpt.excerpt).toBe(durableReportDetails.slice(0, 64));
     expect(fixture.messages).toHaveLength(1);
     expect(fixture.messages[0]?.options).toMatchObject({
       deliverAs: 'followUp',
@@ -6488,7 +6819,9 @@ describe('manager controller', () => {
     expect(fixture.messages).toHaveLength(1);
     expect(
       readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
-    ).toContain('Git audit: 1 changed path.');
+    ).toContain(
+      'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 1 path.',
+    );
     await Effect.runPromise(
       workers.emit({
         agentId: revived.id,

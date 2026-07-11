@@ -187,8 +187,12 @@ export function makeAgentAttachmentLifecycleCoordinator(
       if (!agent.worktree) return undefined;
       const worktree = agent.worktree;
       const checkedAt = yield* nowIso;
+      const inspect =
+        trigger === 'completion' && worktrees.inspectWithProvenance !== undefined
+          ? worktrees.inspectWithProvenance
+          : worktrees.inspect;
       const result = yield* validateRetainedAgentState(namespace, agent.id, agent).pipe(
-        Effect.flatMap(() => worktrees.inspect(managedLeaseOwner(namespace, agent.id), worktree)),
+        Effect.flatMap(() => inspect(managedLeaseOwner(namespace, agent.id), worktree)),
         Effect.exit,
       );
       return Exit.isSuccess(result)

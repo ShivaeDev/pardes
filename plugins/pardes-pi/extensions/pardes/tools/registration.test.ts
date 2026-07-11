@@ -97,9 +97,11 @@ describe('Pardes interactive tool-call previews', () => {
   test('installs one self-shell call and result renderer for every interactive manager tool', () => {
     const tools: ToolDefinition[] = [];
     const pi = {
+      on() {},
       registerTool(tool: ToolDefinition) {
         tools.push(tool);
       },
+      sendMessage() {},
     } as unknown as ExtensionAPI;
     const manager = {} as ManagerController;
 

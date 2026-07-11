@@ -41,6 +41,12 @@ export function agentWarnings(
   )
     warnings.push('worktree bootstrap failed');
   if (agent.gitAudit?.status === 'failed') warnings.push('git audit failed');
+  if (
+    agent.gitAudit?.status === 'succeeded' &&
+    agent.gitAudit.provenance?.status === 'unavailable' &&
+    agent.gitAudit.provenance.reason === 'total_diff_unavailable'
+  )
+    warnings.push('git total diff unavailable');
   if (agent.gitAudit?.status === 'succeeded' && agent.gitAudit.dirty)
     warnings.push('dirty worktree');
   return warnings;
@@ -120,6 +126,11 @@ function latestGitAuditLine(agent: AgentRecord): string {
   if (!audit) return 'latest git audit: none';
   if (audit.status === 'failed')
     return `latest git audit: failed · ${audit.trigger} · ${completeOrOmittedText(audit.failureSummary, 120)}`;
+  if (
+    audit.provenance?.status === 'unavailable' &&
+    audit.provenance.reason === 'total_diff_unavailable'
+  )
+    return `latest git audit: incomplete · ${audit.trigger} · bounded total diff unavailable · ${audit.dirty ? 'dirty worktree' : 'clean worktree'}`;
   return `latest git audit: succeeded · ${audit.trigger} · ${audit.dirty ? 'dirty worktree' : 'clean worktree'}`;
 }
 
@@ -155,37 +166,48 @@ function conciseAgentHeader(status: AgentStatus): string {
   return `Worker ${structuralValue(agent.id)}${title} is ${effectiveStatus}. Workstream ${structuralValue(agent.workstreamId)}.`;
 }
 
+function auditProvenance(status: AgentStatus) {
+  if (status.gitProvenance !== undefined) return status.gitProvenance;
+  const audit = status.agent.gitAudit;
+  return audit?.status === 'succeeded' ? audit.provenance : undefined;
+}
+
 function auditPathProjection(status: AgentStatus): {
   readonly label: string;
   readonly paths: ReadonlyArray<string>;
 } {
-  const provenance = status.gitProvenance;
+  const provenance = auditProvenance(status);
   if (provenance?.status === 'available')
     return {
-      label: 'cooperative first-parent non-merge paths',
+      label: 'worker-branch non-merge candidate paths',
       paths: provenance.firstParentNonMergePaths,
     };
   if (provenance?.status === 'unavailable' && provenance.reason === 'dirty_worktree')
     return { label: 'dirty paths', paths: provenance.dirtyPaths };
-  return { label: 'changed paths', paths: status.agent.changedPaths ?? [] };
+  if (provenance?.status === 'unavailable' && provenance.reason === 'total_diff_unavailable')
+    return { label: 'known live paths (total diff unavailable)', paths: provenance.dirtyPaths };
+  return { label: 'total audited changed paths', paths: status.agent.changedPaths ?? [] };
 }
 
 function auditProvenanceLines(status: AgentStatus): ReadonlyArray<string> {
-  const provenance = status.gitProvenance;
+  const provenance = auditProvenance(status);
   if (provenance === undefined)
-    return ['commit provenance: unavailable · reason:not_requested_or_unsupported_adapter'];
+    return [
+      'worker-branch non-merge candidate provenance: unavailable · reason:not_captured_or_unsupported_adapter',
+    ];
   if (provenance.status === 'unavailable')
     return [
-      `commit provenance: unavailable · reason:${provenance.reason}${provenance.observedBranch === undefined ? '' : ` · observed branch:${structuralValue(provenance.observedBranch)}`} · bounds:first ${provenance.bounds.maxFirstParentCommits} first-parent commits/${provenance.bounds.maxPaths} paths/category`,
+      `worker-branch non-merge candidate provenance: unavailable · reason:${provenance.reason}${provenance.observedBranch === undefined ? '' : ` · observed branch:${structuralValue(provenance.observedBranch)}`} · bounds:first ${provenance.bounds.maxFirstParentCommits} first-parent commits/${provenance.bounds.maxPaths} paths/category`,
+      'merge context: unavailable · exact conflict-resolution ownership is never inferred from parent diffs',
     ];
   const latest = provenance.latestDelta;
   return [
-    `commit provenance: cooperative first-parent graph · non-merge rows are worker-branch candidates; merge rows are integration context only · bounds:first ${provenance.bounds.maxFirstParentCommits} commits/${provenance.bounds.maxPaths} paths/category`,
-    `commits: first-parent non-merge:${provenance.firstParentNonMergeCommitCount} · merge-context:${provenance.mergeCommitCount} · total branch:${provenance.totalBranchCommitCount}`,
+    `worker-branch non-merge change candidates: ${plural(provenance.firstParentNonMergeCommitCount, 'commit')} · ${plural(provenance.firstParentNonMergePaths.length, 'path')} · cooperative first-parent evidence`,
+    `merge context: ${plural(provenance.mergeCommitCount, 'merge commit')} · ${plural(provenance.mergePaths.length, 'first-parent-diff path')} · exact conflict-resolution ownership not inferred`,
+    `total branch-point delta: ${plural(provenance.totalBranchCommitCount, 'first-parent commit')} · ${plural(provenance.totalBranchDeltaPaths.length, 'path')} · ${structuralValue(provenance.branchPointSha)}..${structuralValue(provenance.headSha)}`,
     latest === undefined
       ? 'latest delta: none · branch still at immutable baseline'
-      : `latest delta: ${latest.kind} commit:${structuralValue(latest.commitSha)} · ${plural(latest.changedPaths.length, 'changed path')}`,
-    `total branch delta: ${structuralValue(provenance.branchPointSha)}..${structuralValue(provenance.headSha)} · ${plural(provenance.totalBranchDeltaPaths.length, 'changed path')} · ${plural(provenance.mergePaths.length, 'merge-context path')}`,
+      : `latest delta: ${latest.kind} commit:${structuralValue(latest.commitSha)} · ${plural(latest.changedPaths.length, 'path')}`,
   ];
 }
 

@@ -79,8 +79,19 @@ When independent evidence is needed, call
 `verification_request({ sourceAgentId, ... })`. Wait for durable inbox delivery;
 do not poll. Inspect bounded `verification_status({ verificationId })` and call
 `report_get({ reportId })` only when the result or a concrete decision requires
-detail. After fixes, call `verification_refresh({ verificationId })` so the same
-retained verifier checks the latest clean HEAD. Verification is advisory and
+detail. Call it once with only the report ID: Pardes selects `details` when
+present, otherwise `summary`, and delivers the complete canonical body in
+bounded ordered settlement runs without pagination calls. Let that automatic
+sequence finish before unrelated manager work. Pardes permits compaction between
+parts, replaces prior persisted report bodies with bounded metadata only in the
+compaction request, and resumes delivery if its manager-owned compactor fails;
+durable history remains intact. It fails closed on unrelated interruption, and
+`/pardes stop` synchronously cancels every active report identity and invalidates
+pre-read lifecycle permits before manager deactivation. Restart advances the
+permit epoch, so a late pre-stop artifact read cannot create delivery or block a
+fresh retrieval. After fixes, call
+`verification_refresh({ verificationId })` so the same retained verifier checks
+the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering
 slices and when a concrete review question remains. Skip trivial documentation
 or test-only maintenance unless risk justifies it. Do not recreate verification

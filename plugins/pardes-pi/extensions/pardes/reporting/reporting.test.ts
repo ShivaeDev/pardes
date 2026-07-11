@@ -6,16 +6,12 @@ import {
   makeReporting,
   REPORT_DETAILS_MAX_CHARS,
   REPORT_EXCERPT_MAX_CHARS,
-  REPORT_EXCERPT_RENDER_MAX_CHARS,
-  REPORT_EXCERPT_TRUST_LABEL,
   REPORT_HANDOFF_NOTE_MAX_CHARS,
   REPORT_HANDOFF_RENDER_MAX_CHARS,
   REPORT_HANDOFF_TRUST_LABEL,
   REPORT_SUMMARY_MAX_CHARS,
   ReportArtifactError,
-  renderReportExcerpt,
   renderReportHandoffMessage,
-  reportExcerptMetadata,
 } from './index.ts';
 
 const createdAt = '2026-06-01T00:00:00.000Z';
@@ -126,7 +122,6 @@ describe('durable reporting use case', () => {
       totalChars: details.length,
     });
     expect(excerpt.excerpt).toBe(details.slice(0, 80));
-    expect(renderReportExcerpt(excerpt)).toContain(`[${REPORT_EXCERPT_TRUST_LABEL}]`);
   });
 
   test('rejects over-cap writes before invoking artifact persistence', async () => {
@@ -161,7 +156,63 @@ describe('durable reporting use case', () => {
     expect(reports.size).toBe(0);
   });
 
-  test('defaults to details, paginates raw characters, and renders one trust-labelled JSON-escaped excerpt', async () => {
+  test('selects details as the canonical full report, falls back to summary, and rejects retrieval mechanics', async () => {
+    const { reporting } = harness();
+    const detailed = await Effect.runPromise(
+      reporting.persist({
+        agentId: 'agent-one',
+        createdAt,
+        details: 'full details\nwith tail',
+        status: 'completed',
+        summary: 'Short summary.',
+      }),
+    );
+    const summaryOnly = await Effect.runPromise(
+      reporting.persist({
+        agentId: 'agent-two',
+        createdAt,
+        status: 'progress',
+        summary: 'Only summary.',
+      }),
+    );
+    const emptyDetails = await Effect.runPromise(
+      reporting.persist({
+        agentId: 'agent-three',
+        createdAt,
+        details: '',
+        status: 'blocked',
+        summary: 'Summary must not replace present empty details.',
+      }),
+    );
+
+    expect(await Effect.runPromise(reporting.getReport({ reportId: detailed.reportId }))).toEqual({
+      agentId: 'agent-one',
+      content: 'full details\nwith tail',
+      field: 'details',
+      reportId: detailed.reportId,
+      status: 'completed',
+      totalChars: 22,
+    });
+    expect(
+      await Effect.runPromise(reporting.getReport({ reportId: summaryOnly.reportId })),
+    ).toMatchObject({ content: 'Only summary.', field: 'summary', totalChars: 13 });
+    expect(
+      await Effect.runPromise(reporting.getReport({ reportId: emptyDetails.reportId })),
+    ).toMatchObject({ content: '', field: 'details', totalChars: 0 });
+    for (const input of [
+      { field: 'summary', reportId: detailed.reportId },
+      { maxChars: 1, reportId: detailed.reportId },
+      { offset: 1, reportId: detailed.reportId },
+      { reportId: detailed.reportId, unexpected: true },
+    ]) {
+      expect(await Effect.runPromise(reporting.getReport(input).pipe(Effect.flip))).toMatchObject({
+        _tag: 'ReportInputValidationError',
+        boundary: 'report_get',
+      });
+    }
+  });
+
+  test('defaults internal handoff excerpts to details and paginates raw characters', async () => {
     const { reporting } = harness();
     const persisted = await Effect.runPromise(
       reporting.persist({
@@ -176,8 +227,6 @@ describe('durable reporting use case', () => {
     const excerpt = await Effect.runPromise(
       reporting.getExcerpt({ maxChars: 8, offset: 5, reportId: persisted.reportId }),
     );
-    const text = renderReportExcerpt(excerpt);
-
     expect(excerpt).toEqual({
       agentId: 'agent-one',
       excerpt: 'one\n"quo',
@@ -192,25 +241,6 @@ describe('durable reporting use case', () => {
       status: 'completed',
       totalChars: 22,
     });
-    expect(text).toContain(`[${REPORT_EXCERPT_TRUST_LABEL}]`);
-    expect(text).toContain('excerpt(JSON string): "one\\n\\"quo"');
-    expect(text).toContain(
-      `next: report_get({ reportId: ${JSON.stringify(persisted.reportId)}, field: "details", offset: 13 })`,
-    );
-    expect(reportExcerptMetadata(excerpt)).toEqual({
-      agentId: 'agent-one',
-      field: 'details',
-      hasMore: true,
-      offset: 5,
-      omittedChars: 14,
-      originalChars: 22,
-      reportId: persisted.reportId,
-      returnedChars: 8,
-      shownChars: 8,
-      status: 'completed',
-      totalChars: 22,
-    });
-    expect(reportExcerptMetadata(excerpt)).not.toHaveProperty('excerpt');
   });
 
   test('falls back to summary, rejects absent requested details, and validates path-free bounded inputs', async () => {
@@ -304,7 +334,6 @@ describe('durable reporting use case', () => {
     const excerpt = await Effect.runPromise(
       reporting.getExcerpt({ maxChars: REPORT_EXCERPT_MAX_CHARS, reportId: persisted.reportId }),
     );
-    const text = renderReportExcerpt(excerpt);
     const handoff = renderReportHandoffMessage({
       excerpt,
       message: '\u0000'.repeat(REPORT_HANDOFF_NOTE_MAX_CHARS),
@@ -313,7 +342,6 @@ describe('durable reporting use case', () => {
 
     expect(excerpt.returnedChars).toBe(REPORT_EXCERPT_MAX_CHARS);
     expect(excerpt.hasMore).toBe(true);
-    expect(text.length).toBeLessThanOrEqual(REPORT_EXCERPT_RENDER_MAX_CHARS);
     expect(handoff.length).toBeLessThanOrEqual(REPORT_HANDOFF_RENDER_MAX_CHARS);
   });
 });

@@ -8,6 +8,7 @@ import {
 } from '../worker-runtime/child-profile.ts';
 import type { WorkerSupervisorEvent } from '../worker-runtime/index.ts';
 import {
+  AgentGitAuditSchema,
   type AgentRecord,
   currentVerificationTerminalReportStatus,
   MANAGER_EVENT_DETAILS_MAX_CHARS,
@@ -131,6 +132,51 @@ function verification(
 }
 
 describe('manager event schema compatibility', () => {
+  test('decodes historical Git audits and validates additive bounded provenance consistency', () => {
+    const historical = {
+      checkedAt: createdAt,
+      dirty: false,
+      status: 'succeeded',
+      trigger: 'completion',
+    } as const;
+    const provenance = {
+      attribution: 'cooperative_first_parent',
+      bounds: { maxFirstParentCommits: 2, maxPaths: 2 },
+      branchPointSha: 'a'.repeat(40),
+      firstParentNonMergeCommitCount: 1,
+      firstParentNonMergePaths: ['feature.ts'],
+      headSha: 'b'.repeat(40),
+      latestDelta: {
+        changedPaths: ['main.ts'],
+        commitSha: 'b'.repeat(40),
+        kind: 'merge_commit',
+      },
+      mergeCommitCount: 1,
+      mergePaths: ['main.ts'],
+      status: 'available',
+      totalBranchCommitCount: 2,
+      totalBranchDeltaPaths: ['feature.ts', 'main.ts'],
+    } as const;
+
+    expect(Schema.decodeUnknownSync(AgentGitAuditSchema)(historical)).toEqual(historical);
+    expect(Schema.decodeUnknownSync(AgentGitAuditSchema)({ ...historical, provenance })).toEqual({
+      ...historical,
+      provenance,
+    });
+    expect(() =>
+      Schema.decodeUnknownSync(AgentGitAuditSchema)({
+        ...historical,
+        provenance: { ...provenance, totalBranchCommitCount: 1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(AgentGitAuditSchema)({
+        ...historical,
+        provenance: { ...provenance, bounds: { ...provenance.bounds, maxPaths: 1 } },
+      }),
+    ).toThrow();
+  });
+
   test('decodes historical schema-v1 events without report pointers and additive structured report associations', () => {
     const historical: ManagerEvent = {
       createdAt,
@@ -254,7 +300,8 @@ describe('manager handoff-audit policy', () => {
       { audit: undefined, expected: '' },
       {
         audit: successfulHandoffAudit('completion', laterAt, inspection()),
-        expected: 'Git audit: 0 changed paths.',
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 0 paths.',
       },
       {
         audit: successfulHandoffAudit(
@@ -262,7 +309,8 @@ describe('manager handoff-audit policy', () => {
           laterAt,
           inspection({ changedPaths: ['one.ts'] }),
         ),
-        expected: 'Git audit: 1 changed path.',
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 1 path.',
       },
       {
         audit: successfulHandoffAudit(
@@ -270,7 +318,44 @@ describe('manager handoff-audit policy', () => {
           laterAt,
           inspection({ changedPaths: ['one.ts', 'two.ts'], dirty: true }),
         ),
-        expected: 'Git audit: 2 changed paths. Worktree is dirty.',
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 2 paths. Worktree is dirty.',
+      },
+      {
+        audit: successfulHandoffAudit(
+          'completion',
+          laterAt,
+          inspection({
+            changedPaths: ['committed.ts', 'dirty.ts'],
+            dirty: true,
+            provenance: {
+              bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+              dirtyPaths: ['dirty.ts'],
+              reason: 'dirty_worktree',
+              status: 'unavailable',
+            },
+          }),
+        ),
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (dirty worktree). Total audited change set: 2 paths; 1 dirty path. Merge context and total branch-point delta were not attributed. Worktree is dirty.',
+      },
+      {
+        audit: successfulHandoffAudit(
+          'completion',
+          laterAt,
+          inspection({
+            changedPaths: ['dirty.ts'],
+            dirty: true,
+            provenance: {
+              bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+              dirtyPaths: ['dirty.ts'],
+              reason: 'total_diff_unavailable',
+              status: 'unavailable',
+            },
+          }),
+        ),
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (bounded total diff failed). Total audited change set unavailable; 1 known live path. Merge context was not attributed. Worktree is dirty.',
       },
       {
         audit: failedHandoffAudit('completion', laterAt, new Error('inspection unavailable')),
@@ -279,6 +364,119 @@ describe('manager handoff-audit policy', () => {
     ];
 
     for (const { audit, expected } of cases) expect(handoffAuditSuffix(audit)).toBe(expected);
+  });
+
+  test('leads completion wording with feature evidence while separating merge context, total delta, and latest delta', () => {
+    const baselineSha = 'a'.repeat(40);
+    const headSha = 'b'.repeat(40);
+    const noMerge = successfulHandoffAudit(
+      'completion',
+      laterAt,
+      inspection({
+        changedPaths: ['src/feature-a.ts', 'src/feature-b.ts'],
+        headSha,
+        provenance: {
+          attribution: 'cooperative_first_parent',
+          bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+          branchPointSha: baselineSha,
+          firstParentNonMergeCommitCount: 2,
+          firstParentNonMergePaths: ['src/feature-a.ts', 'src/feature-b.ts'],
+          headSha,
+          latestDelta: {
+            changedPaths: ['src/feature-b.ts'],
+            commitSha: headSha,
+            kind: 'first_parent_non_merge',
+          },
+          mergeCommitCount: 0,
+          mergePaths: [],
+          status: 'available',
+          totalBranchCommitCount: 2,
+          totalBranchDeltaPaths: ['src/feature-a.ts', 'src/feature-b.ts'],
+        },
+      }),
+    );
+    const mergeHeavy = successfulHandoffAudit(
+      'completion',
+      laterAt,
+      inspection({
+        changedPaths: ['src/feature.ts', 'src/main-a.ts', 'src/main-b.ts'],
+        headSha,
+        provenance: {
+          attribution: 'cooperative_first_parent',
+          bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+          branchPointSha: baselineSha,
+          firstParentNonMergeCommitCount: 1,
+          firstParentNonMergePaths: ['src/feature.ts'],
+          headSha,
+          latestDelta: {
+            changedPaths: ['src/main-b.ts'],
+            commitSha: headSha,
+            kind: 'merge_commit',
+          },
+          mergeCommitCount: 2,
+          mergePaths: ['src/main-a.ts', 'src/main-b.ts'],
+          status: 'available',
+          totalBranchCommitCount: 3,
+          totalBranchDeltaPaths: ['src/feature.ts', 'src/main-a.ts', 'src/main-b.ts'],
+        },
+      }),
+    );
+
+    const noMergeText = handoffAuditSuffix(noMerge);
+    expect(noMergeText).toMatch(
+      /^Git audit — worker-branch non-merge change candidates: 2 paths\/2 commits\./,
+    );
+    expect(noMergeText).toContain('Merge context: 0 first-parent-diff paths/0 merge commits');
+    expect(noMergeText).toContain(
+      `Total branch-point delta: 2 paths/2 first-parent commits ${baselineSha}..${headSha}`,
+    );
+    expect(noMergeText).toContain(`Latest delta: first_parent_non_merge ${headSha}; 1 path.`);
+
+    const mergeText = handoffAuditSuffix(mergeHeavy);
+    expect(mergeText).toMatch(
+      /^Git audit — worker-branch non-merge change candidates: 1 path\/1 commit\./,
+    );
+    expect(mergeText).toContain('Merge context: 2 first-parent-diff paths/2 merge commits');
+    expect(mergeText).toContain('exact conflict-resolution ownership not inferred');
+    expect(mergeText).toContain(`Latest delta: merge_commit ${headSha}; 1 path.`);
+    expect(`${noMergeText} ${mergeText}`).not.toMatch(/worker feature|worker-authored|authored by/);
+  });
+
+  test('degrades bounded provenance explicitly and keeps completion attention bounded', () => {
+    const audit = successfulHandoffAudit(
+      'completion',
+      laterAt,
+      inspection({
+        changedPaths: Array.from({ length: 513 }, (_, index) => `src/path-${index}.ts`),
+        provenance: {
+          bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+          dirtyPaths: [],
+          reason: 'bounds_exceeded',
+          status: 'unavailable',
+        },
+      }),
+    );
+    const suffix = handoffAuditSuffix(audit);
+    const projected = workerEventSummary(
+      {
+        agentId: 'agent-one',
+        status: 'completed',
+        summary: `Completed bounded fixture. ${'x'.repeat(2_000)}`,
+        type: 'report',
+      },
+      persistedReport,
+      audit,
+    );
+
+    expect(suffix).toBe(
+      'Git audit: worker-branch non-merge change candidates unavailable (bounds_exceeded). Total audited change set: 513 paths. Merge context was not attributed.',
+    );
+    expect(projected?.summary).toContain(
+      'worker-branch non-merge change candidates unavailable (bounds_exceeded)',
+    );
+    expect(projected?.summary).toContain('Total audited change set: 513 paths');
+    expect(projected?.summary.length).toBeLessThanOrEqual(900);
+    expect(projected?.summary).toContain('canonical full report available');
   });
 
   test('renders only failed report-persistence suffixes', () => {
@@ -404,7 +602,8 @@ describe('worker-event summary policy', () => {
           actionable: true,
           reportPreviewChars: { omittedChars: 0, originalChars: 5, shownChars: 5 },
           reportPreviewTruncated: false,
-          summary: 'agent-one: Done. Git audit: 2 changed paths. Worktree is dirty.',
+          summary:
+            'agent-one: Done. Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 2 paths. Worktree is dirty.',
           type: 'agent_report_completed',
         },
         persistence: persistedReport,
@@ -508,7 +707,7 @@ describe('worker-event summary policy', () => {
     });
     expect(projected?.summary).not.toContain('report-one');
     expect(projected?.summary).toContain(
-      '[omitted reason=report_summary_preview_limit originalChars=241 shownChars=240 omittedChars=1; durable report available via associated reportId and paginated report_get]',
+      '[omitted reason=report_summary_preview_limit originalChars=241 shownChars=240 omittedChars=1; canonical full report available via one report_get({ reportId }) call]',
     );
   });
 

@@ -97,7 +97,7 @@ export function registerAgentDomainTools(pi: ExtensionAPI, manager: ManagerContr
 
   registerPardesTool(pi, {
     description:
-      'Inspect one Pardes worker through a bounded projection. Defaults to a concise summary; use audit or runtime only when needed. Retrieve durable report details separately with report_get.',
+      "Inspect one Pardes worker through a bounded projection. Defaults to a concise summary; use audit or runtime only when needed. Retrieve a durable report's complete canonical body separately with one report_get({ reportId }) call.",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const mode = params.mode ?? 'summary';
       const result = await runTool(manager.agentStatus(params.agentId, ctx, mode === 'audit'));

@@ -91,7 +91,7 @@ refresh same-tier numeric counts.
 The manager-visible tools are grouped by purpose:
 
 ```text
-question
+question · feedback
 pardes_status · inbox_get · inbox_acknowledge · await_user_feedback
 workstream_create · workstream_list · workstream_get · workstream_complete
 report_get
@@ -117,6 +117,33 @@ publication. Pardes never merges autonomously.
 
 Structured state is written beneath `~/.pi/agent/pardes/`. Override that root
 for development or tests with `PARDES_PI_STATE_DIR`.
+
+## Frustration feedback
+
+The model-facing `feedback({ text })` tool is available to managers, writing
+workers, and advisory verifiers. It is deliberately broad: use it for anything
+about Pardes that is frustrating, confusing, broken, annoying, or wasteful, not
+only harness bugs. The tool accepts only free-form text. Pardes adds bounded
+provenance (time, id, role and available session/manager/agent/workstream,
+repository, verifier, and version identities); it never automatically captures
+logs, files, environment values, or secrets.
+
+Each submission is an immutable atomic JSON record in the global registry.
+Addressed state is stored separately so triage never rewrites the submission.
+The installed package exposes a human CLI:
+
+```bash
+pardes-feedback help
+pardes-feedback list --addressed no
+pardes-feedback show <feedback-id>
+pardes-feedback watch --cursor triage
+pardes-feedback address <feedback-id>
+```
+
+From a source checkout, use `bun run feedback -- <command>`. Watch cursors use
+atomic per-entry receipts, so concurrent scans and restarted watchers do not log
+the same entry twice. CLI rendering treats feedback text as untrusted and
+escapes terminal controls.
 
 ## Development validation
 

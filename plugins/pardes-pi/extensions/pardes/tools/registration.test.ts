@@ -107,7 +107,10 @@ describe('Pardes interactive tool-call previews', () => {
     registerWorkstreamTools(pi, manager);
     registerAgentTools(pi, manager);
 
-    expect(tools).toHaveLength(26);
+    expect(tools).toHaveLength(27);
+    expect(tools.map((tool) => tool.name)).toContain('feedback');
+    const feedback = requiredValue(tools.find((tool) => tool.name === 'feedback'));
+    expect((feedback.parameters as unknown as { required: string[] }).required).toEqual(['text']);
     for (const tool of tools) {
       expect(tool.executionMode, tool.name).toBe('sequential');
       expect(typeof tool.renderCall, tool.name).toBe('function');
@@ -126,6 +129,7 @@ describe('Pardes interactive tool-call previews', () => {
           reportId: 'report-123',
           sourceAgentId: 'agent-123',
           task: 'private task',
+          text: 'private frustration',
           title: 'title',
           verificationId: 'verify-123',
           workstreamId: 'ws-123',

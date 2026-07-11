@@ -1,6 +1,7 @@
-export const WORKER_TOOLS = 'read,bash,edit,write,grep,find,ls,report_to_manager,ask_manager';
+export const WORKER_TOOLS =
+  'read,bash,edit,write,grep,find,ls,feedback,report_to_manager,ask_manager';
 export const VERIFIER_TOOLS =
-  'read,bash,grep,find,ls,verification_evidence,report_to_manager,ask_manager';
+  'read,bash,grep,find,ls,feedback,verification_evidence,report_to_manager,ask_manager';
 
 // Calibrated mirror of reporting write policy. Keep these literals inside the
 // intentionally narrow immutable child-runtime snapshot and cover alignment in tests.

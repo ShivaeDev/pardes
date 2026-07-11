@@ -7,6 +7,7 @@ import {
   registerInboxGetTool,
   registerPardesStatusTool,
 } from './control-plane.ts';
+import { registerManagerFeedbackTool } from './feedback.ts';
 import { registerHostedDrilldownTools } from './hosted-drilldown.ts';
 import { registerPullRequestTools } from './pull-requests.ts';
 import { registerReportTools } from './reports.ts';
@@ -39,6 +40,7 @@ export { registerQuestionTool } from './question.ts';
 export { registerPullRequestTools };
 
 export function registerWorkstreamTools(pi: ExtensionAPI, manager: ManagerController): void {
+  registerManagerFeedbackTool(pi, manager);
   registerPardesStatusTool(pi, manager);
   registerWorkstreamDomainTools(pi, manager);
   registerReportTools(pi, manager);

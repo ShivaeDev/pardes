@@ -14,6 +14,12 @@ export const CHILD_RUNTIME_INPUTS = [
   CHILD_EXTENSION_INPUT,
   'worker-runtime/child-profile.ts',
   'worker-runtime/child-tool-call-preview.ts',
+  'feedback/cli.ts',
+  'feedback/errors.ts',
+  'feedback/index.ts',
+  'feedback/schemas.ts',
+  'feedback/store.ts',
+  'feedback/tool.ts',
 ] as const;
 
 export type PluginTreeIdentityIssue =

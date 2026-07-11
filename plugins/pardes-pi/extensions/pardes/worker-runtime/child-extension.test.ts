@@ -243,6 +243,7 @@ describe('verifier child profile', () => {
         },
       } as unknown as ExtensionAPI);
       expect(tools.map((tool) => tool.name)).toEqual([
+        'feedback',
         'verification_evidence',
         'report_to_manager',
         'ask_manager',
@@ -474,6 +475,7 @@ describe('worker child reporting tool rendering', () => {
       } as unknown as Theme;
       const argsByTool = {
         ask_manager: { context: 'private context', question: 'private question' },
+        feedback: { text: 'private frustration' },
         report_to_manager: {
           details: 'private details',
           status: 'progress',
@@ -481,7 +483,11 @@ describe('worker child reporting tool rendering', () => {
         },
       } as const;
 
-      expect(tools.map((tool) => tool.name)).toEqual(['report_to_manager', 'ask_manager']);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'feedback',
+        'report_to_manager',
+        'ask_manager',
+      ]);
       const reportParameters = requiredValue(
         tools.find((tool) => tool.name === 'report_to_manager'),
       ).parameters as unknown as ToolParametersPreview;

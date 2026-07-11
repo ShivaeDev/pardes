@@ -7,6 +7,12 @@ import { fileURLToPath } from 'node:url';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import {
+  childFeedbackSourceFromEnvironment,
+  executeFeedbackTool,
+  FEEDBACK_TOOL_DESCRIPTION,
+  feedbackToolParameters,
+} from '../feedback/index.ts';
+import {
   CHILD_QUESTION_CONTEXT_MAX_CHARS,
   CHILD_QUESTION_MAX_CHARS,
   CHILD_REPORT_DETAILS_MAX_CHARS,
@@ -379,9 +385,57 @@ export default function pardesWorker(pi: ExtensionAPI): void {
     if (reason) return { block: true, reason };
   });
 
-  if (profile.type === 'verifier') registerVerifierTools(pi, root, profile);
-
   const verifier = profile.type === 'verifier';
+  pi.registerTool({
+    description: FEEDBACK_TOOL_DESCRIPTION,
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      try {
+        const recorded = await executeFeedbackTool(
+          params.text,
+          childFeedbackSourceFromEnvironment(
+            process.env,
+            verifier ? 'advisory_verifier' : 'writer',
+          ),
+          ctx,
+        );
+        return text(`Feedback recorded as ${recorded.id}.`, {
+          pardesFeedback: { id: recorded.id, type: 'recorded' },
+        });
+      } catch {
+        throw new Error('Pardes could not record feedback in global state.');
+      }
+    },
+    label: 'Record Feedback',
+    name: 'feedback',
+    parameters: feedbackToolParameters,
+    promptGuidelines: [
+      'Use feedback to preserve anything about Pardes that is frustrating, confusing, broken, annoying, or wasteful; do not wait for a harness-specific bug or force a category.',
+    ],
+    promptSnippet:
+      'Record any frustrating, confusing, broken, annoying, or wasteful Pardes experience',
+    renderCall(args, theme, context) {
+      return renderChildToolCall(
+        theme,
+        'feedback',
+        [{ mode: 'length', name: 'text', value: args.text }],
+        !context.isPartial,
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderChildToolResult(
+        theme,
+        'feedback',
+        [{ mode: 'length', name: 'text', value: context.args.text }],
+        result,
+        options,
+        context,
+      );
+    },
+    renderShell: 'self',
+  });
+
+  if (verifier) registerVerifierTools(pi, root, profile);
+
   const reportStatus = Type.Union(
     [Type.Literal('progress'), Type.Literal('completed'), Type.Literal('blocked')],
     {

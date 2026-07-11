@@ -33,6 +33,10 @@ export interface WorkerCompactionCompletion {
 
 export interface WorkerSpawnInput {
   readonly agentId: string;
+  readonly managerId?: string;
+  readonly repositoryKey?: string;
+  readonly workstreamId?: string;
+  readonly verificationId?: string;
   readonly cwd: string;
   readonly sessionDir: string;
   readonly sessionFile?: string;

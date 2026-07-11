@@ -234,6 +234,8 @@ export class ManagedWorktrees extends Context.Service<ManagedWorktrees, ManagedW
 
 interface WorktreeServiceOptions {
   readonly lockRetryDelay?: Duration.Input;
+  /** Narrow command adapter for published-review tracking. */
+  readonly publishedReviewBranchGit?: typeof git;
   readonly lockRetries?: number;
   readonly provenanceGitMaxBufferBytes?: number;
   readonly provenanceGitTimeoutMs?: number;
@@ -680,6 +682,7 @@ export function makeManagedWorktreeService(
     maxBuffer: WORKTREE_PROVENANCE_GIT_MAX_BUFFER_BYTES,
     timeoutMs: WORKTREE_PROVENANCE_GIT_TIMEOUT_MS,
   };
+  const publishedReviewBranchGit = options.publishedReviewBranchGit ?? git;
   const provenanceUnavailable = (
     reason: WorktreeCommitProvenanceUnavailableReason,
     dirtyPaths: ReadonlyArray<string> = [],
@@ -895,11 +898,14 @@ export function makeManagedWorktreeService(
         );
         if (!FULL_COMMIT_SHA.test(input.headSha))
           return yield* invalid('headSha', 'must be an immutable commit SHA');
-        yield* git(lease.path, ['check-ref-format', `refs/heads/${input.headBranch}`]);
+        yield* publishedReviewBranchGit(lease.path, [
+          'check-ref-format',
+          `refs/heads/${input.headBranch}`,
+        ]);
 
         const remote = 'origin' as const;
         const remoteRef = `refs/remotes/${remote}/${input.headBranch}`;
-        const observedRemoteRef = yield* git(
+        const observedRemoteRef = yield* publishedReviewBranchGit(
           lease.path,
           ['show-ref', '--verify', '--hash', remoteRef],
           routineLeaseValidationGitOptions,
@@ -908,7 +914,7 @@ export function makeManagedWorktreeService(
           Effect.catch(() => Effect.succeed(undefined)),
         );
         if (observedRemoteRef !== input.headSha) {
-          yield* git(lease.path, [
+          yield* publishedReviewBranchGit(lease.path, [
             'update-ref',
             '--no-deref',
             remoteRef,
@@ -916,7 +922,7 @@ export function makeManagedWorktreeService(
             observedRemoteRef ?? '',
           ]);
         }
-        const materializedRemoteRef = (yield* git(
+        const materializedRemoteRef = (yield* publishedReviewBranchGit(
           lease.path,
           ['rev-parse', '--verify', `${remoteRef}^{commit}`],
           routineLeaseValidationGitOptions,
@@ -928,7 +934,7 @@ export function makeManagedWorktreeService(
 
         const expectedRemoteRef = `refs/heads/${input.headBranch}`;
         const readUpstream = Effect.fnUntraced(function* () {
-          const configured = (yield* git(
+          const configured = (yield* publishedReviewBranchGit(
             lease.path,
             [
               'for-each-ref',
@@ -948,7 +954,7 @@ export function makeManagedWorktreeService(
         const before = yield* readUpstream();
         const alreadyConfigured = before.remote === remote && before.ref === expectedRemoteRef;
         if (!alreadyConfigured) {
-          yield* git(lease.path, [
+          yield* publishedReviewBranchGit(lease.path, [
             'branch',
             `--set-upstream-to=${remote}/${input.headBranch}`,
             '--',
@@ -958,7 +964,7 @@ export function makeManagedWorktreeService(
         const after = yield* readUpstream();
         if (after.remote !== remote || after.ref !== expectedRemoteRef)
           return yield* invalidLease('published review branch upstream could not be verified');
-        const verifiedRemoteRef = (yield* git(
+        const verifiedRemoteRef = (yield* publishedReviewBranchGit(
           lease.path,
           ['rev-parse', '--verify', `${remoteRef}^{commit}`],
           routineLeaseValidationGitOptions,

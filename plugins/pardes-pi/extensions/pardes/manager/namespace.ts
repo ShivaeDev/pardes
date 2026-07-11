@@ -49,6 +49,14 @@ export const validateManagerStateNamespace = Effect.fnUntraced(function* (
   ) {
     return yield* invalidManagedState('repository namespace does not match its activation');
   }
+  if (
+    Object.entries(state.workstreamCompletionIntents).some(
+      ([workstreamId, intent]) => intent.workstreamId !== workstreamId,
+    )
+  )
+    return yield* invalidManagedState(
+      'workstream completion intent namespace does not match its owner',
+    );
 });
 
 export function managedLeaseOwner(

@@ -100,6 +100,7 @@ export function makeVerificationProvisioner(
       const verifierAgent: AgentRecord = {
         createdAt: timestamp,
         id: verifierAgentId,
+        lifecycleGeneration: 1,
         model,
         role: 'verifier',
         sessionDir,
@@ -402,6 +403,7 @@ export function makeVerificationProvisioner(
           const {
             lastError: _lastError,
             latestReport: _agentLatestReport,
+            terminalReportAwaitingIdle: _terminalReportAwaitingIdle,
             ...withoutOldAgentEvidence
           } = agent;
           return Effect.succeed([
@@ -412,6 +414,7 @@ export function makeVerificationProvisioner(
                 ...state.agents,
                 [verifierAgent.id]: {
                   ...withoutOldAgentEvidence,
+                  lifecycleGeneration: attempt,
                   status: 'starting',
                   updatedAt: refreshedAt,
                 },

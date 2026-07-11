@@ -58,6 +58,10 @@ interface WorkerEventProjection {
 }
 
 interface WorkerEventFollowUp {
+  readonly consumeWorkstreamCompletionIntent?: {
+    readonly agentId: string;
+    readonly lifecycleGeneration: number | undefined;
+  };
   readonly retryMergedRetirementForIdleAgent?: {
     readonly agentId: string;
     readonly workstreamId: string;
@@ -121,6 +125,10 @@ export interface WorkerSupervisorEventCoordinatorCallbacks {
   readonly retryResolvedVerificationRetirementForIdleVerifier: (
     agentId: string,
   ) => Effect.Effect<boolean, unknown>;
+  readonly consumeWorkstreamCompletionIntent?: (
+    agentId: string,
+    lifecycleGeneration: number | undefined,
+  ) => Effect.Effect<void, unknown>;
 }
 
 export interface WorkerSupervisorEventCoordinatorOptions {
@@ -157,13 +165,25 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
     const persistedVerification = Object.values(namespace.state.verifications).find(
       (verification) => verification.verifierAgentId === workerEvent.agentId,
     );
+    const persistedAgent = namespace.state.agents[workerEvent.agentId];
+    if (!persistedAgent) return;
+    if (
+      persistedAgent.lifecycleGeneration !== undefined &&
+      workerEvent.lifecycleGeneration !== persistedAgent.lifecycleGeneration
+    )
+      return;
+    if (
+      (persistedAgent.status === 'stopped' || persistedAgent.status === 'crashed') &&
+      workerEvent.type === 'status' &&
+      workerEvent.status !== 'stopped' &&
+      workerEvent.status !== 'crashed'
+    )
+      return;
     if (
       persistedVerification !== undefined &&
       workerEvent.lifecycleGeneration !== currentVerificationAttempt(persistedVerification).attempt
     )
       return;
-    const persistedAgent = namespace.state.agents[workerEvent.agentId];
-    if (!persistedAgent) return;
     if (workerEvent.type === 'telemetry') {
       const previousRuntime = liveRuntimes.get(workerEvent.agentId);
       liveRuntimes.set(workerEvent.agentId, workerEvent.runtime);
@@ -308,10 +328,30 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
                 updatedAt: timestamp,
               }
             : agent;
-      const auditedAgent = applyHandoffAudit(transitioned, audit);
+      const clearsTerminalIdleHandoff =
+        workerEvent.type === 'status' ||
+        workerEvent.type === 'unexpected_exit' ||
+        workerEvent.type === 'report';
+      const { terminalReportAwaitingIdle: _terminalReportAwaitingIdle, ...withoutTerminalHandoff } =
+        transitioned;
+      const handoffAgent = clearsTerminalIdleHandoff ? withoutTerminalHandoff : transitioned;
+      const auditedAgent = applyHandoffAudit(handoffAgent, audit);
       const nextAgent =
         reportPersistence?.status === 'persisted' && reportPersistence.reference
-          ? { ...auditedAgent, latestReport: reportPersistence.reference }
+          ? {
+              ...auditedAgent,
+              latestReport: reportPersistence.reference,
+              ...(workerEvent.type === 'report' &&
+              workerEvent.status !== 'progress' &&
+              workerEvent.lifecycleGeneration !== undefined
+                ? {
+                    terminalReportAwaitingIdle: {
+                      lifecycleGeneration: workerEvent.lifecycleGeneration,
+                      reportId: reportPersistence.reportId,
+                    },
+                  }
+                : {}),
+            }
           : auditedAgent;
       const duplicateAttention = isDuplicateWorkerAttention(
         state.inbox,
@@ -371,6 +411,14 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
     const safelyRetiredAfterIdle =
       becameIdle && namespace.state.agents[workerEvent.agentId]?.status === 'stopped';
     return {
+      ...(workerEvent.type === 'status' && workerEvent.status === 'idle'
+        ? {
+            consumeWorkstreamCompletionIntent: {
+              agentId: persistedAgent.id,
+              lifecycleGeneration: workerEvent.lifecycleGeneration,
+            },
+          }
+        : {}),
       ...(becameIdle
         ? {
             retryMergedRetirementForIdleAgent: {
@@ -405,6 +453,11 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
 
   const runFollowUp = Effect.fnUntraced(function* (followUp: WorkerEventFollowUp | undefined) {
     if (!followUp) return;
+    if (followUp.consumeWorkstreamCompletionIntent && callbacks.consumeWorkstreamCompletionIntent)
+      yield* callbacks.consumeWorkstreamCompletionIntent(
+        followUp.consumeWorkstreamCompletionIntent.agentId,
+        followUp.consumeWorkstreamCompletionIntent.lifecycleGeneration,
+      );
     if (followUp.retryMergedRetirementForIdleAgent) {
       yield* reviewGates.retryMergedRetirementForIdleAgent(
         followUp.retryMergedRetirementForIdleAgent.agentId,

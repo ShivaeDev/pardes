@@ -287,10 +287,37 @@ export function makeAgentAttachmentLifecycleCoordinator(
 
   const handleRevivePersistenceFailure = Effect.fnUntraced(function* (
     agentId: string,
+    fallbackStatus: AgentRecord['status'],
     cause: Cause.Cause<unknown>,
   ) {
     yield* stopUnpersistedRuntime(agentId);
     const timestamp = yield* nowIso;
+    yield* namespace.store
+      .mutate((state) => {
+        const currentAgent = state.agents[agentId];
+        if (!currentAgent) return Effect.succeed([undefined, state] as const);
+        return Effect.succeed([
+          undefined,
+          {
+            ...state,
+            agents: {
+              ...state.agents,
+              [agentId]: { ...currentAgent, status: fallbackStatus, updatedAt: timestamp },
+            },
+          },
+        ] as const);
+      })
+      .pipe(Effect.catch(() => Effect.void));
+    const currentAgent = namespace.state.agents[agentId];
+    if (currentAgent)
+      namespace.state = {
+        ...namespace.state,
+        agents: {
+          ...namespace.state.agents,
+          [agentId]: { ...currentAgent, status: fallbackStatus, updatedAt: timestamp },
+        },
+      };
+    callbacks.render();
     yield* callbacks.appendEventSafely(
       makeEvent(
         'agent_revive_persist_failed',
@@ -336,6 +363,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
         id: agentId,
         ...(input.title === undefined ? {} : { title: input.title }),
         createdAt: timestamp,
+        lifecycleGeneration: 1,
         model,
         role: 'worker',
         sessionDir,
@@ -381,6 +409,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
         .spawn({
           agentId,
           cwd: lease.path,
+          lifecycleGeneration: agent.lifecycleGeneration,
           model,
           sessionDir,
           sessionName: agentSessionName(input.workstreamId, agentId, input.title),
@@ -467,17 +496,64 @@ export function makeAgentAttachmentLifecycleCoordinator(
         });
       yield* worktrees.inspect(managedLeaseOwner(namespace, agentId), agent.worktree);
       const startingAt = yield* nowIso;
+      const lifecycleGeneration = (agent.lifecycleGeneration ?? 0) + 1;
+      const cancelledIntent = namespace.state.workstreamCompletionIntents[
+        agent.workstreamId
+      ]?.pendingAgents.some((pending) => pending.agentId === agentId);
+      yield* namespace.store.mutate((state) => {
+        const currentAgent = state.agents[agentId] ?? agent;
+        const workstreamCompletionIntents = { ...state.workstreamCompletionIntents };
+        if (
+          workstreamCompletionIntents[agent.workstreamId]?.pendingAgents.some(
+            (pending) => pending.agentId === agentId,
+          )
+        )
+          delete workstreamCompletionIntents[agent.workstreamId];
+        const {
+          latestReport: _latestReport,
+          lastError: _lastError,
+          terminalReportAwaitingIdle: _terminalReportAwaitingIdle,
+          ...withoutPriorOutcome
+        } = currentAgent;
+        return Effect.succeed([
+          undefined,
+          {
+            ...state,
+            agents: {
+              ...state.agents,
+              [agentId]: {
+                ...withoutPriorOutcome,
+                lifecycleGeneration,
+                status: 'starting',
+                updatedAt: startingAt,
+              },
+            },
+            workstreamCompletionIntents,
+          },
+        ] as const);
+      });
+      if (cancelledIntent)
+        yield* callbacks.appendEventSafely(
+          makeEvent(
+            'workstream_completion_intent_cancelled',
+            `Cancelled deferred completion for ${agent.workstreamId}: ${agentId} advanced to lifecycle generation ${lifecycleGeneration}.`,
+            startingAt,
+            { agentId, workstreamId: agent.workstreamId },
+          ),
+        );
       yield* callbacks.appendEventSafely(
         makeEvent(
           'agent_revive_started',
-          `Reviving ${agentId} from ${agent.sessionFile}`,
+          `Reviving ${agentId} from ${agent.sessionFile} as lifecycle generation ${lifecycleGeneration}`,
           startingAt,
         ),
       );
+      yield* callbacks.refresh(ctx);
       const runtimeResult = yield* workers
         .spawn({
           agentId,
           cwd: agent.worktree.path,
+          lifecycleGeneration,
           model: agent.model,
           sessionDir: agent.sessionDir,
           sessionFile: agent.sessionFile,
@@ -490,13 +566,27 @@ export function makeAgentAttachmentLifecycleCoordinator(
       if (Exit.isFailure(runtimeResult)) {
         const failedAt = yield* nowIso;
         const error = Cause.squash(runtimeResult.cause);
+        yield* namespace.store.mutate((state) => {
+          const currentAgent = state.agents[agentId] ?? agent;
+          return Effect.succeed([
+            undefined,
+            {
+              ...state,
+              agents: {
+                ...state.agents,
+                [agentId]: { ...currentAgent, status: agent.status, updatedAt: failedAt },
+              },
+            },
+          ] as const);
+        });
         yield* callbacks.appendEventSafely(
           makeEvent(
             'agent_revive_failed',
-            `Failed to revive ${agentId}: ${formatPardesError(error)}`,
+            `Failed to revive ${agentId} as lifecycle generation ${lifecycleGeneration}: ${formatPardesError(error)}`,
             failedAt,
           ),
         );
+        yield* callbacks.refresh(ctx);
         return yield* Effect.failCause(runtimeResult.cause);
       }
       const runtime = runtimeResult.value;
@@ -524,7 +614,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
         })
         .pipe(Effect.exit);
       if (Exit.isFailure(persistResult)) {
-        yield* handleRevivePersistenceFailure(agentId, persistResult.cause);
+        yield* handleRevivePersistenceFailure(agentId, agent.status, persistResult.cause);
         return yield* Effect.failCause(persistResult.cause);
       }
       yield* callbacks.appendEventSafely(

@@ -574,6 +574,15 @@ describe('Pardes model-visible tools', () => {
       agents: { [agentZ.id]: agentZ, [agentA.id]: agentA },
       inbox,
       pullRequests: { [reviewZ.id]: reviewZ, [reviewA.id]: reviewA },
+      workstreamCompletionIntents: {
+        [active.id]: {
+          pendingAgents: [
+            { agentId: agentA.id, lifecycleGeneration: 1, reportId: 'report-terminal' },
+          ],
+          requestedAt: createdAt,
+          workstreamId: active.id,
+        },
+      },
       workstreams: { [active.id]: active },
     };
     const manager = {
@@ -593,21 +602,22 @@ describe('Pardes model-visible tools', () => {
     const text = result.content[0]?.text;
     const lines = text.split('\n');
 
-    expect(lines.slice(0, 5)).toEqual([
+    expect(lines.slice(0, 6)).toEqual([
       'pardes manager-12345678 · revision 0',
       'workstreams: 1 active · 0 planned · 0 complete · 0 cancelled',
       'workers: 2 running · 0 idle · 0 starting · 0 crashed · 2 warnings',
       'review gates: 2 open · 2 attention · advisory verifications: 0 current · 0 stale · inbox: 2 pending',
+      'completion intents: 1 pending · 1 generation-owned terminal child awaiting authoritative idle',
       'attention index: 6 signals · first 5 shown · drill down: inbox | reviews(attention) | agents(warnings)',
     ]);
-    expect(lines.slice(5, 10)).toEqual([
+    expect(lines.slice(6, 11)).toEqual([
       '! inbox event-z [discussion_feedback] · judge first: inbox_get({ eventId })',
       '! inbox redacted-event [agent_question] · judge first: inbox_get({ eventId })',
       '! review #41 [open] · ws-active · agent-a · ⚠ ci:failing',
       '! review #42 [open] · ws-active · agent-z · ⚠ merge:conflicting',
       '! worker agent-a [running] · ws-active · ⚠ dirty worktree',
     ]);
-    expect(lines[10]).toBe('… +1 more attention signal omitted (1 worker)');
+    expect(lines[11]).toBe('… +1 more attention signal omitted (1 worker)');
     expect(lines.filter((line) => line.startsWith('! '))).toHaveLength(5);
     expect(text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
     expect(text).not.toContain('/tmp');
@@ -3375,7 +3385,25 @@ describe('Pardes model-visible tools', () => {
           queuedSuffixCount: 1,
         }),
       completeWorkstream: (workstreamId: string) =>
-        Effect.succeed({ id: workstreamId, status: 'complete' }),
+        Effect.succeed(
+          workstreamId === 'ws-deferred'
+            ? {
+                completionIntent: {
+                  pendingAgents: [
+                    {
+                      agentId: 'agent-one',
+                      lifecycleGeneration: 1,
+                      reportId: 'report-one',
+                    },
+                  ],
+                  requestedAt: '2026-01-01T00:00:00.000Z',
+                  workstreamId,
+                },
+                id: workstreamId,
+                status: 'active',
+              }
+            : { id: workstreamId, status: 'complete' },
+        ),
     } as unknown as ManagerController;
     registerWorkstreamTools(pi, manager);
 
@@ -3387,6 +3415,17 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(completed.content[0]?.text).toBe('Completed workstream ws-1.');
+
+    const deferred = await requiredValue(tools.get('workstream_complete')).execute(
+      'call-deferred',
+      { workstreamId: 'ws-deferred' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(deferred.content[0]?.text).toBe(
+      'Deferred workstream ws-deferred completion until 1 generation-owned terminal child reaches an authoritative idle edge.',
+    );
 
     const acknowledged = await requiredValue(tools.get('inbox_acknowledge')).execute(
       'call-2',

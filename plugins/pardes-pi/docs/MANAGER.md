@@ -82,6 +82,14 @@ advisory verification. Do not reproduce publication checks with shell commands
 or manufacture rebase work because remote `main` advanced. Keep unrelated
 anomalies and post-merge activation separate unless they block safe publication.
 
+When explicit `workstream_complete` lands after a terminal report is durable but
+before that child emits its authoritative idle edge, Pardes may return a bounded
+generation-owned deferred intent. Do not retry or infer idle from the report;
+Pardes consumes the intent automatically after fresh idle safety checks. Inspect
+`pardes_status()` only when later orientation is needed. Busy or nonterminal
+children, queued work, changed lifecycle ownership, and unresolved open review
+gates continue to fail closed.
+
 ## Durable attention
 
 After durable inbox delivery, inspect `pardes_status(view="inbox")`. Use

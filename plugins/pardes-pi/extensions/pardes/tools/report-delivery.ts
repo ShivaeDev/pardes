@@ -184,13 +184,17 @@ export class ReportDeliveryCoordinator {
   }
 
   observeCompactionStart(): void {
-    if (!this.active) return;
+    const active = this.active;
+    if (!active) return;
+    const deliveryIdentity = active.deliveryId;
     this.compactionInProgress = true;
     this.cancelScheduledDispatch();
     this.cancelCompactionTimeout?.();
     this.cancelCompactionTimeout = this.scheduler.schedule(
       REPORT_DELIVERY_COMPACTION_TIMEOUT_MS,
-      () => this.clear(),
+      () => {
+        if (this.active?.deliveryId === deliveryIdentity && this.compactionInProgress) this.clear();
+      },
     );
   }
 

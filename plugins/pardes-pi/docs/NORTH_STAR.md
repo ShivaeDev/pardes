@@ -209,7 +209,9 @@ Manager-visible retrieval is opt-in by path-free report ID, automatically select
 through trust-labelled, JSON-escaped, bounded ordered settlement runs without
 model-managed pagination. A delivery never uses Pi's shared follow-up queue:
 unrelated input cancels its exact in-memory identity rather than interleaving, and
-reload or shutdown cancels every not-yet-dispatched part.
+reload or shutdown cancels every not-yet-dispatched part. Explicit manager stop
+synchronously retires the whole delivery identity—including scheduled, in-flight,
+and compaction-held phases—before deactivation or success notification.
 
 Wake handling has three distinct layers:
 

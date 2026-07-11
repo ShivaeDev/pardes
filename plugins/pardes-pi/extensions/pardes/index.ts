@@ -1,4 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+} from '@earendil-works/pi-coding-agent';
 import { Key } from '@earendil-works/pi-tui';
 import { Effect } from 'effect';
 import {
@@ -8,12 +12,13 @@ import {
   queueManagerGuidance,
   registerManagerCompactionStrategy,
 } from './manager/index.ts';
-import { registerManagerPresentation } from './presentation/index.ts';
+import { type ManagerPresentation, registerManagerPresentation } from './presentation/index.ts';
 import {
   registerAgentTools,
   registerQuestionTool,
   registerWorkstreamTools,
 } from './tools/index.ts';
+import type { ReportDeliveryCoordinator } from './tools/report-delivery.ts';
 
 export function isNormalUserInputSource(source: 'interactive' | 'rpc' | 'extension'): boolean {
   return source !== 'extension';
@@ -31,6 +36,59 @@ async function runCommand<A>(
   }
 }
 
+export function createPardesCommandHandler(
+  pi: ExtensionAPI,
+  manager: ManagerController,
+  presentation: ManagerPresentation,
+  reportDelivery: Pick<ReportDeliveryCoordinator, 'clear'>,
+): (args: string, ctx: ExtensionCommandContext) => Promise<void> {
+  return async (args, ctx) => {
+    const [action] = args.trim().split(/\s+/, 1);
+    if (action === 'start') {
+      const state = await runCommand(ctx, manager.activate(ctx));
+      if (state) {
+        queueManagerGuidance(pi, state, manager.runtimeSnapshots(), 'activated');
+        ctx.ui.notify(`Pardes manager activated: ${state.managerId}`, 'info');
+      }
+      return;
+    }
+    if (action === 'stop') {
+      const state = manager.snapshot();
+      reportDelivery.clear();
+      const stopped = await runCommand(ctx, manager.deactivate(ctx));
+      if (stopped !== undefined || state)
+        ctx.ui.notify(`Pardes manager stopped${state ? `: ${state.managerId}` : ''}`, 'info');
+      return;
+    }
+    if (action === 'monitor') {
+      const result = presentation.toggleBridgeMonitor(
+        ctx,
+        manager.snapshot(),
+        manager.runtimeSnapshots(),
+      );
+      ctx.ui.notify(
+        result === 'unavailable'
+          ? 'Pardes bridge monitor is unavailable without an attached worker.'
+          : `Pardes bridge monitor ${result}.`,
+        result === 'unavailable' ? 'warning' : 'info',
+      );
+      return;
+    }
+    if (action === 'config') {
+      await presentation.showConfigOverlay(ctx);
+      return;
+    }
+    if (action) {
+      ctx.ui.notify(
+        'Usage: /pardes, /pardes start, /pardes stop, /pardes monitor, or /pardes config',
+        'warning',
+      );
+      return;
+    }
+    await presentation.showDashboardOverlay(ctx, manager.snapshot(), manager.runtimeSnapshots());
+  };
+}
+
 export default function pardes(pi: ExtensionAPI): void {
   const presentation = registerManagerPresentation(pi);
   const manager = new ManagerController(pi, { presentation });
@@ -41,50 +99,7 @@ export default function pardes(pi: ExtensionAPI): void {
   pi.registerCommand('pardes', {
     description:
       'Open the Pardes dashboard, or use /pardes start, /pardes stop, /pardes monitor, and /pardes config',
-    handler: async (args, ctx) => {
-      const [action] = args.trim().split(/\s+/, 1);
-      if (action === 'start') {
-        const state = await runCommand(ctx, manager.activate(ctx));
-        if (state) {
-          queueManagerGuidance(pi, state, manager.runtimeSnapshots(), 'activated');
-          ctx.ui.notify(`Pardes manager activated: ${state.managerId}`, 'info');
-        }
-        return;
-      }
-      if (action === 'stop') {
-        const state = manager.snapshot();
-        const stopped = await runCommand(ctx, manager.deactivate(ctx));
-        if (stopped !== undefined || state)
-          ctx.ui.notify(`Pardes manager stopped${state ? `: ${state.managerId}` : ''}`, 'info');
-        return;
-      }
-      if (action === 'monitor') {
-        const result = presentation.toggleBridgeMonitor(
-          ctx,
-          manager.snapshot(),
-          manager.runtimeSnapshots(),
-        );
-        ctx.ui.notify(
-          result === 'unavailable'
-            ? 'Pardes bridge monitor is unavailable without an attached worker.'
-            : `Pardes bridge monitor ${result}.`,
-          result === 'unavailable' ? 'warning' : 'info',
-        );
-        return;
-      }
-      if (action === 'config') {
-        await presentation.showConfigOverlay(ctx);
-        return;
-      }
-      if (action) {
-        ctx.ui.notify(
-          'Usage: /pardes, /pardes start, /pardes stop, /pardes monitor, or /pardes config',
-          'warning',
-        );
-        return;
-      }
-      await presentation.showDashboardOverlay(ctx, manager.snapshot(), manager.runtimeSnapshots());
-    },
+    handler: createPardesCommandHandler(pi, manager, presentation, reportDelivery),
   });
 
   pi.registerShortcut(Key.ctrlAlt('d'), {

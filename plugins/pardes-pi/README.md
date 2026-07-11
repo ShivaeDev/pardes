@@ -113,6 +113,8 @@ Separate runs permit compaction, retire prior raw parts from later model request
 and replace persisted report bodies with bounded identity metadata in compaction
 preparation without rewriting durable session history. A failed manager compaction
 is canceled so delivery can resume; unrelated input cancels rather than interleaves.
+`/pardes stop` is also a synchronous cancellation boundary: it retires every
+scheduled, in-flight, or compaction-held report identity before deactivation.
 
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`

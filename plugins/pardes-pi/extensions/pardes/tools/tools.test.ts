@@ -2182,6 +2182,12 @@ describe('Pardes model-visible tools', () => {
         Effect.succeed({
           action: 'created' as const,
           browserHandoff: { requestedMode: 'none' as const, status: 'not_requested' as const },
+          localTracking: {
+            localBranch: 'local/pardes/review-gate',
+            remote: 'origin' as const,
+            remoteBranch: 'remote/pardes/review-gate',
+            status: 'configured' as const,
+          },
           openedInBrowser: false,
           pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
         }),
@@ -2190,7 +2196,7 @@ describe('Pardes model-visible tools', () => {
 
     const publish = requiredValue(tools.get('pull_request_create'));
     expect(publish.description).toBe(
-      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its exact SHA to a managed remote review branch, verify the hosted head, configure the retained local branch to track that remote branch, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
     );
     expect(publish.promptSnippet).toBe(
       'Publish a committed Pardes worker branch as a pull-request review gate',
@@ -2234,7 +2240,7 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(result.content[0]?.text).toBe(
-      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: none.',
+      'Created PR #42: https://github.test/acme/project/pull/42. Local tracking: local/pardes/review-gate -> origin/remote/pardes/review-gate. Browser handoff: none.',
     );
   });
 
@@ -2412,6 +2418,12 @@ describe('Pardes model-visible tools', () => {
             requestedMode: 'background' as const,
             status: 'failed' as const,
           },
+          localTracking: {
+            reason: 'local_tracking_failed' as const,
+            remote: 'origin' as const,
+            remoteBranch: 'remote/pardes/review-gate',
+            status: 'failed' as const,
+          },
           openedInBrowser: false,
           pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
         }),
@@ -2434,7 +2446,7 @@ describe('Pardes model-visible tools', () => {
     );
 
     expect(result.content[0]?.text).toBe(
-      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: background failed safely.',
+      'Created PR #42: https://github.test/acme/project/pull/42. Local tracking: origin/remote/pardes/review-gate failed safely; remote publication remains verified. Browser handoff: background failed safely.',
     );
     expect(result.details).toMatchObject({
       browserHandoff: {

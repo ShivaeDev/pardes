@@ -7822,7 +7822,9 @@ describe('manager controller', () => {
     process.env.PARDES_PI_STATE_DIR = stateRoot;
     const fixture = harness(repo);
     const workers = stubWorkers();
-    const github = stubGithub();
+    const github = stubGithub((publicationIndex) => ({
+      action: publicationIndex === 0 ? 'created' : 'updated',
+    }));
     const browser = recordingBrowserHandoff();
     const controller = new ManagerController(fixture.pi, {
       browserHandoff: browser.browserHandoff,
@@ -7887,6 +7889,20 @@ describe('manager controller', () => {
       title: 'Publish the fixture',
     });
     expect(published.action).toBe('created');
+    expect(published.localTracking).toEqual({
+      localBranch: requiredValue(agent.worktree).branch,
+      remote: 'origin',
+      remoteBranch: publishedHeadBranch,
+      status: 'configured',
+    });
+    expect(
+      git(
+        requiredValue(agent.worktree).path,
+        'config',
+        '--get',
+        `branch.${requiredValue(agent.worktree).branch}.merge`,
+      ),
+    ).toBe(`refs/heads/${publishedHeadBranch}`);
     expect(published.browserHandoff).toEqual({
       openedMode: 'background',
       requestedMode: 'background',
@@ -7921,7 +7937,7 @@ describe('manager controller', () => {
       readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
     ).toContain('pull_request_published');
 
-    await Effect.runPromise(
+    const republished = await Effect.runPromise(
       controller.createPullRequest(
         {
           agentId: agent.id,
@@ -7934,10 +7950,61 @@ describe('manager controller', () => {
       ),
     );
     expect(github.publications[1]?.headBranch).toBe(publishedHeadBranch);
+    expect(republished.action).toBe('updated');
+    expect(republished.localTracking.status).toBe('already_configured');
     expect(github.candidateRequests).toHaveLength(1);
     expect(github.reservations).toHaveLength(1);
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchPending).toBeUndefined();
     expect(controller.snapshot()?.agents[agent.id]?.publishedReviewBranchClaimSha).toBeUndefined();
+  });
+
+  test('reports local tracking failure without downgrading verified remote publication', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const baseWorktrees = makeManagedWorktreeService();
+    const worktrees: ManagedWorktreeShape = {
+      ...baseWorktrees,
+      trackPublishedReviewBranch: (_owner, lease) =>
+        Effect.fail(
+          new WorktreeError({
+            cause: 'fixture local tracking failure',
+            operation: 'configure published review branch tracking',
+            path: lease.path,
+          }),
+        ),
+    };
+    const github = stubGithub((_index) => ({ action: 'updated' }));
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: stubWorkers().makeWorkers,
+      worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+
+    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+
+    expect(published.action).toBe('updated');
+    expect(published.localTracking).toEqual({
+      reason: 'local_tracking_failed',
+      remote: 'origin',
+      remoteBranch: published.pullRequest.headBranch,
+      status: 'failed',
+    });
+    expect(published.pullRequest).toMatchObject({
+      lastPushedHeadSha: git(
+        requiredValue(controller.snapshot()?.agents[published.pullRequest.agentId]?.worktree).path,
+        'rev-parse',
+        'HEAD',
+      ),
+      status: 'open',
+    });
+    expect(github.publications).toHaveLength(1);
+    expect(
+      readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
+    ).toContain('pull_request_local_tracking_failed');
   });
 
   test('persists and settles a verified review gate before handing off its exact verified URL', async () => {

@@ -131,6 +131,27 @@ export interface ManagedLeaseCleanupIntent {
   readonly forceDeleteUnmergedBranch?: boolean;
 }
 
+export interface TrackPublishedReviewBranchInput {
+  readonly headBranch: string;
+  readonly headSha: string;
+}
+
+export type PublishedReviewBranchTrackingSuccess = {
+  readonly localBranch: string;
+  readonly remote: 'origin';
+  readonly remoteBranch: string;
+  readonly status: 'already_configured' | 'configured';
+};
+
+export type PublishedReviewBranchTrackingOutcome =
+  | PublishedReviewBranchTrackingSuccess
+  | {
+      readonly reason: 'local_tracking_failed';
+      readonly remote: 'origin';
+      readonly remoteBranch: string;
+      readonly status: 'failed';
+    };
+
 export interface ManagedLeaseCleanupOutcome extends ManagedLeaseCleanupInspection {
   readonly worktreeOutcome: 'removed_clean' | 'discarded_dirty' | 'already_missing';
   readonly branchOutcome:
@@ -174,6 +195,12 @@ export interface ManagedWorktreeShape {
     owner: ManagedLeaseOwner,
     lease: WorktreeLease,
   ) => Effect.Effect<WorktreeInspection, WorktreeServiceError>;
+  /** Configure the retained local branch only after its exact remote review head was hosted-verified. */
+  readonly trackPublishedReviewBranch: (
+    owner: ManagedLeaseOwner,
+    lease: WorktreeLease,
+    input: TrackPublishedReviewBranchInput,
+  ) => Effect.Effect<PublishedReviewBranchTrackingSuccess, WorktreeServiceError>;
   /** Opt-in richer commit provenance for human/model audit drill-downs, never routine lifecycle checks. */
   readonly inspectWithProvenance?: (
     owner: ManagedLeaseOwner,
@@ -850,6 +877,103 @@ export function makeManagedWorktreeService(
   });
 
   const inspect: ManagedWorktreeShape['inspect'] = (owner, lease) => inspectPresent(owner, lease);
+
+  const trackPublishedReviewBranch: ManagedWorktreeShape['trackPublishedReviewBranch'] = (
+    owner,
+    lease,
+    input,
+  ) =>
+    withRepositoryLock(
+      owner.repo,
+      retryDelay,
+      retries,
+      Effect.gen(function* () {
+        yield* validateInspectableManagedWorktreeLease(
+          owner,
+          lease,
+          routineLeaseValidationGitOptions,
+        );
+        if (!FULL_COMMIT_SHA.test(input.headSha))
+          return yield* invalid('headSha', 'must be an immutable commit SHA');
+        yield* git(lease.path, ['check-ref-format', `refs/heads/${input.headBranch}`]);
+
+        const remote = 'origin' as const;
+        const remoteRef = `refs/remotes/${remote}/${input.headBranch}`;
+        const observedRemoteRef = yield* git(
+          lease.path,
+          ['show-ref', '--verify', '--hash', remoteRef],
+          routineLeaseValidationGitOptions,
+        ).pipe(
+          Effect.map(({ stdout }) => stdout.trim()),
+          Effect.catch(() => Effect.succeed(undefined)),
+        );
+        if (observedRemoteRef !== input.headSha) {
+          yield* git(lease.path, [
+            'update-ref',
+            '--no-deref',
+            remoteRef,
+            input.headSha,
+            observedRemoteRef ?? '',
+          ]);
+        }
+        const materializedRemoteRef = (yield* git(
+          lease.path,
+          ['rev-parse', '--verify', `${remoteRef}^{commit}`],
+          routineLeaseValidationGitOptions,
+        )).stdout.trim();
+        if (materializedRemoteRef !== input.headSha)
+          return yield* invalidLease(
+            'published remote-tracking ref does not match its verified SHA',
+          );
+
+        const expectedRemoteRef = `refs/heads/${input.headBranch}`;
+        const readUpstream = Effect.fnUntraced(function* () {
+          const configured = (yield* git(
+            lease.path,
+            [
+              'for-each-ref',
+              '--format=%(upstream:remotename)%00%(upstream:remoteref)',
+              `refs/heads/${lease.branch}`,
+            ],
+            routineLeaseValidationGitOptions,
+          )).stdout.trim();
+          const separator = configured.indexOf('\0');
+          return separator < 0
+            ? { ref: '', remote: '' }
+            : {
+                ref: configured.slice(separator + 1),
+                remote: configured.slice(0, separator),
+              };
+        });
+        const before = yield* readUpstream();
+        const alreadyConfigured = before.remote === remote && before.ref === expectedRemoteRef;
+        if (!alreadyConfigured) {
+          yield* git(lease.path, [
+            'branch',
+            `--set-upstream-to=${remote}/${input.headBranch}`,
+            '--',
+            lease.branch,
+          ]);
+        }
+        const after = yield* readUpstream();
+        if (after.remote !== remote || after.ref !== expectedRemoteRef)
+          return yield* invalidLease('published review branch upstream could not be verified');
+        const verifiedRemoteRef = (yield* git(
+          lease.path,
+          ['rev-parse', '--verify', `${remoteRef}^{commit}`],
+          routineLeaseValidationGitOptions,
+        )).stdout.trim();
+        if (verifiedRemoteRef !== input.headSha)
+          return yield* invalidLease('published remote-tracking ref changed during configuration');
+        return {
+          localBranch: lease.branch,
+          remote,
+          remoteBranch: input.headBranch,
+          status: alreadyConfigured ? ('already_configured' as const) : ('configured' as const),
+        };
+      }),
+    );
+
   const inspectWithProvenance: NonNullable<ManagedWorktreeShape['inspectWithProvenance']> = (
     owner,
     lease,
@@ -1255,6 +1379,7 @@ export function makeManagedWorktreeService(
     provisionDetachedReviewCheckout,
     refreshDetachedReviewCheckout,
     removeIfClean,
+    trackPublishedReviewBranch,
   });
 }
 

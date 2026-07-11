@@ -98,6 +98,7 @@ export class ReportDeliveryCoordinator {
   private compactionInProgress = false;
   private acceptingDeliveries = true;
   private deliveryEpoch = 0;
+  private acquisitionPermit: ReportDeliveryPermit | undefined;
   private ownedWakeInterlude: OwnedWakeInterlude | undefined;
   private releaseOwnedWake: ReportDeliveryHoldRelease | undefined;
 
@@ -116,7 +117,11 @@ export class ReportDeliveryCoordinator {
 
   /** Structural hold consumed by the manager wake scheduler; no inbox truth lives here. */
   get isHoldingOwnedWakes(): boolean {
-    return this.active !== undefined;
+    return (
+      this.active !== undefined ||
+      this.acquisitionPermit !== undefined ||
+      this.ownedWakeInterlude !== undefined
+    );
   }
 
   onOwnedWakeRelease(release: ReportDeliveryHoldRelease): void {
@@ -125,22 +130,40 @@ export class ReportDeliveryCoordinator {
 
   registerOwnedWake(message: ManagerInboxWakeMessage, ctx: ExtensionContext): boolean {
     const identity = managerInboxWakeMessageIdentity(message);
-    if (!identity || !this.active || this.ownedWakeInterlude) return false;
+    if (!identity || !this.acceptingDeliveries || this.acquisitionPermit || this.ownedWakeInterlude)
+      return false;
     this.ownedWakeInterlude = { ended: false, identity, started: false };
-    if (this.active.phase === 'waiting_for_settlement') this.cancelScheduledDispatch();
+    if (this.active?.phase === 'waiting_for_settlement') this.cancelScheduledDispatch();
     this.cancelOwnedWakeTimeout?.();
     this.cancelOwnedWakeTimeout = this.scheduler.schedule(
       REPORT_DELIVERY_OWNED_WAKE_TIMEOUT_MS,
       () => {
-        if (this.active && this.ownedWakeInterlude?.identity === identity)
-          this.cancelActive('owned_wake_timeout', ctx);
+        if (this.ownedWakeInterlude?.identity !== identity) return;
+        if (this.active) this.cancelActive('owned_wake_timeout', ctx);
+        else this.clearOwnedWakeInterlude(ctx);
       },
     );
     return true;
   }
 
-  capturePermit(): ReportDeliveryPermit | undefined {
-    return this.acceptingDeliveries ? { epoch: this.deliveryEpoch } : undefined;
+  acquirePermit(): ReportDeliveryPermit | undefined {
+    if (
+      !this.acceptingDeliveries ||
+      this.active ||
+      this.acquisitionPermit ||
+      this.ownedWakeInterlude
+    )
+      return undefined;
+    const permit = { epoch: this.deliveryEpoch };
+    this.acquisitionPermit = permit;
+    return permit;
+  }
+
+  releasePermit(permit: ReportDeliveryPermit, ctx?: ExtensionContext): boolean {
+    if (this.acquisitionPermit !== permit) return false;
+    this.acquisitionPermit = undefined;
+    if (ctx) this.releaseOwnedWake?.(ctx);
+    return true;
   }
 
   activate(): void {
@@ -158,7 +181,11 @@ export class ReportDeliveryCoordinator {
     toolCallId: string,
     permit: ReportDeliveryPermit,
   ): ReportDeliveryStart {
-    if (!this.acceptingDeliveries || permit.epoch !== this.deliveryEpoch)
+    if (
+      !this.acceptingDeliveries ||
+      permit.epoch !== this.deliveryEpoch ||
+      this.acquisitionPermit !== permit
+    )
       throw new Error('Canonical report delivery was canceled by a manager lifecycle change.');
     if (this.active)
       throw new Error(
@@ -166,6 +193,7 @@ export class ReportDeliveryCoordinator {
       );
     const ranges = partitionCanonicalReport(report.content);
     const id = deliveryId(report.reportId, toolCallId);
+    this.acquisitionPermit = undefined;
     this.active = {
       deliveryId: id,
       nextPart: 0,
@@ -191,16 +219,6 @@ export class ReportDeliveryCoordinator {
 
   observeMessageStart(message: unknown, ctx?: ExtensionContext): void {
     const active = this.active;
-    if (!active) return;
-    if (isReportDeliveryMessage(message)) {
-      if (!this.matchesExpectedPart(active, message.details)) {
-        this.cancelActive('delivery_marker_mismatch', ctx);
-        return;
-      }
-      this.cancelScheduledDispatch();
-      active.phase = 'part_run';
-      return;
-    }
     const wakeIdentity = managerInboxWakeMessageIdentity(message);
     const interlude = this.ownedWakeInterlude;
     if (
@@ -214,6 +232,16 @@ export class ReportDeliveryCoordinator {
       interlude.started = true;
       return;
     }
+    if (!active) return;
+    if (isReportDeliveryMessage(message)) {
+      if (!this.matchesExpectedPart(active, message.details)) {
+        this.cancelActive('delivery_marker_mismatch', ctx);
+        return;
+      }
+      this.cancelScheduledDispatch();
+      active.phase = 'part_run';
+      return;
+    }
     if (
       message &&
       typeof message === 'object' &&
@@ -225,7 +253,6 @@ export class ReportDeliveryCoordinator {
 
   observeMessageEnd(message: unknown): void {
     const active = this.active;
-    if (!active) return;
     const interlude = this.ownedWakeInterlude;
     if (
       interlude?.started &&
@@ -235,32 +262,38 @@ export class ReportDeliveryCoordinator {
       interlude.ended = true;
       return;
     }
-    if (!isReportDeliveryMessage(message) || !this.matchesExpectedPart(active, message.details))
+    if (
+      !active ||
+      !isReportDeliveryMessage(message) ||
+      !this.matchesExpectedPart(active, message.details)
+    )
       return;
     active.acknowledgedPart = active.nextPart;
   }
 
   observeAgentEnd(messages: ReadonlyArray<unknown>, ctx: ExtensionContext): void {
     const active = this.active;
-    if (!active) return;
+    const interlude = this.ownedWakeInterlude;
+    if (!active && !interlude?.started) return;
     const stopReason = terminalStopReason(messages);
     if (stopReason === 'error' || stopReason === 'aborted') {
-      this.cancelActive(stopReason === 'aborted' ? 'agent_aborted' : 'agent_error', ctx);
+      if (active)
+        this.cancelActive(stopReason === 'aborted' ? 'agent_aborted' : 'agent_error', ctx);
+      else this.clearOwnedWakeInterlude(ctx);
       return;
     }
     if (stopReason !== 'stop' && stopReason !== 'length') return;
-    const interlude = this.ownedWakeInterlude;
     if (interlude?.started) {
       if (!interlude.ended) {
-        this.cancelActive('settlement_mismatch', ctx);
+        if (active) this.cancelActive('settlement_mismatch', ctx);
+        else this.clearOwnedWakeInterlude(ctx);
         return;
       }
-      this.cancelOwnedWakeTimeout?.();
-      this.cancelOwnedWakeTimeout = undefined;
-      this.ownedWakeInterlude = undefined;
-      this.settleOwnedWakeInterlude(active, ctx);
+      this.clearOwnedWakeInterlude();
+      if (active) this.settleOwnedWakeInterlude(active, ctx);
       return;
     }
+    if (!active) return;
     if (active.phase === 'initial_run') {
       active.phase = 'waiting_for_settlement';
       this.scheduleDispatch(ctx, 0);
@@ -323,6 +356,7 @@ export class ReportDeliveryCoordinator {
     this.cancelOwnedWakeTimeout?.();
     this.cancelOwnedWakeTimeout = undefined;
     this.compactionInProgress = false;
+    this.acquisitionPermit = undefined;
     this.ownedWakeInterlude = undefined;
     this.active = undefined;
     return active;
@@ -350,6 +384,13 @@ export class ReportDeliveryCoordinator {
   private completeActive(ctx: ExtensionContext): void {
     if (!this.resetActive()) return;
     this.releaseOwnedWake?.(ctx);
+  }
+
+  private clearOwnedWakeInterlude(ctx?: ExtensionContext): void {
+    this.cancelOwnedWakeTimeout?.();
+    this.cancelOwnedWakeTimeout = undefined;
+    this.ownedWakeInterlude = undefined;
+    if (ctx) this.releaseOwnedWake?.(ctx);
   }
 
   private settleOwnedWakeInterlude(active: ActiveReportDelivery, ctx: ExtensionContext): void {

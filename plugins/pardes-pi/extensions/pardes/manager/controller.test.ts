@@ -4628,7 +4628,7 @@ describe('manager controller', () => {
       },
       registerOwnedWake(message: unknown) {
         registeredWakes.push(message);
-        return false;
+        return true;
       },
     };
     const controller = new ManagerController(fixture.pi, {
@@ -4699,6 +4699,79 @@ describe('manager controller', () => {
     await sleep(20);
     expect(fixture.messages).toHaveLength(1);
     await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('rolls back a persisted cursor when a report lease wins the final send boundary', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    let mode: 'held' | 'race' | 'open' = 'held';
+    let boundaryReads = 0;
+    let acceptRegistration = true;
+    const registrations: unknown[] = [];
+    const inboxWakeHold = {
+      get isHoldingOwnedWakes() {
+        if (mode === 'held') return true;
+        if (mode === 'open') return false;
+        boundaryReads += 1;
+        return boundaryReads > 1;
+      },
+      registerOwnedWake(message: unknown) {
+        registrations.push(message);
+        return acceptRegistration;
+      },
+    };
+    const controller = new ManagerController(fixture.pi, {
+      inboxWakeHold,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Serialize report read and wake send', title: 'Final wake boundary' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Produce one durable wake race.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        question: 'Race the delayed report read?',
+        type: 'question',
+      }),
+    );
+    const cursor = controller.snapshot()?.inbox[0]?.id;
+
+    mode = 'race';
+    boundaryReads = 0;
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(boundaryReads).toBe(2);
+    expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    expect(registrations).toEqual([]);
+    expect(fixture.messages).toEqual([]);
+
+    mode = 'open';
+    acceptRegistration = false;
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    expect(registrations).toHaveLength(1);
+    expect(fixture.messages).toEqual([]);
+
+    acceptRegistration = true;
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(true);
+    expect(controller.snapshot()?.inboxWake?.cursor).toBe(cursor);
+    expect(registrations).toHaveLength(2);
+    expect(registrations[0]).toEqual(registrations[1]);
+    expect(fixture.messages).toHaveLength(1);
+    expect(fixture.messages[0]?.message).toEqual(registrations[1]);
   });
 
   test('buffers a busy-period attention burst durably and releases one bounded cursor wake after manager idle', async () => {

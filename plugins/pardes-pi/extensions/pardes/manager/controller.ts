@@ -61,6 +61,7 @@ import {
 import {
   type AgentRecord,
   type InboxHandoff,
+  type InboxWake,
   initialManagerState,
   type ManagerActivation,
   ManagerActivationSchema,
@@ -299,7 +300,7 @@ export interface ManagerInboxWakeHold {
   /** Transient owned-delivery hold; durable inbox state remains the retry authority. */
   readonly isHoldingOwnedWakes: boolean;
   /** Register the exact cursor message immediately before its irreversible Pi injection. */
-  readonly registerOwnedWake?: (message: ManagerInboxWakeMessage, ctx: ExtensionContext) => boolean;
+  readonly registerOwnedWake: (message: ManagerInboxWakeMessage, ctx: ExtensionContext) => boolean;
 }
 
 export interface ManagerControllerOptions {
@@ -921,6 +922,22 @@ export class ManagerController {
     const coveredCount =
       inboxThroughCursor(release.inbox, release.wake.cursor)?.length ?? release.wake.pendingCount;
     const queuedSuffixCount = Math.max(0, release.inbox.length - coveredCount);
+    const message = renderInboxWakeMessage(release);
+    const hold = this.inboxWakeHold;
+    if (hold?.isHoldingOwnedWakes) {
+      yield* this.rollbackInboxWakeReservation(active, release.wake, ctx);
+      return false;
+    }
+    if (hold && !hold.registerOwnedWake(message, ctx)) {
+      yield* this.rollbackInboxWakeReservation(active, release.wake, ctx);
+      return false;
+    }
+    // Registration and Pi injection are one synchronous final boundary. A
+    // report_get lease cannot appear between these two operations.
+    this.pi.sendMessage(message, {
+      deliverAs: 'followUp',
+      triggerTurn: true,
+    });
     yield* this.appendEventSafely(
       active.store,
       makeEvent(
@@ -929,13 +946,26 @@ export class ManagerController {
         timestamp,
       ),
     );
-    const message = renderInboxWakeMessage(release);
-    this.inboxWakeHold?.registerOwnedWake?.(message, ctx);
-    this.pi.sendMessage(message, {
-      deliverAs: 'followUp',
-      triggerTurn: true,
-    });
     return true;
+  });
+
+  private readonly rollbackInboxWakeReservation = Effect.fnUntraced(function* (
+    this: ManagerController,
+    active: PullRequestPublicationNamespace,
+    wake: InboxWake,
+    ctx: ExtensionContext,
+  ) {
+    yield* active.store.mutate<boolean, never>((state) => {
+      if (
+        state.inboxWake?.cursor !== wake.cursor ||
+        state.inboxWake.token !== wake.token ||
+        state.inboxHandoff
+      )
+        return Effect.succeed([false, state] as const);
+      const { inboxWake: _inboxWake, ...withoutReservation } = state;
+      return Effect.succeed([true, withoutReservation] as const);
+    });
+    if (this.active === active) yield* this.refreshActiveState(active, ctx);
   });
 
   private readonly refreshActiveState = Effect.fnUntraced(function* (

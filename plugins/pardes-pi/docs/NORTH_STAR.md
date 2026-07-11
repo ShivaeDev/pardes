@@ -250,10 +250,14 @@ Manager-visible retrieval is opt-in by path-free report ID, automatically select
 through trust-labelled, JSON-escaped, bounded ordered settlement runs without
 model-managed pagination. A delivery never uses Pi's shared follow-up queue for
 report parts. Pardes holds its own durable inbox wake injection until that
-delivery completes or cancels. At the final manager mint/send boundary it may
-register one exact rendered wake identity; only that one message lifecycle is a
-bounded interlude, and its agent settlement deterministically resumes the same
-report phase. Unregistered, malformed, mismatched, or replayed custom messages
+delivery completes or cancels. The hold starts with a transient acquisition
+lease before report artifact I/O and converts atomically into active delivery;
+read failure or cancellation releases it for durable retry. Wake release rechecks after cursor
+persistence and rolls back an unsent reservation when the lease wins. If wake
+injection wins, exact identity registration and send share one synchronous final
+boundary; only that one message lifecycle is a bounded interlude, and its agent
+settlement deterministically resumes the same report phase. Unregistered,
+malformed, mismatched, or replayed custom messages
 remain foreign. Unrelated user or custom input still cancels the exact in-memory
 identity rather than interleaving and emits one bounded resumable cancellation
 record. Reload or

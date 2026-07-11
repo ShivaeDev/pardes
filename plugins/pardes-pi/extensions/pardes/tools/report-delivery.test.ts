@@ -61,7 +61,7 @@ function startDelivery(
   canonicalReport: CanonicalReport,
   toolCallId: string,
 ) {
-  return delivery.start(canonicalReport, toolCallId, requiredValue(delivery.capturePermit()));
+  return delivery.start(canonicalReport, toolCallId, requiredValue(delivery.acquirePermit()));
 }
 
 function schedulerHarness() {
@@ -679,6 +679,37 @@ describe('canonical report delivery', () => {
     expect(stalled.released).toEqual([stalled.ctx]);
   });
 
+  test('leases report acquisition and serializes a committed wake before report start', () => {
+    const leased = harness();
+    const permit = requiredValue(leased.delivery.acquirePermit());
+    const deferredWake = ownedWakeMessage('event-during-read');
+
+    expect(leased.delivery.isHoldingOwnedWakes).toBe(true);
+    expect(leased.delivery.registerOwnedWake(deferredWake, leased.ctx)).toBe(false);
+    expect(leased.delivery.releasePermit(permit, leased.ctx)).toBe(true);
+    expect(leased.released).toEqual([leased.ctx]);
+    expect(leased.delivery.isHoldingOwnedWakes).toBe(false);
+
+    const committedWake = ownedWakeMessage('event-before-read');
+    expect(leased.delivery.registerOwnedWake(committedWake, leased.ctx)).toBe(true);
+    expect(leased.delivery.acquirePermit()).toBeUndefined();
+    leased.delivery.observeMessageStart(committedWake, leased.ctx);
+    leased.delivery.observeMessageEnd(committedWake);
+    leased.delivery.observeAgentEnd(stoppedRun, leased.ctx);
+
+    const afterWake = requiredValue(leased.delivery.acquirePermit());
+    expect(leased.delivery.releasePermit(afterWake)).toBe(true);
+
+    const timedOut = harness();
+    expect(
+      timedOut.delivery.registerOwnedWake(ownedWakeMessage('event-never-started'), timedOut.ctx),
+    ).toBe(true);
+    timedOut.runNext();
+    expect(timedOut.delivery.isHoldingOwnedWakes).toBe(false);
+    expect(timedOut.delivery.acquirePermit()).toBeDefined();
+    expect(timedOut.sent).toEqual([]);
+  });
+
   test('releases the process-lifecycle hold on reload and starts a fresh permit epoch', () => {
     const handlers = new Map<string, (event: { reason?: string }, ctx: ExtensionContext) => void>();
     const sent: Array<{ readonly message: unknown; readonly options: unknown }> = [];
@@ -697,23 +728,24 @@ describe('canonical report delivery', () => {
     requiredValue(handlers.get('session_shutdown'))({ reason: 'reload' }, {} as ExtensionContext);
 
     expect(delivery.isHoldingOwnedWakes).toBe(false);
-    expect(delivery.capturePermit()).toBeUndefined();
+    expect(delivery.acquirePermit()).toBeUndefined();
     expect(sent).toHaveLength(1);
     expect(sent[0]?.message).toMatchObject({
       customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
       details: { reason: 'session_reload', resumable: true },
     });
     delivery.activate();
-    expect(delivery.capturePermit()).toEqual({ epoch: expect.any(Number) });
+    const permit = requiredValue(delivery.acquirePermit());
+    expect(permit).toEqual({ epoch: expect.any(Number) });
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
+    expect(delivery.releasePermit(permit)).toBe(true);
     expect(delivery.isHoldingOwnedWakes).toBe(false);
   });
 
   test('rejects overlapping retrievals and mismatched delivery markers', () => {
     const { ctx, delivery, runNext, sent } = harness();
     startDelivery(delivery, report('x'.repeat(80_000)), 'tool-call-one');
-    expect(() => startDelivery(delivery, report('other', 'report-two'), 'tool-call-two')).toThrow(
-      'report-one is still being delivered',
-    );
+    expect(delivery.acquirePermit()).toBeUndefined();
     delivery.observeAgentEnd(stoppedRun, ctx);
     runNext();
     const expected = deliveredMessage(requiredValue(sent[0]));

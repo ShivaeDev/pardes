@@ -87,7 +87,7 @@ function commandDeliveryHarness() {
       }),
     deactivate: () =>
       Effect.sync(() => {
-        deactivatedAfterClear = !delivery.isActive && delivery.capturePermit() === undefined;
+        deactivatedAfterClear = !delivery.isActive && delivery.acquirePermit() === undefined;
         active = false;
       }),
     runtimeSnapshots: () => new Map(),
@@ -107,7 +107,7 @@ function commandDeliveryHarness() {
     totalChars: 80_000,
   });
   const startReport = (reportId: string, toolCallId: string) =>
-    delivery.start(report(reportId), toolCallId, requiredValue(delivery.capturePermit()));
+    delivery.start(report(reportId), toolCallId, requiredValue(delivery.acquirePermit()));
   return {
     ctx,
     delivery,

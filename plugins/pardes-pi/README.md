@@ -149,10 +149,13 @@ and replace persisted report bodies with bounded identity metadata in compaction
 preparation without rewriting durable session history. A failed manager compaction
 is canceled so delivery can resume. Pardes defers its own durable inbox wake while
 report delivery owns the conversation, then retries the still-pending cursor after
-report completion or cancellation. At the final cursor-injection boundary, one
-exact rendered wake identity may be registered as a single-run interlude; its
-settlement resumes the same report phase. Unregistered, malformed, mismatched,
-or replayed custom messages still cancel and leave one bounded resumable
+report completion or cancellation. The hold begins before `report_get` awaits
+artifact I/O, and read failure or cancellation releases it for durable wake retry. A wake release
+that already crossed storage rechecks the lease, rolls back its unsent cursor,
+and retries later. At the final cursor-injection boundary, one exact rendered
+wake identity is registered synchronously with send as a single-run interlude;
+its settlement resumes the same report phase. Unregistered, malformed,
+mismatched, or replayed custom messages still cancel and leave one bounded resumable
 cancellation record rather than silently truncating the sequence. `/pardes stop`
 is also a synchronous cancellation boundary: it retires every
 scheduled, in-flight, or compaction-held report identity and invalidates permits

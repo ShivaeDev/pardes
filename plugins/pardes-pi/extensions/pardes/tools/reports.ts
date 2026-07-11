@@ -11,6 +11,22 @@ import {
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 import { type ReportDeliveryCoordinator, registerReportDelivery } from './report-delivery.ts';
 
+async function awaitReportRead<A>(read: Promise<A>, signal?: AbortSignal): Promise<A> {
+  if (!signal) return read;
+  if (signal.aborted) throw new Error('Canonical report retrieval was canceled.');
+  let rejectAbort: ((reason: Error) => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = () => rejectAbort?.(new Error('Canonical report retrieval was canceled.'));
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await Promise.race([read, aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
 function prepareLegacyReportGetArguments(args: unknown): { readonly reportId: string } {
   if (!args || typeof args !== 'object' || Array.isArray(args))
     return args as { readonly reportId: string };
@@ -31,23 +47,25 @@ export function registerReportTools(
   registerPardesTool(pi, {
     description:
       'Retrieve one known manager-scoped durable worker or advisory-verifier report by reportId. Automatically selects the canonical full body (details when present, otherwise summary) and delivers every trust-labelled bounded part in separate settlement runs so compaction can occur; never choose fields, offsets, page sizes, or continuation calls, and never lists, guesses, or loads other artifacts.',
-    async execute(toolCallId, params) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       if (delivery.activeReportId)
         return textResult(
           `Error: Canonical report ${delivery.activeReportId} is still being delivered; wait for its final automatic part before retrieving another report.`,
         );
-      const permit = delivery.capturePermit();
+      const permit = delivery.acquirePermit();
       if (!permit)
         return textResult(
-          'Error: Canonical report delivery is unavailable while Pardes is stopped.',
+          'Error: Canonical report delivery is unavailable while Pardes is stopped or another owned conversation transition is pending.',
         );
-      const result = await runTool(manager.getReport(params));
-      if (!result.ok) return textResult(`Error: ${result.error}`);
       try {
+        const result = await awaitReportRead(runTool(manager.getReport(params)), signal);
+        if (!result.ok) return textResult(`Error: ${result.error}`);
         const scheduled = delivery.start(result.value, toolCallId, permit);
         return textResult(scheduled.text, scheduled.metadata);
       } catch (error) {
         return textResult(`Error: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        delivery.releasePermit(permit, ctx);
       }
     },
     label: 'Get Full Durable Child Report',

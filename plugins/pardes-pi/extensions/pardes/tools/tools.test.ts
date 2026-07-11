@@ -35,7 +35,11 @@ import {
   type Workstream,
 } from '../manager/index.ts';
 import type { ManagerPresentation } from '../presentation/index.ts';
-import { REPORT_EXCERPT_MAX_CHARS, REPORT_HANDOFF_NOTE_MAX_CHARS } from '../reporting/index.ts';
+import {
+  type CanonicalReport,
+  REPORT_EXCERPT_MAX_CHARS,
+  REPORT_HANDOFF_NOTE_MAX_CHARS,
+} from '../reporting/index.ts';
 import {
   STORAGE_EVENT_SCAN_MAX_BYTES,
   STORAGE_REPORT_SCAN_MAX_ENTRIES,
@@ -2728,6 +2732,80 @@ describe('Pardes model-visible tools', () => {
     expect(delivery.isActive).toBe(false);
   });
 
+  test('holds wake coordination for delayed reads and releases on failure or cancellation', async () => {
+    let rejectRead: ((error: Error) => void) | undefined;
+    const manager = {
+      getReport: () =>
+        Effect.tryPromise(
+          () =>
+            new Promise<never>((_resolve, reject) => {
+              rejectRead = reject;
+            }),
+        ),
+    } as unknown as ManagerController;
+    const { pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const released: ExtensionContext[] = [];
+    delivery.onOwnedWakeRelease((releaseCtx) => released.push(releaseCtx));
+    const pending = requiredValue(tools.get('report_get')).execute(
+      'call-failed-read',
+      { reportId: 'report-failed-read' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!rejectRead) await Promise.resolve();
+
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
+    rejectRead(new Error('delayed read failed'));
+    const result = await pending;
+
+    expect(result.content[0]?.text).toContain('Error:');
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
+    expect(released).toEqual([ctx]);
+
+    let resolveCanceled: ((value: CanonicalReport) => void) | undefined;
+    const canceledManager = {
+      getReport: () =>
+        Effect.promise(
+          () =>
+            new Promise<CanonicalReport>((resolve) => {
+              resolveCanceled = resolve;
+            }),
+        ),
+    } as unknown as ManagerController;
+    const canceledRegistry = registry();
+    const canceledDelivery = registerWorkstreamTools(canceledRegistry.pi, canceledManager);
+    const canceledReleases: ExtensionContext[] = [];
+    canceledDelivery.onOwnedWakeRelease((releaseCtx) => canceledReleases.push(releaseCtx));
+    const abort = new AbortController();
+    const canceledPending = requiredValue(canceledRegistry.tools.get('report_get')).execute(
+      'call-canceled-read',
+      { reportId: 'report-canceled-read' },
+      abort.signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolveCanceled) await Promise.resolve();
+    expect(canceledDelivery.isHoldingOwnedWakes).toBe(true);
+
+    abort.abort();
+    const canceled = await canceledPending;
+    expect(canceled.content[0]?.text).toContain('retrieval was canceled');
+    expect(canceledDelivery.isHoldingOwnedWakes).toBe(false);
+    expect(canceledReleases).toEqual([ctx]);
+    resolveCanceled({
+      agentId: 'agent-one',
+      content: 'late canceled body',
+      field: 'details',
+      reportId: 'report-canceled-read',
+      status: 'completed',
+      totalChars: 18,
+    });
+    await Promise.resolve();
+    expect(canceledDelivery.activeReportId).toBeUndefined();
+  });
+
   test('keeps an old delayed read stale across restart while a fresh retrieval enters compaction', async () => {
     const resolvers = new Map<string, () => void>();
     let active = true;
@@ -2776,8 +2854,10 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     while (!resolvers.has('report-old')) await Promise.resolve();
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
 
     await command('stop', commandCtx);
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
     await command('start', commandCtx);
     const freshPending = reportGet.execute(
       'call-fresh',
@@ -2787,6 +2867,7 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     while (!resolvers.has('report-fresh')) await Promise.resolve();
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
     requiredValue(resolvers.get('report-fresh'))();
     const fresh = await freshPending;
     delivery.observeCompactionStart();

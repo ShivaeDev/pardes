@@ -1,6 +1,8 @@
 import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent';
 import {
   type Component,
+  type Focusable,
+  Input,
   type Keybinding,
   type KeybindingsManager,
   truncateToWidth,
@@ -11,13 +13,15 @@ import {
 export const QUESTION_CUSTOM_LABEL = 'Type a custom answer…';
 export const QUESTION_DIALOG_MAX_VISIBLE_OPTIONS = 5;
 export const QUESTION_PROMPT_MAX_CHARS = 1_000;
+export const QUESTION_ANSWER_MAX_CHARS = 4_000;
 export const QUESTION_OPTION_LABEL_MAX_CHARS = 256;
 export const QUESTION_OPTION_DESCRIPTION_MAX_CHARS = 1_000;
 export const QUESTION_OPTIONS_MAX_ITEMS = 12;
 
-const QUESTION_MAX_LINES = 3;
 const OPTION_LABEL_MAX_LINES = 2;
 const OPTION_DESCRIPTION_MAX_LINES = 2;
+const BRACKETED_PASTE_START = '\u001b[200~';
+const BRACKETED_PASTE_END = '\u001b[201~';
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Terminal question sanitization intentionally strips control ranges.
 const TERMINAL_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 
@@ -28,7 +32,11 @@ export interface QuestionDialogOption {
 
 export type QuestionDialogChoice =
   | { readonly kind: 'option'; readonly index: number; readonly value: string }
-  | { readonly kind: 'custom' };
+  | {
+      readonly kind: 'custom';
+      readonly value?: string;
+      readonly exceededMaxChars?: boolean;
+    };
 
 export interface QuestionDialogPalette {
   readonly accent: (text: string) => string;
@@ -36,6 +44,7 @@ export interface QuestionDialogPalette {
   readonly text: (text: string) => string;
   readonly muted: (text: string) => string;
   readonly dim: (text: string) => string;
+  readonly warning: (text: string) => string;
   readonly border: (text: string) => string;
   readonly borderMuted: (text: string) => string;
   readonly selected: (text: string) => string;
@@ -48,7 +57,6 @@ interface DisplayOption extends QuestionDialogOption {
 interface QuestionDialogOptions {
   readonly question: string;
   readonly options: ReadonlyArray<QuestionDialogOption>;
-  readonly allowCustom: boolean;
   readonly palette: QuestionDialogPalette;
   readonly keybindings: KeybindingsManager;
   readonly requestRender: () => void;
@@ -66,6 +74,17 @@ function sanitizeQuestionPrompt(question: string): string {
 
 export function sanitizeQuestionOptionLabel(label: string): string {
   return boundedInertText(label, QUESTION_OPTION_LABEL_MAX_CHARS);
+}
+
+/** Keep user-authored answers terminal-inert without changing ordinary Unicode text. */
+export function sanitizeQuestionAnswer(answer: string): string {
+  return answer.replace(TERMINAL_CONTROL_CHARACTERS, ' ');
+}
+
+function truncateQuestionAnswer(answer: string, maxChars = QUESTION_ANSWER_MAX_CHARS): string {
+  const truncated = answer.slice(0, maxChars);
+  const finalCodeUnit = truncated.charCodeAt(truncated.length - 1);
+  return finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff ? truncated.slice(0, -1) : truncated;
 }
 
 function sanitizeQuestionOption(option: QuestionDialogOption): QuestionDialogOption {
@@ -90,14 +109,13 @@ interface FallbackQuestionChoice {
 
 function fallbackQuestionChoices(
   options: ReadonlyArray<QuestionDialogOption>,
-  allowCustom: boolean,
 ): ReadonlyArray<FallbackQuestionChoice> {
   const choices: ReadonlyArray<FallbackQuestionChoice> = [
     ...options.map((option, index) => {
       const value = displayValue(option);
       return { choice: { index, kind: 'option', value }, label: value } as const;
     }),
-    ...(allowCustom ? [{ choice: { kind: 'custom' } as const, label: QUESTION_CUSTOM_LABEL }] : []),
+    { choice: { kind: 'custom' }, label: QUESTION_CUSTOM_LABEL },
   ];
   if (new Set(choices.map(({ label }) => label)).size === choices.length) return choices;
   return choices.map(({ label, choice }, index) => ({ choice, label: `${index + 1}. ${label}` }));
@@ -113,6 +131,7 @@ function themePalette(theme: Theme): QuestionDialogPalette {
     muted: (text) => theme.fg('muted', text),
     selected: (text) => theme.bg('selectedBg', text),
     text: (text) => theme.fg('text', text),
+    warning: (text) => theme.fg('warning', text),
   };
 }
 
@@ -124,25 +143,47 @@ function boundedWrappedLines(text: string, width: number, maxLines: number): str
   return visible;
 }
 
-export class PardesQuestionDialog implements Component {
+export class PardesQuestionDialog implements Component, Focusable {
   private readonly question: string;
   private readonly options: ReadonlyArray<DisplayOption>;
   private readonly palette: QuestionDialogPalette;
   private readonly keybindings: KeybindingsManager;
   private readonly requestRender: () => void;
   private readonly onDone: (choice: QuestionDialogChoice | null) => void;
+  private readonly customInput = new Input();
   private selectedIndex = 0;
+  private _focused = false;
+  private customInputExceededMaxChars = false;
+  private bracketedPasteBuffer: string | undefined;
+  private bracketedPasteContent = '';
 
   constructor(options: QuestionDialogOptions) {
     this.question = sanitizeQuestionPrompt(options.question);
     this.options = [
       ...options.options.map((option) => ({ ...sanitizeQuestionOption(option), custom: false })),
-      ...(options.allowCustom ? [{ custom: true, label: QUESTION_CUSTOM_LABEL }] : []),
+      { custom: true, label: QUESTION_CUSTOM_LABEL },
     ];
     this.palette = options.palette;
     this.keybindings = options.keybindings;
     this.requestRender = options.requestRender;
     this.onDone = options.onDone;
+    this.customInput.onSubmit = (value) =>
+      this.onDone({
+        ...(this.customInputExceededMaxChars ? { exceededMaxChars: true } : {}),
+        kind: 'custom',
+        value,
+      });
+    this.customInput.onEscape = () => this.onDone(null);
+    this.updateInputFocus();
+  }
+
+  get focused(): boolean {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    this.updateInputFocus();
   }
 
   render(width: number): string[] {
@@ -156,7 +197,7 @@ export class PardesQuestionDialog implements Component {
     lines.push(this.topBorder(renderWidth));
     lines.push(this.frame(this.palette.accent(this.palette.bold('Pardes decision')), renderWidth));
     lines.push(this.frame('', renderWidth));
-    for (const line of boundedWrappedLines(this.question, contentWidth, QUESTION_MAX_LINES)) {
+    for (const line of wrapTextWithAnsi(this.question, contentWidth)) {
       lines.push(this.frame(this.palette.text(line), renderWidth));
     }
     lines.push(this.separator(renderWidth));
@@ -179,12 +220,18 @@ export class PardesQuestionDialog implements Component {
     }
 
     lines.push(this.separator(renderWidth));
-    lines.push(this.frame(this.palette.dim(this.helpText()), renderWidth));
+    for (const line of wrapTextWithAnsi(this.helpText(), contentWidth)) {
+      lines.push(this.frame(this.palette.dim(line), renderWidth));
+    }
     lines.push(this.bottomBorder(renderWidth));
     return lines;
   }
 
   handleInput(data: string): void {
+    if (this.keybindings.matches(data, 'tui.select.cancel')) {
+      this.onDone(null);
+      return;
+    }
     if (this.keybindings.matches(data, 'tui.select.up')) {
       this.moveSelection(-1);
       return;
@@ -206,15 +253,24 @@ export class PardesQuestionDialog implements Component {
       if (!selected) return;
       this.onDone(
         selected.custom
-          ? { kind: 'custom' }
+          ? {
+              ...(this.customInputExceededMaxChars ? { exceededMaxChars: true } : {}),
+              kind: 'custom',
+              value: this.customInput.getValue(),
+            }
           : { index: this.selectedIndex, kind: 'option', value: displayValue(selected) },
       );
       return;
     }
-    if (this.keybindings.matches(data, 'tui.select.cancel')) this.onDone(null);
+    if (this.options[this.selectedIndex]?.custom) {
+      this.handleCustomInput(data);
+      this.requestRender();
+    }
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.customInput.invalidate();
+  }
 
   private optionLines(
     option: DisplayOption,
@@ -237,20 +293,44 @@ export class PardesQuestionDialog implements Component {
       );
     });
 
+    if (option.custom) {
+      if (selected) {
+        const inputWidth = Math.max(1, contentWidth - visibleWidth(continuation));
+        const inputLine = this.customInput.render(inputWidth)[0] ?? '';
+        lines.push(
+          this.frame(this.palette.accent(`${continuation}${inputLine}`), renderWidth, true),
+        );
+        if (this.customInputExceededMaxChars) {
+          for (const warning of wrapTextWithAnsi(
+            `Answer exceeds ${QUESTION_ANSWER_MAX_CHARS} characters and will be rejected.`,
+            available,
+          )) {
+            lines.push(
+              this.frame(this.palette.warning(`${continuation}${warning}`), renderWidth, true),
+            );
+          }
+        }
+      } else if (this.customInput.getValue()) {
+        for (const valueLine of boundedWrappedLines(
+          this.customInput.getValue(),
+          available,
+          OPTION_DESCRIPTION_MAX_LINES,
+        )) {
+          lines.push(this.frame(this.palette.muted(`${continuation}${valueLine}`), renderWidth));
+        }
+      }
+      return lines;
+    }
+
     if (option.description) {
-      const descriptionPrefix = ' '.repeat(visibleWidth(prefix));
-      const descriptionWidth = Math.max(1, contentWidth - visibleWidth(descriptionPrefix));
+      const descriptionWidth = Math.max(1, contentWidth - visibleWidth(continuation));
       for (const description of boundedWrappedLines(
         option.description,
         descriptionWidth,
         OPTION_DESCRIPTION_MAX_LINES,
       )) {
         lines.push(
-          this.frame(
-            this.palette.muted(`${descriptionPrefix}${description}`),
-            renderWidth,
-            selected,
-          ),
+          this.frame(this.palette.muted(`${continuation}${description}`), renderWidth, selected),
         );
       }
     }
@@ -258,17 +338,97 @@ export class PardesQuestionDialog implements Component {
     return lines;
   }
 
+  private handleCustomInput(data: string): void {
+    if (this.bracketedPasteBuffer !== undefined) {
+      this.consumeBracketedPaste(data);
+      return;
+    }
+
+    const startIndex = data.indexOf(BRACKETED_PASTE_START);
+    if (startIndex < 0) {
+      this.handleUnpastedCustomInput(data);
+      return;
+    }
+
+    const beforePaste = data.slice(0, startIndex);
+    if (beforePaste) this.handleUnpastedCustomInput(beforePaste);
+    this.bracketedPasteBuffer = '';
+    this.bracketedPasteContent = '';
+    this.consumeBracketedPaste(data.slice(startIndex + BRACKETED_PASTE_START.length));
+  }
+
+  private handleUnpastedCustomInput(data: string): void {
+    const valueLength = this.customInput.getValue().length;
+    if (
+      data.search(TERMINAL_CONTROL_CHARACTERS) < 0 &&
+      valueLength + data.length > QUESTION_ANSWER_MAX_CHARS
+    ) {
+      this.customInputExceededMaxChars = true;
+      const available = Math.max(0, QUESTION_ANSWER_MAX_CHARS - valueLength);
+      if (available > 0) this.customInput.handleInput(truncateQuestionAnswer(data, available));
+      return;
+    }
+    const beforeInput = this.customInput.getValue();
+    this.customInput.handleInput(data);
+    this.enforceCustomInputBound(this.customInput.getValue() !== beforeInput);
+  }
+
+  private consumeBracketedPaste(data: string): void {
+    if (this.bracketedPasteBuffer === undefined) return;
+    const combined = this.bracketedPasteBuffer + data;
+    const endIndex = combined.indexOf(BRACKETED_PASTE_END);
+    if (endIndex >= 0) {
+      this.appendBracketedPasteContent(combined.slice(0, endIndex));
+      const remaining = combined.slice(endIndex + BRACKETED_PASTE_END.length);
+      const pasted = this.bracketedPasteContent;
+      this.bracketedPasteBuffer = undefined;
+      this.bracketedPasteContent = '';
+      this.customInput.handleInput(`${BRACKETED_PASTE_START}${pasted}${BRACKETED_PASTE_END}`);
+      this.enforceCustomInputBound(false);
+      if (remaining) this.handleCustomInput(remaining);
+      return;
+    }
+
+    const retainedChars = Math.min(BRACKETED_PASTE_END.length - 1, combined.length);
+    this.appendBracketedPasteContent(combined.slice(0, combined.length - retainedChars));
+    this.bracketedPasteBuffer = combined.slice(combined.length - retainedChars);
+  }
+
+  private appendBracketedPasteContent(content: string): void {
+    const sanitized = sanitizeQuestionAnswer(content);
+    const available = QUESTION_ANSWER_MAX_CHARS - this.bracketedPasteContent.length;
+    if (sanitized.length > available) this.customInputExceededMaxChars = true;
+    if (available > 0) this.bracketedPasteContent += truncateQuestionAnswer(sanitized, available);
+  }
+
+  private enforceCustomInputBound(allowOverflowRecovery: boolean): void {
+    const value = this.customInput.getValue();
+    const sanitized = sanitizeQuestionAnswer(value);
+    if (sanitized !== value) this.customInput.setValue(sanitized);
+    if (sanitized.length > QUESTION_ANSWER_MAX_CHARS) {
+      this.customInputExceededMaxChars = true;
+      this.customInput.setValue(truncateQuestionAnswer(sanitized));
+      return;
+    }
+    if (allowOverflowRecovery && sanitized.length < QUESTION_ANSWER_MAX_CHARS)
+      this.customInputExceededMaxChars = false;
+  }
+
   private moveSelection(delta: number): void {
-    if (this.options.length === 0) return;
     this.selectedIndex = (this.selectedIndex + delta + this.options.length) % this.options.length;
+    this.updateInputFocus();
     this.requestRender();
   }
 
   private pageSelection(delta: number): void {
-    if (this.options.length === 0) return;
     const next = this.selectedIndex + delta * QUESTION_DIALOG_MAX_VISIBLE_OPTIONS;
     this.selectedIndex = Math.max(0, Math.min(next, this.options.length - 1));
+    this.updateInputFocus();
     this.requestRender();
+  }
+
+  private updateInputFocus(): void {
+    this.customInput.focused = this._focused && this.options[this.selectedIndex]?.custom === true;
   }
 
   private visibleRange(): readonly [number, number] {
@@ -285,7 +445,7 @@ export class PardesQuestionDialog implements Component {
     const down = this.bindingLabel('tui.select.down', 'down');
     const confirm = this.bindingLabel('tui.select.confirm', 'enter');
     const cancel = this.bindingLabel('tui.select.cancel', 'escape');
-    return `${up}/${down} navigate · ${confirm} select · ${cancel} cancel`;
+    return `${up}/${down} navigate · type custom answer · ${confirm} submit/select · ${cancel} cancel`;
   }
 
   private bindingLabel(keybinding: Keybinding, fallback: string): string {
@@ -332,34 +492,54 @@ export class PardesQuestionDialog implements Component {
 /**
  * Show the Pardes-owned dialog in interactive TUI mode. RPC mode degrades
  * `custom()` to `undefined`, so retain Pi's dialog protocol as a compatibility
- * fallback without changing public question semantics.
+ * fallback. A free-form-only question goes directly to the RPC input fallback.
  */
 export async function selectPardesQuestionOption(
   ctx: ExtensionContext,
   question: string,
   options: ReadonlyArray<QuestionDialogOption>,
-  allowCustom: boolean,
+  signal?: AbortSignal,
 ): Promise<QuestionDialogChoice | null> {
   const sanitizedQuestion = sanitizeQuestionPrompt(question);
   const sanitizedOptions = options.map(sanitizeQuestionOption);
-  const choice = await ctx.ui.custom<QuestionDialogChoice | null | undefined>(
-    (tui, theme, keybindings, done) =>
-      new PardesQuestionDialog({
-        allowCustom,
-        keybindings,
-        onDone: done,
-        options: sanitizedOptions,
-        palette: themePalette(theme),
-        question: sanitizedQuestion,
-        requestRender: () => tui.requestRender(),
-      }),
-  );
-  if (choice !== undefined) return choice;
+  let removeAbortListener = () => {};
+  try {
+    const choice = await ctx.ui.custom<QuestionDialogChoice | null | undefined>(
+      (tui, theme, keybindings, done) => {
+        let finished = false;
+        const finish = (result: QuestionDialogChoice | null) => {
+          if (finished) return;
+          finished = true;
+          removeAbortListener();
+          done(result);
+        };
+        const onAbort = () => finish(null);
+        if (signal?.aborted) onAbort();
+        else {
+          signal?.addEventListener('abort', onAbort, { once: true });
+          removeAbortListener = () => signal?.removeEventListener('abort', onAbort);
+        }
+        return new PardesQuestionDialog({
+          keybindings,
+          onDone: finish,
+          options: sanitizedOptions,
+          palette: themePalette(theme),
+          question: sanitizedQuestion,
+          requestRender: () => tui.requestRender(),
+        });
+      },
+    );
+    if (choice !== undefined) return choice;
+  } finally {
+    removeAbortListener();
+  }
 
-  const fallbackChoices = fallbackQuestionChoices(sanitizedOptions, allowCustom);
+  if (sanitizedOptions.length === 0) return { kind: 'custom' };
+  const fallbackChoices = fallbackQuestionChoices(sanitizedOptions);
   const selected = await ctx.ui.select(
     sanitizedQuestion,
     fallbackChoices.map(({ label }) => label),
+    signal === undefined ? undefined : { signal },
   );
   if (!selected) return null;
   return fallbackChoices.find(({ label }) => label === selected)?.choice ?? null;

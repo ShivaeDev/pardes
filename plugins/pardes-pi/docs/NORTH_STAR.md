@@ -245,7 +245,7 @@ are grouped by purpose:
 
 ```text
 question
-pardes_status · inbox_get · inbox_acknowledge · await_user_feedback
+pardes_status · inbox_get · inbox_acknowledge
 workstream_create · workstream_list · workstream_get · workstream_complete
 report_get
 pull_request_create
@@ -344,9 +344,12 @@ compaction completion remains ephemeral monitor telemetry.
 
 ## User interaction and UI
 
-The model-callable `question` tool opens a bounded Pi dialog for genuine forks
-and blockers. `await_user_feedback` explicitly hands one delivered attention
-cursor to the user and consumes only that cursor after submission.
+The model-callable `question` tool opens a bounded Pi dialog for genuine forks,
+blockers, and free-form feedback. Custom input is always available up to 4,000
+characters and options may be empty. When a delivered attention cursor exists at open, the dialog binds
+that exact cursor and consumes only it after a submitted non-blank answer;
+cancellation, blank or oversized input, failure, queued suffixes, and unrelated later events
+remain unconsumed.
 
 The compact widget shows manager status without flooding conversation context.
 The optional bridge monitor shows attached-worker activity. `/pardes` and its

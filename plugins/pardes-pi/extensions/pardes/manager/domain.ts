@@ -349,7 +349,7 @@ export const InboxWakeSchema = Schema.Struct({
 });
 export type InboxWake = typeof InboxWakeSchema.Type;
 
-/** Durable marker that the delivered cursor was explicitly surfaced for user feedback. */
+/** Durable marker that the delivered cursor was explicitly bound to a user question. */
 export const InboxHandoffSchema = Schema.Struct({
   cursor: NonEmptyString,
   surfacedAt: NonEmptyString,

@@ -221,7 +221,7 @@ export interface AgentReportHandoffResult extends Omit<ReportExcerptMetadata, 'a
 
 export type InboxAcknowledgementReason =
   | 'manager_acknowledged'
-  | 'feedback_tool_submitted'
+  | 'question_answer_submitted'
   | 'user_message_after_handoff';
 
 export interface InboxAcknowledgement {
@@ -1568,18 +1568,22 @@ export class ManagerController {
   readonly completeWorkstream = (rawWorkstreamId: string, ctx?: ExtensionContext) =>
     this.withActiveLifecyclePermit(() => this.completeWorkstreamUnlocked(rawWorkstreamId, ctx));
 
-  /** Persist that the one delivered cursor was explicitly surfaced for user feedback. */
-  readonly beginInboxHandoff = Effect.fnUntraced(function* (
+  /** Persist the current delivered cursor as a question handoff, optionally doing nothing when absent. */
+  private readonly beginCurrentInboxHandoff = Effect.fnUntraced(function* (
     this: ManagerController,
-    ctx?: ExtensionContext,
+    ctx: ExtensionContext | undefined,
+    ifAvailable: boolean,
   ) {
+    if (ifAvailable && !this.active) return undefined;
     const active = yield* this.requireActive();
     const state = yield* this.refresh(ctx);
     const wake = retainCurrentInboxWake(state.inbox, state.inboxWake);
-    if (!wake)
+    if (!wake) {
+      if (ifAvailable) return undefined;
       return yield* new InboxHandoffUnavailableError({
         reason: state.inboxWake ? 'stale_delivered_cursor' : 'no_delivered_cursor',
       });
+    }
     const timestamp = yield* nowIso;
     const handoff: InboxHandoffStart = {
       cursor: wake.cursor,
@@ -1607,12 +1611,30 @@ export class ManagerController {
       active.store,
       makeEvent(
         'inbox_handoff_surfaced',
-        `Surfaced delivered inbox cursor ${wake.cursor} for explicit user feedback.`,
+        `Surfaced delivered inbox cursor ${wake.cursor} for an explicit user question.`,
         timestamp,
       ),
     );
     yield* this.refreshActiveState(active, ctx);
     return handoff;
+  });
+
+  /** Require and bind the currently delivered cursor. */
+  readonly beginInboxHandoff = Effect.fnUntraced(function* (
+    this: ManagerController,
+    ctx?: ExtensionContext,
+  ) {
+    const handoff = yield* this.beginCurrentInboxHandoff(ctx, false);
+    if (!handoff) return yield* new InboxHandoffUnavailableError({ reason: 'no_delivered_cursor' });
+    return handoff;
+  });
+
+  /** Bind the currently delivered cursor when one exists; inactive or cursor-free managers are valid. */
+  readonly beginInboxHandoffIfAvailable = Effect.fnUntraced(function* (
+    this: ManagerController,
+    ctx?: ExtensionContext,
+  ) {
+    return yield* this.beginCurrentInboxHandoff(ctx, true);
   });
 
   /** Disarm only the exact surfaced dialog marker without consuming its delivered cursor or inbox rows. */
@@ -1742,7 +1764,7 @@ export class ManagerController {
     return yield* this.acknowledgeInbox(ctx, {
       cursor: handoff.cursor,
       handoff,
-      reason: 'feedback_tool_submitted',
+      reason: 'question_answer_submitted',
     });
   });
 

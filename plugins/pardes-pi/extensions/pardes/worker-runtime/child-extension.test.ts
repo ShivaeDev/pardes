@@ -60,11 +60,15 @@ if (command === 'rev-parse') {
 } else if (command === 'status' && process.env.PARDES_TEST_GIT_PATHOLOGICAL === 'true') {
   process.stdout.write('x'.repeat(${16 * 1_024 * 1_024 + 1}));
 } else if (command === 'status') {
+  const rows = [];
   for (let index = 0; index < 7_000; index += 1)
-    process.stdout.write(\`?? status/\${String(index).padStart(4, '0')}-\${'s'.repeat(170)}\\n\`);
+    rows.push(\`?? status/\${String(index).padStart(4, '0')}-\${'s'.repeat(170)}\\n\`);
+  process.stdout.write(rows.join(''));
 } else if (command === 'diff') {
+  const rows = [];
   for (let index = 0; index < 7_000; index += 1)
-    process.stdout.write(\`src/\${String(index).padStart(4, '0')}-\${'p'.repeat(170)}.ts\\n\`);
+    rows.push(\`src/\${String(index).padStart(4, '0')}-\${'p'.repeat(170)}.ts\\n\`);
+  process.stdout.write(rows.join(''));
 } else {
   process.stderr.write('unexpected fake Git command');
   process.exitCode = 1;
@@ -316,6 +320,8 @@ describe('verifier child profile', () => {
     }
   });
 
+  // This intentionally transports more than 18 MiB across several child processes,
+  // including the breaker boundary, so allow for legitimate shared CI runner load.
   test('streams large status and changed-path output with complete-row omission metadata', async () => {
     const { root, worktree } = createFixture();
     const previous = {
@@ -379,7 +385,7 @@ describe('verifier child profile', () => {
       if (previous.pathological === undefined) delete process.env.PARDES_TEST_GIT_PATHOLOGICAL;
       else process.env.PARDES_TEST_GIT_PATHOLOGICAL = previous.pathological;
     }
-  });
+  }, 20_000);
 
   test('executes fixed bounded captured-head evidence', async () => {
     const { worktree } = createFixture();

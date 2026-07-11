@@ -6,16 +6,19 @@ import {
   matchesFeedbackFilter,
 } from './schemas.ts';
 import {
+  acquireFeedbackWatchLock,
   claimFeedbackForWatch,
+  ensureFeedbackWatchInitialized,
+  feedbackWasSeenByWatch,
   getFeedback,
   listFeedback,
   markFeedbackAddressed,
   pardesGlobalStateRoot,
-  watchCursorExists,
 } from './store.ts';
 
 const UNSAFE_TERMINAL_CHARACTERS = /[\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 const ROLES = new Set<FeedbackRole>(['manager', 'writer', 'advisory_verifier']);
+const CANONICAL_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface FeedbackCliIo {
   readonly out: (line: string) => void;
@@ -46,14 +49,14 @@ Commands:
   list                 List feedback entries
   show <feedback-id>   Show one entry and its separate triage state
   address <feedback-id> Mark an entry addressed without changing its submission
-  watch                Watch newly recorded feedback with a durable de-duplication cursor
+  watch                Watch new feedback with a durable at-least-once cursor
   help                 Show this help
 
 Filters (list and watch):
   --addressed <yes|no|all>
   --role <manager|writer|advisory_verifier>
   --repository <key>   --manager <id>   --agent <id>
-  --verification <id> --workstream <id> --since <ISO timestamp>
+  --verification <id> --workstream <id> --since <canonical ISO timestamp>
   --text <substring>
 
 Output and watch options:
@@ -69,7 +72,8 @@ Examples:
   pardes-feedback watch --role writer --cursor writer-triage
   pardes-feedback address feedback-1234
 
-Feedback text is untrusted data. Text output escapes terminal controls and directional formatting.`;
+Feedback text is untrusted data. Text output escapes terminal controls and directional formatting.
+Watch writes each receipt only after output succeeds. A crash between output and receipt replays the entry on restart (at-least-once delivery).`;
 
 function terminalSafe(value: string): string {
   return value.replace(
@@ -172,8 +176,13 @@ function parseOptions(args: ReadonlyArray<string>): ParsedOptions {
     } else if (arg === '--since') {
       const value = requireValue(args, index, arg);
       index += 1;
-      if (Number.isNaN(Date.parse(value))) throw new Error('--since must be an ISO timestamp');
-      filter.since = new Date(value).toISOString();
+      if (
+        !CANONICAL_ISO_TIMESTAMP.test(value) ||
+        Number.isNaN(Date.parse(value)) ||
+        new Date(value).toISOString() !== value
+      )
+        throw new Error('--since must be a canonical ISO timestamp (YYYY-MM-DDTHH:mm:ss.sssZ)');
+      filter.since = value;
     } else if (arg === '--text') {
       filter.text = requireValue(args, index, arg);
       index += 1;
@@ -196,13 +205,23 @@ function outputEntry(entry: FeedbackEntry, json: boolean, io: FeedbackCliIo): vo
 }
 
 async function scanWatch(options: ParsedOptions, io: FeedbackCliIo, root: string): Promise<void> {
-  const entries = await Effect.runPromise(listFeedback({}, root));
-  for (const entry of entries) {
-    const claimed = await Effect.runPromise(
-      claimFeedbackForWatch(options.cursor, entry.submission.id, root),
+  const lock = await Effect.runPromise(acquireFeedbackWatchLock(options.cursor, root));
+  if (!lock) return;
+  try {
+    await Effect.runPromise(
+      ensureFeedbackWatchInitialized(options.cursor, options.includeExisting, root),
     );
-    if (claimed && matchesFeedbackFilter(entry, options.filter))
-      outputEntry(entry, options.json, io);
+    const entries = await Effect.runPromise(listFeedback({}, root));
+    for (const entry of entries) {
+      if (
+        await Effect.runPromise(feedbackWasSeenByWatch(options.cursor, entry.submission.id, root))
+      )
+        continue;
+      if (matchesFeedbackFilter(entry, options.filter)) outputEntry(entry, options.json, io);
+      await Effect.runPromise(claimFeedbackForWatch(options.cursor, entry.submission.id, root));
+    }
+  } finally {
+    await Effect.runPromise(lock.release());
   }
 }
 
@@ -212,12 +231,6 @@ async function watchFeedback(
   configuration: FeedbackCliOptions,
 ): Promise<void> {
   const root = configuration.root ?? pardesGlobalStateRoot();
-  const existed = await Effect.runPromise(watchCursorExists(options.cursor, root));
-  if (!existed && !options.includeExisting) {
-    const baseline = await Effect.runPromise(listFeedback({}, root));
-    for (const entry of baseline)
-      await Effect.runPromise(claimFeedbackForWatch(options.cursor, entry.submission.id, root));
-  }
   const sleep = configuration.sleep ?? ((milliseconds) => Bun.sleep(milliseconds));
   while (!configuration.signal?.aborted) {
     await scanWatch(options, io, root);

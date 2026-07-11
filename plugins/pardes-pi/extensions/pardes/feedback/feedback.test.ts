@@ -1,6 +1,18 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -49,6 +61,32 @@ function sessionContext(sessionId: string) {
   } as unknown as Pick<ExtensionContext, 'sessionManager'>;
 }
 
+function runProcess(
+  command: string,
+  args: ReadonlyArray<string>,
+  options: { readonly cwd?: string; readonly env?: NodeJS.ProcessEnv } = {},
+): Promise<{ readonly code: number | null; readonly stderr: string; readonly stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [...args], {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.once('error', reject);
+    child.once('close', (code) =>
+      resolve({
+        code,
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        stdout: Buffer.concat(stdout).toString('utf8'),
+      }),
+    );
+  });
+}
+
 afterEach(() => {
   for (const root of temporaryDirectories.splice(0)) rmSync(root, { force: true, recursive: true });
 });
@@ -76,6 +114,80 @@ describe('global feedback registry', () => {
       expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(submission);
       expect(statSync(path).mode & 0o222).toBe(0);
     }
+  });
+
+  test('enforces owner-only modes and tightens existing registry permissions', async () => {
+    const root = temporaryRoot();
+    const submission = await Effect.runPromise(
+      submitFeedback('private friction', provenance(0), root),
+    );
+    const paths = feedbackRegistryPaths(root);
+    const submissionPath = join(paths.submissions, `${submission.id}.json`);
+
+    for (const directory of [paths.directory, paths.submissions, paths.triage, paths.watchCursors])
+      expect(statSync(directory).mode & 0o777).toBe(0o700);
+    expect(statSync(submissionPath).mode & 0o777).toBe(0o400);
+
+    chmodSync(paths.directory, 0o755);
+    chmodSync(paths.submissions, 0o755);
+    chmodSync(submissionPath, 0o444);
+    await Effect.runPromise(listFeedback({}, root));
+    expect(statSync(paths.directory).mode & 0o777).toBe(0o700);
+    expect(statSync(paths.submissions).mode & 0o777).toBe(0o700);
+    expect(statSync(submissionPath).mode & 0o777).toBe(0o400);
+  });
+
+  test('persists safely across truly separate concurrent writer processes', async () => {
+    const root = temporaryRoot();
+    const writer = join(root, 'writer.ts');
+    const storeUrl = new URL('./store.ts', import.meta.url).href;
+    const effectUrl = pathToFileURL(join(process.cwd(), 'node_modules/effect/dist/Effect.js')).href;
+    writeFileSync(
+      writer,
+      `import * as Effect from ${JSON.stringify(effectUrl)};\nimport { submitFeedback } from ${JSON.stringify(storeUrl)};\nconst [root, index] = process.argv.slice(2);\nawait Effect.runPromise(submitFeedback('process ' + index, { pardesVersion: '0.0.0', role: 'writer', sessionId: 'session-' + index }, root));\n`,
+    );
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        runProcess('bun', [writer, root, String(index)], { cwd: process.cwd() }),
+      ),
+    );
+    expect(results.map(({ code }) => code)).toEqual(Array.from({ length: 12 }, () => 0));
+    expect(await Effect.runPromise(listFeedback({}, root))).toHaveLength(12);
+    expect(
+      readdirSync(feedbackRegistryPaths(root).submissions).some((name) => name.endsWith('.tmp')),
+    ).toBe(false);
+  });
+
+  test('fails closed on redirected or malformed registry artifacts', async () => {
+    const symlinkRoot = temporaryRoot();
+    await Effect.runPromise(submitFeedback('valid', provenance(0), symlinkRoot));
+    const symlinkPaths = feedbackRegistryPaths(symlinkRoot);
+    const redirected = join(symlinkRoot, 'redirected.json');
+    writeFileSync(redirected, '{}\n');
+    symlinkSync(redirected, join(symlinkPaths.submissions, 'feedback-deadbeef.json'));
+    await expect(Effect.runPromise(listFeedback({}, symlinkRoot))).rejects.toMatchObject({
+      _tag: 'FeedbackStoreError',
+    });
+
+    const malformedRoot = temporaryRoot();
+    await Effect.runPromise(submitFeedback('valid', provenance(0), malformedRoot));
+    writeFileSync(
+      join(feedbackRegistryPaths(malformedRoot).submissions, 'feedback-deadbeef.json'),
+      '{not-json}\n',
+    );
+    await expect(Effect.runPromise(listFeedback({}, malformedRoot))).rejects.toMatchObject({
+      _tag: 'FeedbackStoreError',
+    });
+
+    const directoryRoot = temporaryRoot();
+    await Effect.runPromise(submitFeedback('valid', provenance(0), directoryRoot));
+    const directoryPaths = feedbackRegistryPaths(directoryRoot);
+    rmSync(directoryPaths.triage, { recursive: true });
+    mkdirSync(join(directoryRoot, 'redirected-triage'));
+    symlinkSync(join(directoryRoot, 'redirected-triage'), directoryPaths.triage);
+    await expect(Effect.runPromise(listFeedback({}, directoryRoot))).rejects.toMatchObject({
+      _tag: 'FeedbackStoreError',
+    });
   });
 
   test('keeps addressed triage separate, durable, idempotent, and leaves the submission unchanged', async () => {
@@ -229,6 +341,14 @@ describe('feedback CLI', () => {
     expect(output.at(-1)).toContain(first.id);
     expect(errors).toEqual([]);
     expect(terminalSafeJson({ text: dangerous })).not.toContain('\u202e');
+
+    errors.length = 0;
+    expect(await runFeedbackCli(['list', '--since', '2026'], io, { root })).toBe(1);
+    expect(errors[0]).toContain('canonical ISO timestamp');
+    errors.length = 0;
+    expect(
+      await runFeedbackCli(['list', '--since', '2026-02-30T00:00:00.000Z'], io, { root }),
+    ).toBe(1);
   });
 
   test('uses durable atomic watch receipts to survive duplicate scans, concurrent watchers, and restarts', async () => {
@@ -255,5 +375,109 @@ describe('feedback CLI', () => {
       ),
     );
     expect(claims.filter(Boolean)).toHaveLength(1);
+
+    const cursorDirectory = join(feedbackRegistryPaths(root).watchCursors, 'triage');
+    expect(statSync(cursorDirectory).mode & 0o777).toBe(0o700);
+    for (const name of readdirSync(cursorDirectory).filter((name) => name.endsWith('.json')))
+      expect(statSync(join(cursorDirectory, name)).mode & 0o777).toBe(0o400);
+  });
+
+  test('resumes an interrupted first-use initialization from one stable boundary', async () => {
+    const root = temporaryRoot();
+    const old = await Effect.runPromise(submitFeedback('old entry', provenance(0), root));
+    const paths = feedbackRegistryPaths(root);
+    const cursorDirectory = join(paths.watchCursors, 'interrupted');
+    mkdirSync(cursorDirectory, { mode: 0o700, recursive: true });
+    const boundaryAt = new Date().toISOString();
+    writeFileSync(
+      join(cursorDirectory, 'initializing.json'),
+      `${JSON.stringify({ boundaryAt, cursor: 'interrupted', includeExisting: false, schemaVersion: 1, status: 'initializing' })}\n`,
+      { mode: 0o400 },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const fresh = await Effect.runPromise(submitFeedback('fresh entry', provenance(1), root));
+    const output: string[] = [];
+    const io = { error: () => {}, out: (line: string) => output.push(line) };
+
+    expect(await runFeedbackCli(['watch', '--once', '--cursor', 'interrupted'], io, { root })).toBe(
+      0,
+    );
+    expect(output.some((line) => line.includes(old.id))).toBe(false);
+    expect(output.filter((line) => line.includes(fresh.id))).toHaveLength(1);
+    expect(
+      JSON.parse(readFileSync(join(cursorDirectory, 'initialized.json'), 'utf8')),
+    ).toMatchObject({ boundaryAt, status: 'initialized' });
+  });
+
+  test('records delivery after output so output failure and crash-lock recovery replay safely', async () => {
+    const root = temporaryRoot();
+    const first = await Effect.runPromise(submitFeedback('must replay', provenance(0), root));
+    const errors: string[] = [];
+    expect(
+      await runFeedbackCli(
+        ['watch', '--once', '--include-existing', '--cursor', 'replay'],
+        {
+          error: (line) => errors.push(line),
+          out: () => {
+            throw new Error('sink failed');
+          },
+        },
+        { root },
+      ),
+    ).toBe(1);
+    expect(errors[0]).toContain('sink failed');
+
+    const output: string[] = [];
+    const io = { error: () => {}, out: (line: string) => output.push(line) };
+    expect(await runFeedbackCli(['watch', '--once', '--cursor', 'replay'], io, { root })).toBe(0);
+    expect(output.filter((line) => line.includes(first.id))).toHaveLength(1);
+
+    const second = await Effect.runPromise(submitFeedback('after crash', provenance(1), root));
+    const lockPath = join(feedbackRegistryPaths(root).watchCursors, 'replay', 'scan.lock');
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({ createdAt: new Date().toISOString(), pid: 2_147_483_647, token: 'dead-owner' })}\n`,
+      { mode: 0o600 },
+    );
+    expect(await runFeedbackCli(['watch', '--once', '--cursor', 'replay'], io, { root })).toBe(0);
+    expect(output.filter((line) => line.includes(second.id))).toHaveLength(1);
+  });
+
+  test('executes through the installed-bin shape and includes feedback runtime files in the package', async () => {
+    const root = temporaryRoot();
+    const binDirectory = join(root, 'node_modules', '.bin');
+    mkdirSync(binDirectory, { recursive: true });
+    const sourceBin = join(process.cwd(), 'plugins/pardes-pi/scripts/pardes-feedback.ts');
+    const installedBin = join(binDirectory, 'pardes-feedback');
+    symlinkSync(sourceBin, installedBin);
+    const help = await runProcess(installedBin, ['help'], {
+      cwd: process.cwd(),
+      env: { ...process.env, PARDES_PI_STATE_DIR: root },
+    });
+    expect(help).toMatchObject({ code: 0, stderr: '' });
+    expect(help.stdout).toContain('Usage: pardes-feedback');
+
+    const submission = await Effect.runPromise(
+      submitFeedback('installed watch entry', provenance(0), root),
+    );
+    const watched = await runProcess(
+      installedBin,
+      ['watch', '--once', '--include-existing', '--cursor', 'installed-bin'],
+      { cwd: process.cwd(), env: { ...process.env, PARDES_PI_STATE_DIR: root } },
+    );
+    expect(watched.code).toBe(0);
+    expect(watched.stdout).toContain(submission.id);
+
+    const packed = await runProcess('bun', ['pm', 'pack', '--dry-run'], {
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    expect(packed.code).toBe(0);
+    expect(`${packed.stdout}\n${packed.stderr}`).toContain(
+      'plugins/pardes-pi/scripts/pardes-feedback.ts',
+    );
+    expect(`${packed.stdout}\n${packed.stderr}`).toContain(
+      'plugins/pardes-pi/extensions/pardes/feedback/store.ts',
+    );
   });
 });

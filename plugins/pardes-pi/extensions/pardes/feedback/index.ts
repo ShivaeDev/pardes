@@ -20,12 +20,18 @@ export {
   FeedbackSubmissionSchema,
   type FeedbackTriage,
   FeedbackTriageSchema,
+  type FeedbackWatchInitialization,
+  FeedbackWatchInitializationSchema,
   matchesFeedbackFilter,
   PARDES_VERSION,
 } from './schemas.ts';
 export {
+  acquireFeedbackWatchLock,
   claimFeedbackForWatch,
+  ensureFeedbackWatchInitialized,
+  type FeedbackWatchLock,
   feedbackRegistryPaths,
+  feedbackWasSeenByWatch,
   getFeedback,
   listFeedback,
   markFeedbackAddressed,

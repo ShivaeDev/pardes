@@ -1,6 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, link, lstat, mkdir, open, readdir, readFile, rm } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Effect, Schema } from 'effect';
@@ -15,12 +26,17 @@ import {
   FeedbackSubmissionSchema,
   type FeedbackTriage,
   FeedbackTriageSchema,
+  type FeedbackWatchInitialization,
+  FeedbackWatchInitializationSchema,
   matchesFeedbackFilter,
 } from './schemas.ts';
 
 const FEEDBACK_ID_PATTERN = /^feedback-[a-f0-9-]+$/;
 const CURSOR_PATTERN = /^[a-zA-Z0-9._-]{1,128}$/;
 const FEEDBACK_ARTIFACT_MAX_BYTES = FEEDBACK_TEXT_MAX_BYTES + 16 * 1_024;
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_IMMUTABLE_FILE_MODE = 0o400;
+const WATCH_LOCK_RECOVERY_GRACE_MS = 5_000;
 
 export interface FeedbackRegistryPaths {
   readonly directory: string;
@@ -67,16 +83,62 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
+async function validateAndTightenPrivateDirectory(path: string): Promise<void> {
+  const stats = await lstat(path);
+  if (!stats.isDirectory() || stats.isSymbolicLink())
+    throw new Error('feedback registry directory is redirected');
+  await chmod(path, PRIVATE_DIRECTORY_MODE);
+}
+
+async function ensurePrivateDirectory(path: string, recursive = false): Promise<void> {
+  try {
+    await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE, recursive });
+  } catch (error) {
+    if (!isCode(error, 'EEXIST')) throw error;
+  }
+  await validateAndTightenPrivateDirectory(path);
+}
+
+async function tightenJsonArtifacts(directory: string): Promise<void> {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.name.endsWith('.json')) continue;
+    if (!entry.isFile() || entry.isSymbolicLink())
+      throw new Error('feedback registry artifact is redirected');
+    await chmod(join(directory, entry.name), PRIVATE_IMMUTABLE_FILE_MODE);
+  }
+}
+
 async function ensureDirectories(paths: FeedbackRegistryPaths): Promise<void> {
-  await mkdir(paths.submissions, { recursive: true });
-  await mkdir(paths.triage, { recursive: true });
-  await mkdir(paths.watchCursors, { recursive: true });
+  await ensurePrivateDirectory(paths.directory, true);
+  await ensurePrivateDirectory(paths.submissions);
+  await ensurePrivateDirectory(paths.triage);
+  await ensurePrivateDirectory(paths.watchCursors);
+  await tightenJsonArtifacts(paths.submissions);
+  await tightenJsonArtifacts(paths.triage);
+  for (const entry of await readdir(paths.watchCursors, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink())
+      throw new Error('feedback watch cursor directory is redirected');
+    const cursorDirectory = join(paths.watchCursors, entry.name);
+    await validateAndTightenPrivateDirectory(cursorDirectory);
+    await tightenJsonArtifacts(cursorDirectory);
+  }
+}
+
+async function ensureCursorDirectory(
+  paths: FeedbackRegistryPaths,
+  cursor: string,
+): Promise<string> {
+  if (!CURSOR_PATTERN.test(cursor)) throw new Error('invalid watch cursor');
+  await ensureDirectories(paths);
+  const cursorDirectory = join(paths.watchCursors, cursor);
+  await ensurePrivateDirectory(cursorDirectory);
+  return cursorDirectory;
 }
 
 /** Create one immutable, atomically visible artifact without ever replacing an existing target. */
 async function createImmutableArtifact(path: string, source: string): Promise<boolean> {
   const temporary = `${path}.${randomUUID()}.tmp`;
-  const handle = await open(temporary, 'wx', 0o444);
+  const handle = await open(temporary, 'wx', PRIVATE_IMMUTABLE_FILE_MODE);
   try {
     await handle.writeFile(source, 'utf8');
     await handle.sync();
@@ -164,6 +226,7 @@ export function getFeedback(
         ? new FeedbackNotFoundError({ feedbackId })
         : storeError('read feedback', cause),
     try: async () => {
+      await ensureDirectories(paths);
       const submission = await readDecoded(
         join(paths.submissions, `${feedbackId}.json`),
         FeedbackSubmissionSchema,
@@ -181,10 +244,14 @@ export function listFeedback(
   return effectPromise('list feedback', async () => {
     const paths = feedbackRegistryPaths(root);
     await ensureDirectories(paths);
-    const names = (await readdir(paths.submissions, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith('.json'))
-      .map((entry) => entry.name)
-      .sort();
+    const names: string[] = [];
+    for (const entry of await readdir(paths.submissions, { withFileTypes: true })) {
+      if (!entry.name.endsWith('.json')) continue;
+      if (!entry.isFile() || entry.isSymbolicLink())
+        throw new Error('feedback submission artifact is redirected');
+      names.push(entry.name);
+    }
+    names.sort();
     const entries: FeedbackEntry[] = [];
     for (const name of names) {
       const feedbackId = name.slice(0, -'.json'.length);
@@ -230,20 +297,206 @@ export function markFeedbackAddressed(
   );
 }
 
-/** Atomically claim one entry for a durable named watch cursor. */
+interface WatchLockRecord {
+  readonly createdAt: string;
+  readonly pid: number;
+  readonly token: string;
+}
+
+export interface FeedbackWatchLock {
+  readonly release: () => Effect.Effect<void, FeedbackStoreError>;
+}
+
+function watchLockRecord(input: unknown): WatchLockRecord | undefined {
+  if (typeof input !== 'object' || input === null) return;
+  const record = input as Partial<WatchLockRecord>;
+  return typeof record.createdAt === 'string' &&
+    typeof record.pid === 'number' &&
+    Number.isInteger(record.pid) &&
+    typeof record.token === 'string'
+    ? { createdAt: record.createdAt, pid: record.pid, token: record.token }
+    : undefined;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isCode(error, 'EPERM');
+  }
+}
+
+async function releaseWatchLock(path: string, token: string): Promise<void> {
+  try {
+    const owner = watchLockRecord(JSON.parse(await readFile(path, 'utf8')) as unknown);
+    if (owner?.token !== token) return;
+    await rm(path);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    if (!isCode(error, 'ENOENT')) throw error;
+  }
+}
+
+/** Serialize one cursor scan across processes; dead owners are recovered before replay. */
+export function acquireFeedbackWatchLock(
+  cursor: string,
+  root = pardesGlobalStateRoot(),
+): Effect.Effect<FeedbackWatchLock | undefined, FeedbackStoreError> {
+  return effectPromise('acquire feedback watch lock', async () => {
+    const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
+    const path = join(cursorDirectory, 'scan.lock');
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const token = randomUUID();
+      const owner: WatchLockRecord = {
+        createdAt: new Date().toISOString(),
+        pid: process.pid,
+        token,
+      };
+      try {
+        const handle = await open(path, 'wx', 0o600);
+        try {
+          await handle.writeFile(`${JSON.stringify(owner)}\n`, 'utf8');
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await syncDirectory(cursorDirectory);
+        return {
+          release: () =>
+            effectPromise('release feedback watch lock', () => releaseWatchLock(path, token)),
+        };
+      } catch (error) {
+        if (!isCode(error, 'EEXIST')) throw error;
+      }
+
+      const stats = await lstat(path);
+      if (!stats.isFile() || stats.isSymbolicLink())
+        throw new Error('feedback watch lock is redirected');
+      let current: WatchLockRecord | undefined;
+      try {
+        current = watchLockRecord(JSON.parse(await readFile(path, 'utf8')) as unknown);
+      } catch {
+        current = undefined;
+      }
+      const young = Date.now() - stats.mtimeMs <= WATCH_LOCK_RECOVERY_GRACE_MS;
+      if ((current && processIsAlive(current.pid)) || (!current && young)) return undefined;
+      const stale = `${path}.stale-${randomUUID()}`;
+      try {
+        await rename(path, stale);
+        await rm(stale, { force: true });
+      } catch (error) {
+        if (!isCode(error, 'ENOENT')) return undefined;
+      }
+    }
+    return undefined;
+  });
+}
+
+/** Atomically record delivery after output succeeds. */
 export function claimFeedbackForWatch(
   cursor: string,
   feedbackId: string,
   root = pardesGlobalStateRoot(),
 ): Effect.Effect<boolean, FeedbackStoreError> {
-  return effectPromise('claim feedback for watch', async () => {
-    if (!CURSOR_PATTERN.test(cursor)) throw new Error('invalid watch cursor');
+  return effectPromise('record feedback watch delivery', async () => {
     if (!validFeedbackId(feedbackId)) throw new Error('invalid feedback id');
-    const paths = feedbackRegistryPaths(root);
-    const cursorDirectory = join(paths.watchCursors, cursor);
-    await mkdir(cursorDirectory, { recursive: true });
+    const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
     const receipt = `${JSON.stringify({ feedbackId, seenAt: new Date().toISOString() })}\n`;
     return createImmutableArtifact(join(cursorDirectory, `${feedbackId}.json`), receipt);
+  });
+}
+
+export function feedbackWasSeenByWatch(
+  cursor: string,
+  feedbackId: string,
+  root = pardesGlobalStateRoot(),
+): Effect.Effect<boolean, FeedbackStoreError> {
+  return effectPromise('inspect feedback watch delivery', async () => {
+    if (!validFeedbackId(feedbackId)) throw new Error('invalid feedback id');
+    const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
+    try {
+      await access(join(cursorDirectory, `${feedbackId}.json`), constants.F_OK);
+      return true;
+    } catch (error) {
+      if (isCode(error, 'ENOENT')) return false;
+      throw error;
+    }
+  });
+}
+
+async function optionalInitialization(
+  path: string,
+): Promise<FeedbackWatchInitialization | undefined> {
+  try {
+    return await readDecoded(path, FeedbackWatchInitializationSchema);
+  } catch (error) {
+    if (isCode(error, 'ENOENT')) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * Establish one durable timestamp boundary before baseline enumeration. An
+ * interrupted initializer is resumed from the immutable boundary on restart.
+ * Callers hold the cursor scan lock while running this transition.
+ */
+export function ensureFeedbackWatchInitialized(
+  cursor: string,
+  includeExisting: boolean,
+  root = pardesGlobalStateRoot(),
+): Effect.Effect<FeedbackWatchInitialization, FeedbackStoreError> {
+  return effectPromise('initialize feedback watch cursor', async () => {
+    const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
+    const completedPath = join(cursorDirectory, 'initialized.json');
+    const completed = await optionalInitialization(completedPath);
+    if (completed) {
+      if (completed.cursor !== cursor || completed.status !== 'initialized')
+        throw new Error('feedback watch initialization does not match its cursor');
+      return completed;
+    }
+
+    const pendingPath = join(cursorDirectory, 'initializing.json');
+    let pending = await optionalInitialization(pendingPath);
+    if (!pending) {
+      const proposed: FeedbackWatchInitialization = {
+        boundaryAt: new Date().toISOString(),
+        cursor,
+        includeExisting,
+        schemaVersion: FEEDBACK_SCHEMA_VERSION,
+        status: 'initializing',
+      };
+      const encoded = await Effect.runPromise(
+        Schema.encodeEffect(FeedbackWatchInitializationSchema)(proposed),
+      );
+      const created = await createImmutableArtifact(
+        pendingPath,
+        `${JSON.stringify(encoded, null, 2)}\n`,
+      );
+      pending = created
+        ? proposed
+        : await readDecoded(pendingPath, FeedbackWatchInitializationSchema);
+    }
+    if (pending.cursor !== cursor || pending.status !== 'initializing')
+      throw new Error('feedback watch initialization does not match its cursor');
+
+    if (!pending.includeExisting) {
+      const baseline = await Effect.runPromise(listFeedback({}, root));
+      for (const entry of baseline) {
+        if (entry.submission.createdAt < pending.boundaryAt)
+          await Effect.runPromise(claimFeedbackForWatch(cursor, entry.submission.id, root));
+      }
+    }
+
+    const initialized: FeedbackWatchInitialization = { ...pending, status: 'initialized' };
+    const encoded = await Effect.runPromise(
+      Schema.encodeEffect(FeedbackWatchInitializationSchema)(initialized),
+    );
+    const created = await createImmutableArtifact(
+      completedPath,
+      `${JSON.stringify(encoded, null, 2)}\n`,
+    );
+    return created ? initialized : readDecoded(completedPath, FeedbackWatchInitializationSchema);
   });
 }
 
@@ -252,10 +505,13 @@ export function watchCursorExists(
   root = pardesGlobalStateRoot(),
 ): Effect.Effect<boolean, FeedbackStoreError> {
   return effectPromise('inspect feedback watch cursor', async () => {
-    if (!CURSOR_PATTERN.test(cursor)) throw new Error('invalid watch cursor');
+    const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
     try {
-      await access(join(feedbackRegistryPaths(root).watchCursors, cursor), constants.F_OK);
-      return true;
+      const initialized = await readDecoded(
+        join(cursorDirectory, 'initialized.json'),
+        FeedbackWatchInitializationSchema,
+      );
+      return initialized.cursor === cursor && initialized.status === 'initialized';
     } catch (error) {
       if (isCode(error, 'ENOENT')) return false;
       throw error;

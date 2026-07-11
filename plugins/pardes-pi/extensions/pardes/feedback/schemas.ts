@@ -39,6 +39,15 @@ export const FeedbackTriageSchema = Schema.Struct({
 });
 export type FeedbackTriage = typeof FeedbackTriageSchema.Type;
 
+export const FeedbackWatchInitializationSchema = Schema.Struct({
+  boundaryAt: NonEmptyString,
+  cursor: NonEmptyString.check(Schema.isMaxLength(128)),
+  includeExisting: Schema.Boolean,
+  schemaVersion: Schema.Literal(FEEDBACK_SCHEMA_VERSION),
+  status: Schema.Literals(['initializing', 'initialized']),
+});
+export type FeedbackWatchInitialization = typeof FeedbackWatchInitializationSchema.Type;
+
 export interface FeedbackEntry {
   readonly submission: FeedbackSubmission;
   readonly triage?: FeedbackTriage;

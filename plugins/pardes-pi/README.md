@@ -128,7 +128,8 @@ provenance (time, id, role and available session/manager/agent/workstream,
 repository, verifier, and version identities); it never automatically captures
 logs, files, environment values, or secrets.
 
-Each submission is an immutable atomic JSON record in the global registry.
+Each submission is an immutable atomic JSON record in the owner-only global
+registry; existing registry directories and artifacts are tightened when read.
 Addressed state is stored separately so triage never rewrites the submission.
 The installed package exposes a human CLI:
 
@@ -141,9 +142,11 @@ pardes-feedback address <feedback-id>
 ```
 
 From a source checkout, use `bun run feedback -- <command>`. Watch cursors use
-atomic per-entry receipts, so concurrent scans and restarted watchers do not log
-the same entry twice. CLI rendering treats feedback text as untrusted and
-escapes terminal controls.
+one durable initialization boundary, a recoverable cross-process scan lock, and
+atomic per-entry receipts written only after output succeeds. Concurrent scans
+do not duplicate output; a crash between output and receipt deliberately replays
+the entry after restart for at-least-once delivery. CLI rendering treats feedback
+text as untrusted and escapes terminal controls.
 
 ## Development validation
 

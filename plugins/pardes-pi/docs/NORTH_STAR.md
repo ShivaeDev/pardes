@@ -329,11 +329,14 @@ free-form text field and covers anything frustrating, confusing, broken,
 annoying, or wasteful rather than only harness defects. Each submission is a
 separate immutable atomic JSON record in global Pardes state. Pardes adds only
 bounded explicit provenance and never automatically captures logs, file
-contents, environment values, or secrets. Human addressed-state triage remains
-in a separate durable record. The `pardes-feedback` CLI lists, filters, shows,
-watches, and marks entries addressed; durable per-entry watch receipts prevent
-duplicate logging across races and restarts, and terminal output treats authored
-text as untrusted data.
+contents, environment values, or secrets. Registry directories and artifacts
+are owner-only, including tightened existing entries. Human addressed-state
+triage remains in a separate durable record. The `pardes-feedback` CLI lists,
+filters, shows, watches, and marks entries addressed. Watch uses one durable
+initialization boundary, a recoverable cross-process scan lock, and output-before-
+receipt at-least-once delivery: ordinary concurrent scans do not duplicate, while
+a crash between output and receipt safely replays after restart. Terminal output
+treats authored text as untrusted data.
 
 ## External feedback and trust
 

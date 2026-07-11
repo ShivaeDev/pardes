@@ -84,9 +84,16 @@ durable history remains intact. It fails closed on unrelated interruption, and
 `/pardes stop` synchronously cancels every active report identity and invalidates
 pre-read lifecycle permits before manager deactivation. Restart advances the
 permit epoch, so a late pre-stop artifact read cannot create delivery or block a
-fresh retrieval. After fixes, call
-`verification_refresh({ verificationId })` so the same retained verifier checks
-the latest clean HEAD. Verification is advisory and
+fresh retrieval. A terminal writer report that advances the reviewed head may
+carry a Pardes-derived stale-evidence context on that same inbox row; treat it as
+the software-owned signal to refresh, not as a second missing notification. An
+`audit repair pending` count is software-owned durable recovery state; leave its
+blocked row unacknowledged and let restore/retry settle the exact audit identity.
+If storage status reports event corruption, Pardes preserves the damaged bytes,
+retains parseable audit records, and reports whether it repaired a trailing
+fragment or interior line; inspect the preserved artifact only for operator
+diagnosis. After fixes, call `verification_refresh({ verificationId })` so the
+same retained verifier checks the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering
 slices and when a concrete review question remains. Skip trivial documentation
 or test-only maintenance unless risk justifies it. Do not recreate verification
@@ -110,6 +117,11 @@ For a completed worker slice:
    rewrite published branch history because Pardes exact-SHA publication
    intentionally never force-pushes;
 7. leave merges under user control.
+
+Acknowledged conflict attention stays generation-scoped to its audited head and
+owner lifecycle. Transient `unknown` or one-off `mergeable` hosted projections do
+not re-arm it. A newly audited head/lifecycle or conflict reappearance after
+confirmed resolution does; inspect that new generation rather than polling.
 
 Browser handoff is explicit: omit `browserMode` or use `'none'` for no opener,
 use `'background'` for macOS `open -g` with a portable ordinary-opener fallback

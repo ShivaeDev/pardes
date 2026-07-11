@@ -26,6 +26,7 @@ export interface VerificationLifecycleNamespace extends ManagerNamespaceContext 
 export interface VerificationLifecycleCallbacks {
   readonly refresh: (ctx?: ExtensionContext) => Effect.Effect<void, unknown>;
   readonly appendEventSafely: (event: ManagerEvent) => Effect.Effect<void>;
+  readonly settleAuditIntent: (event: ManagerEvent) => Effect.Effect<boolean, unknown>;
   readonly releaseInboxWake: () => Effect.Effect<boolean, unknown>;
   readonly defaultModel: (ctx?: ExtensionContext) => string | undefined;
   readonly defaultThinkingLevel: () => WorkerThinkingLevel;

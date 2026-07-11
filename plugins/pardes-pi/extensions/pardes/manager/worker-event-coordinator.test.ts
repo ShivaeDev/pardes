@@ -87,6 +87,11 @@ describe('incoming worker-event coordinator', () => {
           render: () => {},
           retryResolvedVerificationRetirementForIdleVerifier: () => Effect.succeed(false),
           serializeVerificationMutation: (effect) => effect,
+          settleAuditIntent: (event) =>
+            Effect.sync(() => {
+              trace.push(`append:${event.type}`);
+              return true;
+            }),
         },
         liveRuntimes: new Map(),
         namespace,
@@ -233,6 +238,11 @@ describe('incoming worker-event coordinator', () => {
           render: () => {},
           retryResolvedVerificationRetirementForIdleVerifier: () => Effect.succeed(false),
           serializeVerificationMutation: (effect) => effect,
+          settleAuditIntent: (event) =>
+            Effect.sync(() => {
+              appended.push(event.type);
+              return true;
+            }),
         },
         liveRuntimes: new Map(),
         namespace,
@@ -437,6 +447,7 @@ describe('incoming worker-event coordinator', () => {
                 Effect.andThen(effect),
               ),
             ),
+          settleAuditIntent: () => Effect.succeed(true),
         },
         liveRuntimes: new Map(),
         namespace,
@@ -617,6 +628,7 @@ describe('incoming worker-event coordinator', () => {
             Effect.sync(() => {
               serializedMutations += 1;
             }).pipe(Effect.andThen(effect)),
+          settleAuditIntent: () => Effect.succeed(true),
         },
         liveRuntimes,
         namespace,
@@ -801,6 +813,7 @@ describe('incoming worker-event coordinator', () => {
               Effect.andThen(Deferred.await(releaseSerialization)),
               Effect.andThen(effect),
             ),
+          settleAuditIntent: () => Effect.succeed(true),
         },
         liveRuntimes: new Map(),
         namespace,

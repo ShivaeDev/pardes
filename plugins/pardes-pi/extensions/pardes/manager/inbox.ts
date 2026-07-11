@@ -208,7 +208,7 @@ function drillDownPointer(event: ManagerEvent): string {
 
 function digestSummary(event: ManagerEvent): string {
   if (CHILD_SUMMARY_EVENT_TYPES.has(event.type))
-    return `[${childDigestLabel(event, 'summary')}] ${drillDownPointer(event)}`;
+    return `[${childDigestLabel(event, 'summary')}${event.coalescedVerificationEvidence?.length ? ` + Pardes stale verification context:${event.coalescedVerificationEvidence.length}` : ''}] ${drillDownPointer(event)}`;
   if (event.type === 'agent_question')
     return `[${childDigestLabel(event, 'question')}] ${drillDownPointer(event)}`;
   if (GITHUB_METADATA_EVENT_TYPES.has(event.type))

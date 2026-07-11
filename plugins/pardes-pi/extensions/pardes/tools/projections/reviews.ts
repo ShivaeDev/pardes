@@ -26,6 +26,13 @@ export function reviewWarningMetadata(pullRequest: PullRequestRecord): ReadonlyA
   if (pullRequest.headDivergedAt) warnings.push('remote-head');
   const paginationGap = discussionPaginationGapMetadata(pullRequest);
   if (paginationGap) warnings.push(paginationGap);
+  if (
+    pullRequest.conflictAttention?.phase !== undefined &&
+    pullRequest.conflictAttention.phase !== 'resolved'
+  )
+    warnings.push(
+      `conflict-gen:${pullRequest.conflictAttention.generation}/${pullRequest.conflictAttention.phase}`,
+    );
   return warnings;
 }
 

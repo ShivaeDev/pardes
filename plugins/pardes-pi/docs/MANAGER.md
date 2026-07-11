@@ -76,7 +76,9 @@ do not poll. Inspect bounded `verification_status({ verificationId })` and call
 `report_get({ reportId })` only when the result or a concrete decision requires
 detail. A terminal writer report that advances the reviewed head may carry a
 Pardes-derived stale-evidence context on that same inbox row; treat it as the
-software-owned signal to refresh, not as a second missing notification. After
+software-owned signal to refresh, not as a second missing notification. An
+`audit repair pending` count is software-owned durable recovery state; leave its
+blocked row unacknowledged and let restore/retry settle the exact audit identity. After
 fixes, call `verification_refresh({ verificationId })` so the same retained
 verifier checks the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering

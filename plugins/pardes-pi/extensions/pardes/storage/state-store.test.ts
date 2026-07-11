@@ -73,7 +73,8 @@ describe('filesystem state store', () => {
       summary: 'test event',
       type: 'test_event',
     };
-    await Effect.runPromise(store.appendEvent(event));
+    await Effect.runPromise(store.appendEventOnce(event));
+    await Effect.runPromise(store.appendEventOnce(event));
     const report: AgentReport = {
       agentId: 'agent-1',
       createdAt: '2026-06-01T00:00:00.000Z',

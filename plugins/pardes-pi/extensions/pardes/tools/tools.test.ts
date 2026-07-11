@@ -1267,6 +1267,7 @@ describe('Pardes model-visible tools', () => {
     ];
     const state = {
       ...base,
+      auditIntents: { 'event-1': requiredValue(inbox[0]) },
       githubRateMetadataUnavailableAt: createdAt,
       inbox: [
         ...inbox,
@@ -1308,7 +1309,7 @@ describe('Pardes model-visible tools', () => {
 
     const pending = await status.execute('call-2', { view: 'inbox' }, signal, onUpdate, ctx);
     expect(pending.content[0]?.text).toContain(
-      'inbox: 2 pending events · read and judge one: inbox_get({ eventId })',
+      'inbox: 2 pending events · audit repair pending:1 · read and judge one: inbox_get({ eventId })',
     );
     expect(pending.content[0]?.text).toContain('delivery: cursor event-1 · delivered age:');
     expect(pending.content[0]?.text).toContain(

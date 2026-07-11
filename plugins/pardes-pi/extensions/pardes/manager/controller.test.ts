@@ -5829,7 +5829,7 @@ describe('manager controller', () => {
       }),
     );
 
-    expect(controller.snapshot()?.revision).toBe(revisionBeforeReports + 3);
+    expect(controller.snapshot()?.revision).toBe(revisionBeforeReports + 4);
     expect(controller.snapshot()?.inbox).toHaveLength(1);
     expect(controller.snapshot()?.inbox[0]).toMatchObject({
       agentId: agent.id,
@@ -9025,6 +9025,23 @@ describe('manager controller', () => {
     );
     await Effect.runPromise(restored.acknowledgeInbox(fixture.ctx, { cursor: report.id }));
     await Effect.runPromise(
+      restoredWatcher.observe(pullRequestId, observedPullRequest({ mergeable: 'mergeable' })),
+    );
+    expect(restored.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      attentionObservedForKey: false,
+      generation: 2,
+      phase: 'resolution_candidate',
+    });
+    await Effect.runPromise(
+      restoredWatcher.observe(pullRequestId, observedPullRequest({ mergeable: 'mergeable' })),
+    );
+    expect(restored.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      attentionObservedForKey: false,
+      generation: 2,
+      phase: 'resolved',
+    });
+    expect(restored.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toEqual([]);
+    await Effect.runPromise(
       restoredWatcher.observeLifecycle(
         pullRequestId,
         observedPullRequest({ mergeable: 'conflicting' }),
@@ -11094,17 +11111,24 @@ describe('manager controller', () => {
     );
     const deliveredQuestion = requiredValue(controller.snapshot()?.inboxWake);
     const wakeMessageCount = fixture.messages.length;
+    const stateDirectory = activationStateDir(fixture.entries);
+    const eventPath = join(stateDirectory, 'events.jsonl');
+    const eventSourceBeforeFailure = readFileSync(eventPath, 'utf8');
+    rmSync(eventPath);
+    mkdirSync(eventPath);
 
     writeFileSync(join(worktree.path, 'fixed.txt'), 'new source head\n');
     git(worktree.path, 'add', 'fixed.txt');
     git(worktree.path, 'commit', '-m', 'advance reviewed source');
-    await Effect.runPromise(
-      workers.emit({
-        agentId: agent.id,
-        status: 'completed',
-        summary: 'Implemented the requested fix.',
-        type: 'report',
-      }),
+    await withoutConsoleError(() =>
+      Effect.runPromise(
+        workers.emit({
+          agentId: agent.id,
+          status: 'completed',
+          summary: 'Implemented the requested fix.',
+          type: 'report',
+        }),
+      ),
     );
 
     const afterReport = requiredValue(controller.snapshot());
@@ -11116,6 +11140,10 @@ describe('manager controller', () => {
       'agent_report_completed',
     ]);
     expect(report.summary).toContain('[Pardes-derived context]');
+    expect(report).toMatchObject({
+      presentationBlocked: true,
+      presentationBlockedReason: 'verification_reconciliation',
+    });
     expect(report.coalescedVerificationEvidence).toEqual([
       expect.objectContaining({
         attempt: 1,
@@ -11134,29 +11162,28 @@ describe('manager controller', () => {
       1,
     );
     expect(fixture.messages).toHaveLength(wakeMessageCount);
-    const auditTypes = managerEvents(activationStateDir(fixture.entries)).map(({ type }) => type);
-    expect(auditTypes).toContain('agent_report_completed');
-    expect(auditTypes).toContain('verification_evidence_stale');
+    const pendingAudits = Object.values(afterReport.auditIntents ?? {});
+    const reportAudit = requiredValue(pendingAudits.find((event) => event.id === report.id));
+    const staleAudit = requiredValue(
+      pendingAudits.find(
+        (event) =>
+          event.type === 'verification_evidence_stale' && event.verificationId === verification.id,
+      ),
+    );
+    expect(pendingAudits).toHaveLength(2);
 
     await Effect.runPromise(controller.shutdown(fixture.ctx));
-    // Simulate a manager exit after stale-state persistence but before the
-    // report presentation barrier refinement settled. Restore must retry the
-    // software-owned refinement without minting or consuming a cursor.
-    const statePath = join(activationStateDir(fixture.entries), 'state.json');
-    const interrupted = JSON.parse(readFileSync(statePath, 'utf8')) as {
-      inbox: Array<Record<string, unknown>>;
-    };
-    const interruptedReport = requiredValue(
-      interrupted.inbox.find((event) => event.id === report.id),
-    );
-    interruptedReport.presentationBlocked = true;
-    interruptedReport.presentationBlockedReason = 'verification_reconciliation';
-    writeFileSync(statePath, `${JSON.stringify(interrupted, null, 2)}\n`);
+    // Both append attempts failed after state persistence. Repair the external
+    // leaf, then restore must append each exact intent once before releasing the row.
+    rmSync(eventPath, { force: true, recursive: true });
+    writeFileSync(eventPath, eventSourceBeforeFailure);
+    const statePath = join(stateDirectory, 'state.json');
 
     const restored = new ManagerController(fixture.pi, {
       makeWorkers: stubWorkers().makeWorkers,
     });
     await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.auditIntents).toEqual({});
     expect(restored.snapshot()?.inboxWake).toEqual(deliveredQuestion);
     expect(restored.snapshot()?.inbox.find((event) => event.id === report.id)).not.toHaveProperty(
       'presentationBlocked',
@@ -11167,23 +11194,52 @@ describe('manager controller', () => {
     expect(
       restored.snapshot()?.inbox.filter((event) => event.type === 'verification_evidence_stale'),
     ).toEqual([]);
+    expect(
+      managerEvents(stateDirectory).filter((event) => event.id === reportAudit.id),
+    ).toHaveLength(1);
+    expect(
+      managerEvents(stateDirectory).filter((event) => event.id === staleAudit.id),
+    ).toHaveLength(1);
+
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+    // Simulate exit at both post-append/pre-intent-clear boundaries. Idempotent
+    // restore observes the existing identities, clears intents, and duplicates none.
+    const appendedButUncleared = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      auditIntents?: Record<string, unknown>;
+    };
+    appendedButUncleared.auditIntents = {
+      [reportAudit.id]: reportAudit,
+      [staleAudit.id]: staleAudit,
+    };
+    writeFileSync(statePath, `${JSON.stringify(appendedButUncleared, null, 2)}\n`);
+    const reloaded = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(reloaded.restore(fixture.ctx));
+    expect(reloaded.snapshot()?.auditIntents).toEqual({});
+    expect(
+      managerEvents(stateDirectory).filter((event) => event.id === reportAudit.id),
+    ).toHaveLength(1);
+    expect(
+      managerEvents(stateDirectory).filter((event) => event.id === staleAudit.id),
+    ).toHaveLength(1);
 
     await Effect.runPromise(
-      restored.acknowledgeInbox(fixture.ctx, { cursor: deliveredQuestion.cursor }),
+      reloaded.acknowledgeInbox(fixture.ctx, { cursor: deliveredQuestion.cursor }),
     );
-    expect(restored.snapshot()?.inbox.map((event) => event.id)).toEqual([report.id]);
-    expect(restored.snapshot()?.inboxWake?.cursor).toBe(report.id);
+    expect(reloaded.snapshot()?.inbox.map((event) => event.id)).toEqual([report.id]);
+    expect(reloaded.snapshot()?.inboxWake?.cursor).toBe(report.id);
     expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain(
       'Pardes stale verification context:1',
     );
-    await Effect.runPromise(restored.acknowledgeInbox(fixture.ctx, { cursor: report.id }));
-    expect(restored.snapshot()?.inbox).toEqual([]);
+    await Effect.runPromise(reloaded.acknowledgeInbox(fixture.ctx, { cursor: report.id }));
+    expect(reloaded.snapshot()?.inbox).toEqual([]);
     expect(
       currentVerificationAttempt(
-        requiredValue(restored.snapshot()?.verifications[verification.id]),
+        requiredValue(reloaded.snapshot()?.verifications[verification.id]),
       ),
     ).toMatchObject({ evidenceStatus: 'stale', staleReasonCode: 'source_head_changed' });
-    await Effect.runPromise(restored.shutdown(fixture.ctx));
+    await Effect.runPromise(reloaded.shutdown(fixture.ctx));
   });
 
   test('refreshes an idle retained scratch verifier at the latest clean source head with stale attempt lineage', async () => {

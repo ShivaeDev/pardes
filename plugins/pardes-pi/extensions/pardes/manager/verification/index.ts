@@ -107,6 +107,16 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
               event.presentationBlockedReason !== 'verification_reconciliation'
             )
               return event;
+            const pendingAudit =
+              state.auditIntents?.[event.id] !== undefined ||
+              (event.coalescedVerificationEvidence ?? []).some((evidence) =>
+                Object.values(state.auditIntents ?? {}).some(
+                  (intent) =>
+                    intent.type === 'verification_evidence_stale' &&
+                    intent.verificationId === evidence.verificationId,
+                ),
+              );
+            if (pendingAudit) return event;
             const {
               presentationBlocked: _presentationBlocked,
               presentationBlockedReason: _presentationBlockedReason,

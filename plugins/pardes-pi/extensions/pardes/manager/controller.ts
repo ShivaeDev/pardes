@@ -804,6 +804,32 @@ export class ManagerController {
     );
   });
 
+  /** Append one durable intent idempotently, then clear only that exact persisted identity. */
+  private readonly settleAuditIntent = Effect.fnUntraced(function* (
+    this: ManagerController,
+    store: StateStoreShape,
+    event: ManagerEvent,
+  ) {
+    const appended = yield* store.appendEventOnce(event).pipe(
+      Effect.as(true),
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          console.error(`Pardes failed to settle audit intent ${event.type}`, error);
+          return false;
+        }),
+      ),
+    );
+    if (!appended) return false;
+    yield* store.mutate((state) => {
+      if (state.auditIntents?.[event.id]?.id !== event.id)
+        return Effect.succeed([false, state] as const);
+      const auditIntents = { ...(state.auditIntents ?? {}) };
+      delete auditIntents[event.id];
+      return Effect.succeed([true, { ...state, auditIntents }] as const);
+    });
+    return true;
+  });
+
   private cancelScheduledInboxWakeRelease(): void {
     if (this.inboxWakeReleaseTimer === undefined) return;
     clearTimeout(this.inboxWakeReleaseTimer);
@@ -1010,6 +1036,7 @@ export class ManagerController {
         resumeWorkerEvents: (agentId) => {
           this.ignoredWorkerEvents.delete(agentId);
         },
+        settleAuditIntent: (event) => this.settleAuditIntent(active.store, event),
         suppressWorkerEvents: (agentId) => {
           this.ignoredWorkerEvents.add(agentId);
         },
@@ -1045,6 +1072,7 @@ export class ManagerController {
         retryResolvedVerificationRetirementForIdleVerifier: (agentId) =>
           verifications.retryResolvedRetirementForIdleVerifier(agentId),
         serializeVerificationMutation: (effect) => verifications.serializeMutation(effect),
+        settleAuditIntent: (event) => this.settleAuditIntent(active.store, event),
       },
       liveRuntimes: this.liveRuntimes,
       namespace: active,
@@ -1452,6 +1480,9 @@ export class ManagerController {
       workerEvents,
     });
     this.active = active;
+    for (const event of Object.values(active.state.auditIntents ?? {}))
+      yield* this.settleAuditIntent(active.store, event);
+    yield* this.refreshActiveState(active, ctx);
     for (const event of active.state.inbox.filter(
       (candidate) => candidate.presentationBlockedReason === 'verification_reconciliation',
     )) {

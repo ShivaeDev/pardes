@@ -130,6 +130,7 @@ export function makeVerificationEvidenceReconciler(
         { changed: true, coalesced },
         {
           ...state,
+          auditIntents: { ...(state.auditIntents ?? {}), [event.id]: event },
           inbox,
           verifications: {
             ...state.verifications,
@@ -140,8 +141,9 @@ export function makeVerificationEvidenceReconciler(
     });
     if (!outcome.changed) return;
     // The stale fact remains append-only even when its derivative user attention
-    // is folded into the causative terminal-report row.
-    yield* callbacks.appendEventSafely(event);
+    // is folded into the causative terminal-report row. Its exact identity stays
+    // durable until the idempotent append succeeds.
+    yield* callbacks.settleAuditIntent(event);
     yield* callbacks.refresh();
     if (!outcome.coalesced)
       yield* callbacks.releaseInboxWake().pipe(Effect.catch(() => Effect.succeed(false)));

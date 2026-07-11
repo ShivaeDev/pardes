@@ -119,7 +119,7 @@ interface ConflictAttentionTransition {
 }
 
 /** Keep one conflict generation sticky across transient hosted mergeability projections. */
-function conflictAttentionTransition(
+export function conflictAttentionTransition(
   pullRequest: PullRequestRecord,
   owner: AgentRecord | undefined,
   observation: PullRequestObservation,
@@ -131,10 +131,14 @@ function conflictAttentionTransition(
     previous.auditedHeadSha === pullRequest.lastPushedHeadSha &&
     previous.ownerLifecycleGeneration === owner?.lifecycleGeneration;
   if (observation.mergeable === 'conflicting') {
-    const materiallyNew = !sameGeneration || previous?.phase === 'resolved';
+    const materiallyNew =
+      !sameGeneration ||
+      previous?.phase === 'resolved' ||
+      previous?.attentionObservedForKey === false;
     return {
       attention: materiallyNew,
       next: {
+        attentionObservedForKey: true,
         ...(pullRequest.lastPushedHeadSha === undefined
           ? {}
           : { auditedHeadSha: pullRequest.lastPushedHeadSha }),
@@ -146,7 +150,25 @@ function conflictAttentionTransition(
       },
     };
   }
-  if (!sameGeneration || previous === undefined) return { attention: false, next: previous };
+  if (previous === undefined) return { attention: false, next: previous };
+  if (!sameGeneration) {
+    if (observation.mergeable !== 'mergeable' || !complete)
+      return { attention: false, next: previous };
+    return {
+      attention: false,
+      next: {
+        attentionObservedForKey: false,
+        ...(pullRequest.lastPushedHeadSha === undefined
+          ? {}
+          : { auditedHeadSha: pullRequest.lastPushedHeadSha }),
+        generation: previous.generation,
+        ...(owner?.lifecycleGeneration === undefined
+          ? {}
+          : { ownerLifecycleGeneration: owner.lifecycleGeneration }),
+        phase: 'resolution_candidate',
+      },
+    };
+  }
   if (observation.mergeable === 'unknown')
     return {
       attention: false,
@@ -168,6 +190,7 @@ function conflictAttentionEqual(
   right: PullRequestConflictAttention | undefined,
 ): boolean {
   return (
+    left?.attentionObservedForKey === right?.attentionObservedForKey &&
     left?.auditedHeadSha === right?.auditedHeadSha &&
     left?.generation === right?.generation &&
     left?.ownerLifecycleGeneration === right?.ownerLifecycleGeneration &&

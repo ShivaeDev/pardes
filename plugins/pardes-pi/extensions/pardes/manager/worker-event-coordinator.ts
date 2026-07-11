@@ -119,6 +119,7 @@ export class WorkerSupervisorEventCoordinator extends Context.Service<
 export interface WorkerSupervisorEventCoordinatorCallbacks {
   readonly refresh: () => Effect.Effect<void, unknown>;
   readonly appendEventSafely: (event: ManagerEvent) => Effect.Effect<void>;
+  readonly settleAuditIntent: (event: ManagerEvent) => Effect.Effect<boolean, unknown>;
   readonly releaseInboxWake: () => Effect.Effect<boolean, unknown>;
   readonly render: () => void;
   readonly isSuppressed: (agentId: string) => boolean;
@@ -332,6 +333,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
             : {}),
         }
       : undefined;
+    const reportAuditEvent =
+      workerEvent.type === 'report' && event !== undefined
+        ? (attention ?? makeEvent(event.type, event.summary, timestamp, association))
+        : undefined;
     const projection = yield* namespace.store.mutate<WorkerEventProjection, never>((state) => {
       const agent = state.agents[workerEvent.agentId];
       if (!agent)
@@ -437,6 +442,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         {
           ...state,
           agents: { ...state.agents, [agent.id]: nextAgent },
+          auditIntents:
+            event !== undefined && !duplicateAttention && reportAuditEvent !== undefined
+              ? { ...(state.auditIntents ?? {}), [reportAuditEvent.id]: reportAuditEvent }
+              : state.auditIntents,
           inbox: enqueue && attention ? [...state.inbox, attention] : state.inbox,
           verifications:
             nextVerification === undefined
@@ -447,10 +456,13 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       ] as const);
     });
     if (!projection.changed) return;
-    if (event && projection.append)
-      yield* callbacks.appendEventSafely(
-        attention ?? makeEvent(event.type, event.summary, timestamp, association),
-      );
+    if (event && projection.append) {
+      if (reportAuditEvent) yield* callbacks.settleAuditIntent(reportAuditEvent);
+      else
+        yield* callbacks.appendEventSafely(
+          attention ?? makeEvent(event.type, event.summary, timestamp, association),
+        );
+    }
     if (projection.cancelledCompletionIntent)
       yield* callbacks.appendEventSafely(
         makeEvent(

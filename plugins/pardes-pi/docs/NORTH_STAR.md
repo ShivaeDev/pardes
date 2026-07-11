@@ -254,7 +254,9 @@ Actionable events enter the durable inbox before presentation. Causally
 derivative software context may be coalesced onto its triggering row: a terminal
 worker report that invalidates advisory verification evidence carries that stale
 context without a second attention row, while both facts remain externally
-visible and append-only audited. Tokenized wake records are presentation cursors,
+visible. Durable exact-event intents idempotently repair either audit append
+across failure or manager restart before presentation refinement is released, so
+both facts remain append-only audited. Tokenized wake records are presentation cursors,
 not workflow state. Only one delivered cursor is active at a time; later durable
 rows remain queued as a suffix. User-judgment handoffs are explicit and
 cursor-scoped.

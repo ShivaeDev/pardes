@@ -362,6 +362,8 @@ export const PullRequestObservationSchema = Schema.Struct({
 export type PullRequestObservation = typeof PullRequestObservationSchema.Type;
 
 export const PullRequestConflictAttentionSchema = Schema.Struct({
+  /** Optional for snapshots written before key-supersession tracking. */
+  attentionObservedForKey: Schema.optionalKey(Schema.Boolean),
   auditedHeadSha: Schema.optionalKey(FullCommitShaSchema),
   generation: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
   ownerLifecycleGeneration: Schema.optionalKey(
@@ -460,6 +462,8 @@ export type InboxHandoff = typeof InboxHandoffSchema.Type;
 
 export const ManagerStateSchema = Schema.Struct({
   agents: Schema.Record(Schema.String, AgentRecordSchema),
+  /** Durable exact-event intents repaired idempotently into append-only history. */
+  auditIntents: Schema.optionalKey(Schema.Record(Schema.String, ManagerEventSchema)),
   /** Durable dedupe marker for one controller-scoped GitHub.com rate-metadata warning. */
   githubRateMetadataUnavailableAt: Schema.optionalKey(NonEmptyString),
   inbox: Schema.Array(ManagerEventSchema),
@@ -490,6 +494,7 @@ export type ManagerActivation = typeof ManagerActivationSchema.Type;
 export function initialManagerState(managerId: string, repo: RepoState): ManagerState {
   return {
     agents: {},
+    auditIntents: {},
     inbox: [],
     managerId,
     pullRequests: {},

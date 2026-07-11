@@ -130,11 +130,12 @@ function inboxIndexOmissionLine(omittedCount: number): string {
 
 /** Keep authored judgment guidance intact; maxRows targets total rows but never clips fixed guidance or omission metadata. */
 export function inboxLines(
-  state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
+  state: Pick<ManagerState, 'auditIntents' | 'inbox' | 'inboxWake' | 'inboxHandoff'>,
   maxRows?: number,
 ): string {
+  const auditRepairCount = Object.keys(state.auditIntents ?? {}).length;
   const authoredLines = [
-    `inbox: ${plural(state.inbox.length, 'pending event')} · read and judge one: inbox_get({ eventId })`,
+    `inbox: ${plural(state.inbox.length, 'pending event')} · audit repair pending:${auditRepairCount} · read and judge one: inbox_get({ eventId })`,
     inboxDeliveryLine(state),
     `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
     `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,

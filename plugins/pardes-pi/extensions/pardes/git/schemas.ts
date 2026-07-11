@@ -57,6 +57,7 @@ export const WorktreeCommitProvenanceUnavailableReasonSchema = Schema.Literals([
   'baseline_not_ancestor',
   'unsupported_graph',
   'bounds_exceeded',
+  'total_diff_unavailable',
   'inspection_failed',
 ]);
 export type WorktreeCommitProvenanceUnavailableReason =

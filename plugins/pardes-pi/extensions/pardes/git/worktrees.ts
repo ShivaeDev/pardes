@@ -174,6 +174,9 @@ interface WorktreeServiceOptions {
   readonly lockRetries?: number;
   readonly provenanceGitMaxBufferBytes?: number;
   readonly provenanceGitTimeoutMs?: number;
+  /** Optional independent bound for the routine-compatible total safety diff. */
+  readonly provenanceTotalDiffGitMaxBufferBytes?: number;
+  readonly provenanceTotalDiffGitTimeoutMs?: number;
   readonly provenanceMaxFirstParentCommits?: number;
   readonly provenanceMaxPaths?: number;
 }
@@ -613,6 +616,10 @@ export function makeManagedWorktreeService(
     maxBuffer: options.provenanceGitMaxBufferBytes ?? WORKTREE_PROVENANCE_GIT_MAX_BUFFER_BYTES,
     timeoutMs: options.provenanceGitTimeoutMs ?? WORKTREE_PROVENANCE_GIT_TIMEOUT_MS,
   };
+  const totalDiffGitOptions: RunGitOptions = {
+    maxBuffer: options.provenanceTotalDiffGitMaxBufferBytes ?? provenanceGitOptions.maxBuffer,
+    timeoutMs: options.provenanceTotalDiffGitTimeoutMs ?? provenanceGitOptions.timeoutMs,
+  };
   const routineLeaseValidationGitOptions: RunGitOptions = {
     maxBuffer: WORKTREE_PROVENANCE_GIT_MAX_BUFFER_BYTES,
     timeoutMs: WORKTREE_PROVENANCE_GIT_TIMEOUT_MS,
@@ -678,10 +685,21 @@ export function makeManagedWorktreeService(
       ...projectionInspection,
       provenance: provenanceUnavailable(reason, paths, observedBranch),
     });
-    // Preserve the established routine safety-audit path set before any richer
-    // graph attribution can degrade. This total diff is evidence, not ownership.
-    const committed = yield* git(lease.path, ['diff', '--name-status', '-z', range]);
-    const totalBranchDeltaPaths = parseCommittedChangedPaths(committed.stdout);
+    // Preserve the established routine safety-audit path semantics before any
+    // richer attribution can degrade, but keep this potentially large Git read
+    // under explicit operational limits. A limit/failure yields known live paths
+    // only and never presents them as a complete total branch-point delta.
+    const committed = yield* git(
+      lease.path,
+      ['diff', '--name-status', '-z', range],
+      totalDiffGitOptions,
+    ).pipe(Effect.exit);
+    if (Exit.isFailure(committed))
+      return unavailable(
+        'total_diff_unavailable',
+        dirtyPaths.length > provenanceBounds.maxPaths ? [] : dirtyPaths,
+      );
+    const totalBranchDeltaPaths = parseCommittedChangedPaths(committed.value.stdout);
     projectionInspection = {
       ...baseInspection,
       changedPaths: [...new Set([...dirtyPaths, ...totalBranchDeltaPaths])].sort(),

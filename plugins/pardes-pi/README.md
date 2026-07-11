@@ -111,8 +111,12 @@ from cooperative first-parent evidence; topology does not prove authorship or
 feature semantics. They label merge first-parent diffs separately as integration
 context, retain the total branch-point delta, first-parent commit count, and
 latest-commit evidence, and do not infer exact conflict-resolution ownership
-from parent diffs. Dirty, unsupported, or over-bound histories degrade
-explicitly instead of claiming attribution.
+from parent diffs. The routine-compatible total safety diff is also subject to
+explicit Git timeout/output bounds (the provenance defaults, with independent
+service overrides); if it cannot complete within them, Pardes reports the total
+as unavailable and retains only explicitly known live paths. Dirty, unsupported,
+or over-bound histories likewise degrade explicitly instead of claiming
+attribution.
 
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`

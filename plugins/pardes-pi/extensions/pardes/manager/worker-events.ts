@@ -225,6 +225,8 @@ export function handoffAuditSuffix(audit: HandoffAuditOutcome | undefined): stri
   if (provenance === undefined)
     return `Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: ${counted(audit.changedPaths.length, 'path')}.${dirtySuffix}`;
   if (provenance.status === 'unavailable') {
+    if (provenance.reason === 'total_diff_unavailable')
+      return `Git audit: worker-branch non-merge change candidates unavailable (bounded total diff failed). Total audited change set unavailable; ${counted(audit.changedPaths.length, 'known live path')}. Merge context was not attributed.${dirtySuffix}`;
     if (provenance.reason === 'dirty_worktree')
       return `Git audit: worker-branch non-merge change candidates unavailable (dirty worktree). Total audited change set: ${counted(audit.changedPaths.length, 'path')}; ${counted(provenance.dirtyPaths.length, 'dirty path')}. Merge context and total branch-point delta were not attributed.${dirtySuffix}`;
     return `Git audit: worker-branch non-merge change candidates unavailable (${provenance.reason}). Total audited change set: ${counted(audit.changedPaths.length, 'path')}. Merge context was not attributed.${dirtySuffix}`;

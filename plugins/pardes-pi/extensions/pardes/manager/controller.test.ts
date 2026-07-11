@@ -4583,6 +4583,63 @@ describe('manager controller', () => {
     );
   });
 
+  test('persists an honest incomplete completion audit when the bounded total diff exceeds its buffer', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceTotalDiffGitMaxBufferBytes: 65 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Bound total completion diff', title: 'Total diff buffer' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Exceed the total diff output bound.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    const committedPath = `${'long-committed-path-'.repeat(8)}.txt`;
+    writeFileSync(join(worktree, committedPath), 'committed\n');
+    git(worktree, 'add', committedPath);
+    git(worktree, 'commit', '-m', 'long committed fixture');
+    writeFileSync(join(worktree, 'dirty.txt'), 'dirty\n');
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Bounded total diff fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['dirty.txt']);
+    expect(persisted.latestReport?.status).toBe('completed');
+    expect(persisted.gitAudit).toMatchObject({
+      dirty: true,
+      provenance: { reason: 'total_diff_unavailable', status: 'unavailable' },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    const attention = requiredValue(controller.snapshot()?.inbox.at(-1));
+    expect(attention.type).toBe('agent_report_completed');
+    expect(attention.summary).toContain('bounded total diff failed');
+    expect(attention.summary).toContain('Total audited change set unavailable');
+    expect(attention.summary).toContain('1 known live path');
+    expect(attention.summary).not.toContain('Total audited change set: 1 path');
+  });
+
   test('persists a completion audit failure, clears stale paths, and combines bounded report fallback warnings', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));

@@ -36,6 +36,12 @@ export function agentWarnings(
   if (agent.lastError) warnings.push('error');
   if (effectiveAgentStatus(agent, runtime) === 'crashed') warnings.push('crashed');
   if (agent.gitAudit?.status === 'failed') warnings.push('git audit failed');
+  if (
+    agent.gitAudit?.status === 'succeeded' &&
+    agent.gitAudit.provenance?.status === 'unavailable' &&
+    agent.gitAudit.provenance.reason === 'total_diff_unavailable'
+  )
+    warnings.push('git total diff unavailable');
   if (agent.gitAudit?.status === 'succeeded' && agent.gitAudit.dirty)
     warnings.push('dirty worktree');
   return warnings;
@@ -102,6 +108,11 @@ function latestGitAuditLine(agent: AgentRecord): string {
   if (!audit) return 'latest git audit: none';
   if (audit.status === 'failed')
     return `latest git audit: failed · ${audit.trigger} · ${completeOrOmittedText(audit.failureSummary, 120)}`;
+  if (
+    audit.provenance?.status === 'unavailable' &&
+    audit.provenance.reason === 'total_diff_unavailable'
+  )
+    return `latest git audit: incomplete · ${audit.trigger} · bounded total diff unavailable · ${audit.dirty ? 'dirty worktree' : 'clean worktree'}`;
   return `latest git audit: succeeded · ${audit.trigger} · ${audit.dirty ? 'dirty worktree' : 'clean worktree'}`;
 }
 
@@ -155,6 +166,8 @@ function auditPathProjection(status: AgentStatus): {
     };
   if (provenance?.status === 'unavailable' && provenance.reason === 'dirty_worktree')
     return { label: 'dirty paths', paths: provenance.dirtyPaths };
+  if (provenance?.status === 'unavailable' && provenance.reason === 'total_diff_unavailable')
+    return { label: 'known live paths (total diff unavailable)', paths: provenance.dirtyPaths };
   return { label: 'total audited changed paths', paths: status.agent.changedPaths ?? [] };
 }
 

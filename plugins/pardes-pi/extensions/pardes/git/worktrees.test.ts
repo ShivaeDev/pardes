@@ -351,7 +351,7 @@ describe('managed worktree service', () => {
     });
   });
 
-  test('returns dirty refusal while the routine total-path diff remains outside the provenance circuit breaker', async () => {
+  test('degrades honestly when the bounded total safety diff exceeds its output limit', async () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
@@ -375,7 +375,47 @@ describe('managed worktree service', () => {
         inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty-bound'), lease),
       ),
     ).toMatchObject({
-      provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
+      changedPaths: ['dirty.txt'],
+      dirty: true,
+      provenance: {
+        dirtyPaths: ['dirty.txt'],
+        reason: 'total_diff_unavailable',
+        status: 'unavailable',
+      },
+    });
+  });
+
+  test('degrades honestly when the bounded total safety diff exceeds its timeout', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceTotalDiffGitTimeoutMs: 1 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-diff-timeout',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    for (let index = 0; index < 200; index += 1) {
+      writeFileSync(join(lease.path, `path-${index}.txt`), `${index}\n`);
+    }
+    git(lease.path, 'add', '.');
+    git(lease.path, 'commit', '-m', 'timeout fixture');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-diff-timeout'), lease),
+      ),
+    ).toMatchObject({
+      changedPaths: [],
+      dirty: false,
+      provenance: {
+        dirtyPaths: [],
+        reason: 'total_diff_unavailable',
+        status: 'unavailable',
+      },
     });
   });
 

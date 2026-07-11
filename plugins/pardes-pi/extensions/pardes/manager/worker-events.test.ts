@@ -340,6 +340,24 @@ describe('manager handoff-audit policy', () => {
           'Git audit: worker-branch non-merge change candidates unavailable (dirty worktree). Total audited change set: 2 paths; 1 dirty path. Merge context and total branch-point delta were not attributed. Worktree is dirty.',
       },
       {
+        audit: successfulHandoffAudit(
+          'completion',
+          laterAt,
+          inspection({
+            changedPaths: ['dirty.ts'],
+            dirty: true,
+            provenance: {
+              bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+              dirtyPaths: ['dirty.ts'],
+              reason: 'total_diff_unavailable',
+              status: 'unavailable',
+            },
+          }),
+        ),
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (bounded total diff failed). Total audited change set unavailable; 1 known live path. Merge context was not attributed. Worktree is dirty.',
+      },
+      {
         audit: failedHandoffAudit('completion', laterAt, new Error('inspection unavailable')),
         expected: 'Git audit failed: inspection unavailable.',
       },

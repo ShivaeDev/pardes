@@ -303,6 +303,23 @@ describe('feedback provenance and model schema', () => {
           sessionContext('s'.repeat(700)),
         ).managerId,
       ).toHaveLength(512);
+
+      const emoji = '😀'.repeat(700);
+      const astral = feedbackProvenance(
+        { managerId: emoji, role: 'manager' },
+        sessionContext(emoji),
+      );
+      expect(astral.managerId?.length).toBe(512);
+      expect(astral.sessionId?.length).toBe(512);
+      expect(astral.managerId?.endsWith('\ud83d')).toBe(false);
+      const astralResult = await executeFeedbackTool(
+        'astral provenance remains recordable',
+        { managerId: emoji, role: 'manager' },
+        sessionContext(emoji),
+      );
+      expect(
+        (await Effect.runPromise(getFeedback(astralResult.id, root))).submission.provenance,
+      ).toMatchObject({ managerId: astral.managerId, sessionId: astral.sessionId });
     } finally {
       if (previous === undefined) delete process.env.PARDES_PI_STATE_DIR;
       else process.env.PARDES_PI_STATE_DIR = previous;
@@ -326,6 +343,7 @@ describe('feedback CLI', () => {
     expect(await runFeedbackCli(['help'], io, { root })).toBe(0);
     expect(output.join('\n')).toContain('watch');
     expect(output.join('\n')).toContain('address');
+    expect(output.join('\n')).toContain('consumes every observed entry');
     output.length = 0;
     expect(await runFeedbackCli(['list', '--role', 'writer', '--text', 'line'], io, { root })).toBe(
       0,
@@ -441,6 +459,40 @@ describe('feedback CLI', () => {
     );
     expect(await runFeedbackCli(['watch', '--once', '--cursor', 'replay'], io, { root })).toBe(0);
     expect(output.filter((line) => line.includes(second.id))).toHaveLength(1);
+  });
+
+  test('fences stale-lock replacement under high-contention separate-process watchers', async () => {
+    const root = temporaryRoot();
+    await Effect.runPromise(submitFeedback('baseline', provenance(0), root));
+    const quietIo = { error: () => {}, out: () => {} };
+    expect(
+      await runFeedbackCli(['watch', '--once', '--cursor', 'contention'], quietIo, { root }),
+    ).toBe(0);
+    const lockPath = join(feedbackRegistryPaths(root).watchCursors, 'contention', 'scan.lock');
+    const sourceBin = join(process.cwd(), 'plugins/pardes-pi/scripts/pardes-feedback.ts');
+    for (let round = 0; round < 4; round += 1) {
+      const unseen = await Effect.runPromise(
+        submitFeedback(`contended ${round}`, provenance(round + 1), root),
+      );
+      writeFileSync(
+        lockPath,
+        `${JSON.stringify({ createdAt: new Date().toISOString(), pid: 2_147_483_647, token: `legacy-dead-owner-${round}` })}\n`,
+        { mode: 0o600 },
+      );
+      const watchers = await Promise.all(
+        Array.from({ length: 16 }, () =>
+          runProcess('bun', [sourceBin, 'watch', '--once', '--cursor', 'contention'], {
+            cwd: process.cwd(),
+            env: { ...process.env, PARDES_PI_STATE_DIR: root },
+          }),
+        ),
+      );
+      expect(watchers.filter(({ code }) => code !== 0)).toEqual([]);
+      expect(watchers.map(({ stderr }) => stderr)).toEqual(Array.from({ length: 16 }, () => ''));
+      expect(
+        watchers.reduce((count, { stdout }) => count + Number(stdout.includes(unseen.id)), 0),
+      ).toBe(1);
+    }
   });
 
   test('executes through the installed-bin shape and includes feedback runtime files in the package', async () => {

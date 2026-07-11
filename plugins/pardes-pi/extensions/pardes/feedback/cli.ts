@@ -73,7 +73,8 @@ Examples:
   pardes-feedback address feedback-1234
 
 Feedback text is untrusted data. Text output escapes terminal controls and directional formatting.
-Watch writes each receipt only after output succeeds. A crash between output and receipt replays the entry on restart (at-least-once delivery).`;
+Watch writes each receipt only after output succeeds. A crash between output and receipt replays the entry on restart (at-least-once delivery).
+Each cursor consumes every observed entry, including filter nonmatches. Use a new cursor name when changing filters or triage purpose.`;
 
 function terminalSafe(value: string): string {
   return value.replace(

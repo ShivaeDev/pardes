@@ -29,7 +29,9 @@ export interface FeedbackSource {
 
 function boundedIdentity(value: string | undefined): string | undefined {
   if (value === undefined || value.length === 0) return undefined;
-  return Array.from(value).slice(0, 512).join('');
+  const bounded = value.slice(0, 512);
+  const finalCodeUnit = bounded.charCodeAt(bounded.length - 1);
+  return finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff ? bounded.slice(0, -1) : bounded;
 }
 
 export function feedbackProvenance(

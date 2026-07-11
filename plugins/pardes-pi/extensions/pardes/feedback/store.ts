@@ -1,19 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import {
-  access,
-  chmod,
-  link,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  rename,
-  rm,
-} from 'node:fs/promises';
+import { access, chmod, link, lstat, mkdir, open, readdir, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { Effect, Schema } from 'effect';
 import { FeedbackNotFoundError, FeedbackStoreError } from './errors.ts';
 import {
@@ -299,6 +289,7 @@ export function markFeedbackAddressed(
 
 interface WatchLockRecord {
   readonly createdAt: string;
+  readonly ownerFile?: string;
   readonly pid: number;
   readonly token: string;
 }
@@ -310,12 +301,20 @@ export interface FeedbackWatchLock {
 function watchLockRecord(input: unknown): WatchLockRecord | undefined {
   if (typeof input !== 'object' || input === null) return;
   const record = input as Partial<WatchLockRecord>;
-  return typeof record.createdAt === 'string' &&
-    typeof record.pid === 'number' &&
-    Number.isInteger(record.pid) &&
-    typeof record.token === 'string'
-    ? { createdAt: record.createdAt, pid: record.pid, token: record.token }
-    : undefined;
+  if (
+    typeof record.createdAt !== 'string' ||
+    typeof record.pid !== 'number' ||
+    !Number.isInteger(record.pid) ||
+    typeof record.token !== 'string' ||
+    (record.ownerFile !== undefined && typeof record.ownerFile !== 'string')
+  )
+    return;
+  return {
+    createdAt: record.createdAt,
+    ...(record.ownerFile === undefined ? {} : { ownerFile: record.ownerFile }),
+    pid: record.pid,
+    token: record.token,
+  };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -327,18 +326,111 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-async function releaseWatchLock(path: string, token: string): Promise<void> {
+function sameFile(
+  left: { readonly dev: number; readonly ino: number },
+  right: { readonly dev: number; readonly ino: number },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function optionalStats(path: string) {
   try {
-    const owner = watchLockRecord(JSON.parse(await readFile(path, 'utf8')) as unknown);
-    if (owner?.token !== token) return;
-    await rm(path);
-    await syncDirectory(dirname(path));
+    return await lstat(path);
   } catch (error) {
-    if (!isCode(error, 'ENOENT')) throw error;
+    if (isCode(error, 'ENOENT')) return undefined;
+    throw error;
   }
 }
 
-/** Serialize one cursor scan across processes; dead owners are recovered before replay. */
+async function releaseWatchLock(
+  cursorDirectory: string,
+  path: string,
+  ownerPath: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const ownerStats = await optionalStats(ownerPath);
+    if (!ownerStats) return;
+    if (ownerStats.nlink <= 2) break;
+    await sleep(2);
+  }
+  const ownerStats = await optionalStats(ownerPath);
+  const currentStats = await optionalStats(path);
+  if (ownerStats && currentStats && sameFile(ownerStats, currentStats)) await rm(path);
+  await rm(ownerPath, { force: true });
+  await syncDirectory(cursorDirectory);
+}
+
+async function recoverObservedWatchLock(
+  cursorDirectory: string,
+  path: string,
+): Promise<'retry' | 'busy'> {
+  const observerPath = join(cursorDirectory, `observer-${process.pid}-${randomUUID()}.lock`);
+  try {
+    try {
+      await link(path, observerPath);
+    } catch (error) {
+      if (isCode(error, 'ENOENT')) return 'retry';
+      throw error;
+    }
+    const observedStats = await lstat(observerPath);
+    if (!observedStats.isFile() || observedStats.isSymbolicLink())
+      throw new Error('feedback watch lock is redirected');
+    let observed: WatchLockRecord | undefined;
+    try {
+      if (observedStats.size <= 16 * 1_024)
+        observed = watchLockRecord(JSON.parse(await readFile(observerPath, 'utf8')) as unknown);
+    } catch {
+      observed = undefined;
+    }
+    const young = Date.now() - observedStats.mtimeMs <= WATCH_LOCK_RECOVERY_GRACE_MS;
+    if ((observed && processIsAlive(observed.pid)) || (!observed && young)) return 'busy';
+
+    for (const entry of await readdir(cursorDirectory, { withFileTypes: true })) {
+      const match = /^observer-(\d+)-[a-f0-9-]+\.lock$/.exec(entry.name);
+      if (!match || entry.name === basename(observerPath) || !entry.isFile()) continue;
+      const observerPid = Number(match[1]);
+      if (Number.isInteger(observerPid) && processIsAlive(observerPid)) continue;
+      const staleObserverPath = join(cursorDirectory, entry.name);
+      const staleObserverStats = await optionalStats(staleObserverPath);
+      if (staleObserverStats && sameFile(observedStats, staleObserverStats))
+        await rm(staleObserverPath, { force: true });
+    }
+
+    let ownerPath: string | undefined;
+    let ownerStats: Awaited<ReturnType<typeof lstat>> | undefined;
+    if (observed?.ownerFile && /^owner-[a-f0-9-]+\.lock$/.test(observed.ownerFile)) {
+      ownerPath = join(cursorDirectory, observed.ownerFile);
+      ownerStats = await optionalStats(ownerPath);
+      if (ownerStats && !sameFile(observedStats, ownerStats)) ownerStats = undefined;
+    }
+    const expectedLinks = ownerStats ? 3 : 2;
+    const freshObservedStats = await optionalStats(observerPath);
+    if (!freshObservedStats || freshObservedStats.nlink !== expectedLinks) {
+      await sleep(Math.floor(Math.random() * 5) + 1);
+      return 'retry';
+    }
+
+    const currentStats = await optionalStats(path);
+    if (!currentStats || !sameFile(observedStats, currentStats)) return 'retry';
+    try {
+      await rm(path);
+    } catch (error) {
+      if (!isCode(error, 'ENOENT')) throw error;
+      return 'retry';
+    }
+
+    if (ownerPath && ownerStats) await rm(ownerPath, { force: true });
+    await syncDirectory(cursorDirectory);
+    return 'retry';
+  } finally {
+    await rm(observerPath, { force: true });
+  }
+}
+
+/**
+ * Serialize one cursor scan across processes. Unique owner inodes and temporary
+ * observer hard links fence stale recovery so it can never unlink a successor.
+ */
 export function acquireFeedbackWatchLock(
   cursor: string,
   root = pardesGlobalStateRoot(),
@@ -346,48 +438,37 @@ export function acquireFeedbackWatchLock(
   return effectPromise('acquire feedback watch lock', async () => {
     const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
     const path = join(cursorDirectory, 'scan.lock');
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
       const token = randomUUID();
+      const ownerFile = `owner-${token}.lock`;
+      const ownerPath = join(cursorDirectory, ownerFile);
       const owner: WatchLockRecord = {
         createdAt: new Date().toISOString(),
+        ownerFile,
         pid: process.pid,
         token,
       };
+      const handle = await open(ownerPath, 'wx', 0o600);
       try {
-        const handle = await open(path, 'wx', 0o600);
-        try {
-          await handle.writeFile(`${JSON.stringify(owner)}\n`, 'utf8');
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
+        await handle.writeFile(`${JSON.stringify(owner)}\n`, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await link(ownerPath, path);
         await syncDirectory(cursorDirectory);
         return {
           release: () =>
-            effectPromise('release feedback watch lock', () => releaseWatchLock(path, token)),
+            effectPromise('release feedback watch lock', () =>
+              releaseWatchLock(cursorDirectory, path, ownerPath),
+            ),
         };
       } catch (error) {
+        await rm(ownerPath, { force: true });
         if (!isCode(error, 'EEXIST')) throw error;
       }
-
-      const stats = await lstat(path);
-      if (!stats.isFile() || stats.isSymbolicLink())
-        throw new Error('feedback watch lock is redirected');
-      let current: WatchLockRecord | undefined;
-      try {
-        current = watchLockRecord(JSON.parse(await readFile(path, 'utf8')) as unknown);
-      } catch {
-        current = undefined;
-      }
-      const young = Date.now() - stats.mtimeMs <= WATCH_LOCK_RECOVERY_GRACE_MS;
-      if ((current && processIsAlive(current.pid)) || (!current && young)) return undefined;
-      const stale = `${path}.stale-${randomUUID()}`;
-      try {
-        await rename(path, stale);
-        await rm(stale, { force: true });
-      } catch (error) {
-        if (!isCode(error, 'ENOENT')) return undefined;
-      }
+      if ((await recoverObservedWatchLock(cursorDirectory, path)) === 'busy') return undefined;
     }
     return undefined;
   });

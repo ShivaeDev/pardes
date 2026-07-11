@@ -335,8 +335,10 @@ triage remains in a separate durable record. The `pardes-feedback` CLI lists,
 filters, shows, watches, and marks entries addressed. Watch uses one durable
 initialization boundary, a recoverable cross-process scan lock, and output-before-
 receipt at-least-once delivery: ordinary concurrent scans do not duplicate, while
-a crash between output and receipt safely replays after restart. Terminal output
-treats authored text as untrusted data.
+a crash between output and receipt safely replays after restart. Filters apply at
+observation time and every observed entry advances that cursor, including
+nonmatches; changing filters requires a distinct cursor. Terminal output treats
+authored text as untrusted data.
 
 ## External feedback and trust
 

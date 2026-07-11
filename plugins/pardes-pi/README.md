@@ -145,8 +145,10 @@ From a source checkout, use `bun run feedback -- <command>`. Watch cursors use
 one durable initialization boundary, a recoverable cross-process scan lock, and
 atomic per-entry receipts written only after output succeeds. Concurrent scans
 do not duplicate output; a crash between output and receipt deliberately replays
-the entry after restart for at-least-once delivery. CLI rendering treats feedback
-text as untrusted and escapes terminal controls.
+the entry after restart for at-least-once delivery. A cursor consumes every
+observed entry, including filter nonmatches, so use a distinct cursor name when
+changing filters or triage purpose. CLI rendering treats feedback text as
+untrusted and escapes terminal controls.
 
 ## Development validation
 

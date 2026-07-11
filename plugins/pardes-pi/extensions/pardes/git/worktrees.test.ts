@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
 import {
@@ -37,6 +38,19 @@ afterEach(() => {
 
 function git(cwd: string, ...args: string[]): string {
   return runGitFixture(cwd, ...args);
+}
+
+function executableOnPath(name: string): string {
+  const executable = (process.env.PATH ?? '')
+    .split(delimiter)
+    .map((directory) => join(directory, name))
+    .find(existsSync);
+  if (!executable) throw new Error(`Could not resolve ${name} on PATH`);
+  return realpathSync(executable);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 const worktreeGit = (
@@ -590,7 +604,7 @@ describe('managed worktree service', () => {
     });
   });
 
-  test('refuses stable provenance for dirty worktrees while returning complete dirty paths', async () => {
+  test('refuses stable provenance for dirty worktrees while retaining total safety-audit paths', async () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
@@ -608,13 +622,48 @@ describe('managed worktree service', () => {
     );
 
     expect(inspection).toMatchObject({
-      changedPaths: ['dirty.txt'],
+      changedPaths: ['dirty.txt', 'worker.txt'],
       dirty: true,
       provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
     });
   });
 
-  test('returns dirty refusal before committed-range output can exceed the audit circuit breaker', async () => {
+  test('degrades over-bound dirty provenance without dropping the routine safety-audit path set', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceMaxPaths: 1 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-dirty-path-bound',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    writeFileSync(join(lease.path, 'committed.txt'), 'committed\n');
+    git(lease.path, 'add', 'committed.txt');
+    git(lease.path, 'commit', '-m', 'committed fixture');
+    writeFileSync(join(lease.path, 'dirty-a.txt'), 'dirty a\n');
+    writeFileSync(join(lease.path, 'dirty-b.txt'), 'dirty b\n');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty-path-bound'), lease),
+      ),
+    ).toMatchObject({
+      changedPaths: ['committed.txt', 'dirty-a.txt', 'dirty-b.txt'],
+      dirty: true,
+      provenance: {
+        bounds: { maxPaths: 1 },
+        dirtyPaths: [],
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+    });
+  });
+
+  test('degrades honestly when the bounded total safety diff exceeds its output limit', async () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
@@ -638,7 +687,65 @@ describe('managed worktree service', () => {
         inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty-bound'), lease),
       ),
     ).toMatchObject({
-      provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
+      changedPaths: ['dirty.txt'],
+      dirty: true,
+      provenance: {
+        dirtyPaths: ['dirty.txt'],
+        reason: 'total_diff_unavailable',
+        status: 'unavailable',
+      },
+    });
+  });
+
+  test('degrades deterministically when the bounded total safety diff exceeds its timeout', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceTotalDiffGitTimeoutMs: 100 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-diff-timeout',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    writeFileSync(join(lease.path, 'changed.txt'), 'changed\n');
+    git(lease.path, 'add', 'changed.txt');
+    git(lease.path, 'commit', '-m', 'timeout fixture');
+
+    const wrapperRoot = mkdtempSync(join(tmpdir(), 'pardes-slow-git-'));
+    temporaryDirectories.push(wrapperRoot);
+    const wrapper = join(wrapperRoot, 'git');
+    const marker = join(wrapperRoot, 'diff-started');
+    const realGit = executableOnPath('git');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nif [ "$1" = "diff" ]; then\n  : > ${shellQuote(marker)}\n  sleep 1\nfi\nexec ${shellQuote(realGit)} "$@"\n`,
+    );
+    chmodSync(wrapper, 0o755);
+    const originalPath = process.env.PATH;
+    const inspection = await (async () => {
+      try {
+        process.env.PATH = `${wrapperRoot}${delimiter}${originalPath ?? ''}`;
+        return await Effect.runPromise(
+          inspectProvenance(service, owner(repo, 'manager-1', 'agent-diff-timeout'), lease),
+        );
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    })();
+
+    expect(existsSync(marker)).toBe(true);
+    expect(inspection).toMatchObject({
+      changedPaths: [],
+      dirty: false,
+      provenance: {
+        dirtyPaths: [],
+        reason: 'total_diff_unavailable',
+        status: 'unavailable',
+      },
     });
   });
 
@@ -821,6 +928,7 @@ describe('managed worktree service', () => {
         inspectProvenance(service, owner(repo, 'manager-1', 'agent-commit-bounds'), lease),
       ),
     ).toMatchObject({
+      changedPaths: ['first.txt', 'second.txt'],
       provenance: {
         bounds: { maxFirstParentCommits: 1 },
         dirtyPaths: [],

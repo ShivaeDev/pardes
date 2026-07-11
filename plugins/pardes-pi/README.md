@@ -142,6 +142,18 @@ retained for later inspection rather than declared safe. Use baseline branch
 overrides only intentionally. Worker reports are stored under the owning
 manager's `reports/` directory; concise summaries wake the manager.
 
+Clean completion audits lead with bounded worker-branch non-merge change
+candidates from cooperative first-parent evidence; topology does not prove
+authorship or feature semantics. They label merge first-parent diffs separately
+as integration context, retain the total branch-point delta, first-parent commit
+count, and latest-commit evidence, and do not infer exact conflict-resolution
+ownership from parent diffs. The routine-compatible total safety diff is also
+subject to explicit Git timeout/output bounds (the provenance defaults, with
+independent service overrides); if it cannot complete within them, Pardes
+reports the total as unavailable and retains only explicitly known live paths.
+Dirty, unsupported, or over-bound histories likewise degrade explicitly instead
+of claiming attribution.
+
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. After the exact pushed SHA is verified as the
 hosted head, Pardes makes the retained local worker branch track the managed

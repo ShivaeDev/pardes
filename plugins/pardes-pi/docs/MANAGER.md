@@ -48,7 +48,10 @@ lifecycle-unsettled work. This applies to bootstrap, runtime launch, and
 launched-state persistence failures. Verifier process uncertainty retains
 retryable scratch ownership. A crashed owner never remains marked as running
 bootstrap: an unrecorded terminal outcome is normalized to interrupted with
-completion and termination unknown. A retained revive does not rerun
+completion and termination unknown. Cancelling a tool operation during
+bootstrap settles ownership uninterruptibly: the writer lease or verifier
+scratch becomes crashed and interrupted immediately, so conservative inspection
+or cleanup does not require a manager restart. A retained revive does not rerun
 preparation. Restoration performs the same normalization and never reruns the
 hook automatically; inspect retained ownership, then use conservative cleanup
 or make a deliberate fresh request/spawn.

@@ -326,6 +326,27 @@ function trackedWorktrees(mutateLease?: (path: string) => void) {
   return { latestLease: () => latestLease, worktrees: tracked };
 }
 
+async function interruptibleWorktreeBootstrap() {
+  const entered = await Effect.runPromise(Deferred.make<string>());
+  let blocked = false;
+  const bootstrap: WorktreeBootstrapShape = {
+    run: (cwd) =>
+      blocked
+        ? Effect.gen(function* () {
+            yield* Deferred.succeed(entered, cwd);
+            return yield* Effect.never;
+          })
+        : Effect.succeed({ status: 'absent' }),
+  };
+  return {
+    block: () => {
+      blocked = true;
+    },
+    bootstrap,
+    entered,
+  };
+}
+
 function countingWorktrees() {
   const service = makeManagedWorktreeService();
   let creates = 0;
@@ -2566,6 +2587,193 @@ describe('manager controller', () => {
       controller.reviveAgent(agent.id, 'Continue retained work.', fixture.ctx),
     );
     expect(order.filter((entry) => entry.startsWith('bootstrap:'))).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  }, 15_000);
+
+  test('settles externally interrupted writer bootstrap immediately with inspectable lease ownership', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const barrier = await interruptibleWorktreeBootstrap();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktreeBootstrap: barrier.bootstrap,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Interrupt repository bootstrap', title: 'Interrupted writer bootstrap' },
+        fixture.ctx,
+      ),
+    );
+    barrier.block();
+    const spawn = Effect.runFork(
+      controller.spawnAgent(
+        {
+          model: 'fixture/model',
+          task: 'Remain owned after cancellation.',
+          thinkingLevel: 'low',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+    const leasePath = await Effect.runPromise(Deferred.await(barrier.entered));
+
+    await Effect.runPromise(Fiber.interrupt(spawn));
+
+    const [agent] = Object.values(requiredValue(controller.snapshot()).agents);
+    expect(agent).toMatchObject({
+      lastError: expect.stringContaining('completion and process termination are unknown'),
+      status: 'crashed',
+      worktree: { path: leasePath },
+      worktreeBootstrap: {
+        failureSummary: expect.stringContaining('[external_interrupt]'),
+        status: 'interrupted',
+      },
+    });
+    expect(workers.spawns).toHaveLength(0);
+    expect(existsSync(leasePath)).toBe(true);
+    expect(
+      await Effect.runPromise(
+        controller.cleanupAgentLease(
+          { action: 'inspect', agentId: requiredValue(agent).id },
+          fixture.ctx,
+        ),
+      ),
+    ).toMatchObject({ action: 'inspect', worktree: 'present_clean' });
+    expect(managerEvents(activationStateDir(fixture.entries))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'agent_worktree_bootstrap_interrupted' }),
+      ]),
+    );
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  }, 15_000);
+
+  test('settles externally interrupted verifier request with retryable scratch cleanup', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const barrier = await interruptibleWorktreeBootstrap();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktreeBootstrap: barrier.bootstrap,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent: source } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'interrupted verifier request',
+    );
+    barrier.block();
+    const request = Effect.runFork(
+      controller.requestVerification({ sourceAgentId: source.id }, fixture.ctx),
+    );
+    const reviewPath = await Effect.runPromise(Deferred.await(barrier.entered));
+
+    await Effect.runPromise(Fiber.interrupt(request));
+
+    const [verification] = Object.values(requiredValue(controller.snapshot()).verifications);
+    const verifierAgent = requiredValue(controller.snapshot()).agents[
+      requiredValue(verification).verifierAgentId
+    ];
+    expect(verification).toMatchObject({ scratchCleanupPending: true });
+    expect(currentVerificationAttempt(requiredValue(verification)).status).toBe('crashed');
+    expect(verifierAgent).toMatchObject({
+      status: 'crashed',
+      worktreeBootstrap: {
+        failureSummary: expect.stringContaining('[external_interrupt]'),
+        status: 'interrupted',
+      },
+    });
+    expect(workers.spawns).toHaveLength(1);
+    expect(existsSync(reviewPath)).toBe(true);
+
+    const cleanup = await Effect.runPromise(
+      controller
+        .refreshVerification({ verificationId: requiredValue(verification).id }, fixture.ctx)
+        .pipe(Effect.flip),
+    );
+    expect(cleanup).toMatchObject({
+      reason:
+        'retained failed verifier scratch cleanup completed; request a new advisory verification',
+    });
+    expect(existsSync(reviewPath)).toBe(false);
+    expect(controller.snapshot()?.verifications).toEqual({});
+    expect(
+      controller.snapshot()?.agents[requiredValue(verification).verifierAgentId],
+    ).toBeUndefined();
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  }, 15_000);
+
+  test('settles externally interrupted verifier refresh with retained conversation cleanup', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const barrier = await interruptibleWorktreeBootstrap();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktreeBootstrap: barrier.bootstrap,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent: source } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'interrupted verifier refresh',
+    );
+    const verification = await Effect.runPromise(
+      controller.requestVerification({ sourceAgentId: source.id }, fixture.ctx),
+    );
+    await projectIdleRuntime(workers, verification.verifierAgentId);
+    barrier.block();
+    const refresh = Effect.runFork(
+      controller.refreshVerification({ verificationId: verification.id }, fixture.ctx),
+    );
+    const reviewPath = await Effect.runPromise(Deferred.await(barrier.entered));
+
+    await Effect.runPromise(Fiber.interrupt(refresh));
+
+    const interrupted = requiredValue(controller.snapshot()?.verifications[verification.id]);
+    expect(interrupted).toMatchObject({ scratchCleanupPending: true });
+    expect(currentVerificationAttempt(interrupted).status).toBe('crashed');
+    expect(controller.snapshot()?.agents[verification.verifierAgentId]).toMatchObject({
+      status: 'crashed',
+      worktreeBootstrap: {
+        failureSummary: expect.stringContaining('[external_interrupt]'),
+        status: 'interrupted',
+      },
+    });
+    expect(existsSync(reviewPath)).toBe(true);
+    expect(workers.spawns).toHaveLength(2);
+
+    const cleanup = await Effect.runPromise(
+      controller
+        .refreshVerification({ verificationId: verification.id }, fixture.ctx)
+        .pipe(Effect.flip),
+    );
+    expect(cleanup).toMatchObject({
+      reason:
+        'retained failed verifier scratch cleanup completed; run verification_refresh again to deliberately relaunch the retained verifier conversation',
+    });
+    expect(existsSync(reviewPath)).toBe(false);
+    expect(controller.snapshot()?.verifications[verification.id]).not.toHaveProperty(
+      'scratchCleanupPending',
+    );
+    expect(controller.snapshot()?.agents[verification.verifierAgentId]).toMatchObject({
+      status: 'crashed',
+      worktreeBootstrap: { status: 'interrupted' },
+    });
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   }, 15_000);
 

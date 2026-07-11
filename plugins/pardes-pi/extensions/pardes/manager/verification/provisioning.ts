@@ -204,7 +204,34 @@ export function makeVerificationProvisioner(
         cwd: reviewCheckout.path,
         label: `${verificationId} attempt 1 fresh detached verifier checkout`,
         namespace,
-      }).pipe(Effect.exit);
+      }).pipe(
+        Effect.exit,
+        Effect.onInterrupt(() =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* compensation.rollbackRequestedVerification(
+                verification,
+                false,
+                true,
+                'verifier request worktree bootstrap was externally interrupted',
+              );
+              const interruptedAt = yield* nowIso;
+              yield* callbacks.appendEventSafely(
+                makeVerificationEvent(
+                  'verification_worktree_bootstrap_interrupted',
+                  `${verificationId} verifier bootstrap was externally interrupted; no child verifier was launched, process termination is not assumed, and retryable scratch ownership was retained.`,
+                  interruptedAt,
+                  {
+                    agentId: verifierAgentId,
+                    verificationId,
+                    workstreamId: source.workstreamId,
+                  },
+                ),
+              );
+            }),
+          ),
+        ),
+      );
       if (Exit.isFailure(bootstrapResult)) {
         const failedAt = yield* nowIso;
         const bootstrapError = Cause.squash(bootstrapResult.cause);
@@ -539,7 +566,34 @@ export function makeVerificationProvisioner(
         cwd: reviewCheckout.path,
         label: `${verificationId} attempt ${attempt} refreshed detached verifier checkout`,
         namespace,
-      }).pipe(Effect.exit);
+      }).pipe(
+        Effect.exit,
+        Effect.onInterrupt(() =>
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              yield* compensation.cleanupRefreshProvisioningFailure(
+                refreshedVerification,
+                'refreshed verifier worktree bootstrap was externally interrupted',
+                false,
+                true,
+              );
+              const interruptedAt = yield* nowIso;
+              yield* callbacks.appendEventSafely(
+                makeVerificationEvent(
+                  'verification_worktree_bootstrap_interrupted',
+                  `${verificationId} attempt ${attempt} verifier bootstrap was externally interrupted; no child verifier was relaunched, process termination is not assumed, and retryable scratch ownership was retained.`,
+                  interruptedAt,
+                  {
+                    agentId: verifierAgent.id,
+                    verificationId,
+                    workstreamId: verification.workstreamId,
+                  },
+                ),
+              );
+            }),
+          ),
+        ),
+      );
       if (Exit.isFailure(bootstrapResult)) {
         const failedAt = yield* nowIso;
         const bootstrapError = Cause.squash(bootstrapResult.cause);

@@ -1,6 +1,9 @@
 import { Cause, Effect, Exit } from 'effect';
 import { currentVerificationAttempt, type VerificationRecord } from '../domain.ts';
-import { settleUnrecordedWorktreeBootstrap } from '../worktree-bootstrap.ts';
+import {
+  EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY,
+  settleUnrecordedWorktreeBootstrap,
+} from '../worktree-bootstrap.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   nowIso,
@@ -27,6 +30,7 @@ export interface VerificationProvisioningCompensationShape {
     verification: VerificationRecord,
     stopRuntime: boolean,
     deferDiscard?: boolean,
+    reason?: string,
   ) => Effect.Effect<void>;
   readonly stopVerifierRuntimeSafely: (agentId: string) => Effect.Effect<void>;
 }
@@ -89,46 +93,47 @@ export function makeVerificationProvisioningCompensation(
     phase: 'request' | 'refresh',
   ) {
     const timestamp = yield* nowIso;
+    const withProvisioningFailed = (state: typeof namespace.state): typeof namespace.state => {
+      const current = state.verifications[verification.id];
+      if (!current) return state;
+      const agent = state.agents[current.verifierAgentId];
+      const failed = {
+        ...withVerificationStatus(
+          withStaleCurrentEvidence(current, 'provisioning_failed', timestamp, reason),
+          'crashed',
+          timestamp,
+        ),
+        scratchCleanupPending: true,
+      };
+      return {
+        ...state,
+        agents:
+          agent === undefined
+            ? state.agents
+            : {
+                ...state.agents,
+                [agent.id]: {
+                  ...agent,
+                  lastError:
+                    phase === 'request'
+                      ? 'Verifier provisioning failed; detached scratch cleanup remains retryable.'
+                      : 'Verifier refresh provisioning failed; detached scratch cleanup remains retryable.',
+                  status: 'crashed',
+                  updatedAt: timestamp,
+                  worktreeBootstrap: settleUnrecordedWorktreeBootstrap(
+                    agent.worktreeBootstrap,
+                    timestamp,
+                    reason.includes('externally interrupted')
+                      ? EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY
+                      : undefined,
+                  ),
+                },
+              },
+        verifications: { ...state.verifications, [current.id]: failed },
+      };
+    };
     const marked = yield* namespace.store
-      .mutate((state) => {
-        const current = state.verifications[verification.id];
-        if (!current) return Effect.succeed([undefined, state] as const);
-        const agent = state.agents[current.verifierAgentId];
-        const failed = {
-          ...withVerificationStatus(
-            withStaleCurrentEvidence(current, 'provisioning_failed', timestamp, reason),
-            'crashed',
-            timestamp,
-          ),
-          scratchCleanupPending: true,
-        };
-        return Effect.succeed([
-          undefined,
-          {
-            ...state,
-            agents:
-              agent === undefined
-                ? state.agents
-                : {
-                    ...state.agents,
-                    [agent.id]: {
-                      ...agent,
-                      lastError:
-                        phase === 'request'
-                          ? 'Verifier provisioning failed; detached scratch cleanup remains retryable.'
-                          : 'Verifier refresh provisioning failed; detached scratch cleanup remains retryable.',
-                      status: 'crashed',
-                      updatedAt: timestamp,
-                      worktreeBootstrap: settleUnrecordedWorktreeBootstrap(
-                        agent.worktreeBootstrap,
-                        timestamp,
-                      ),
-                    },
-                  },
-            verifications: { ...state.verifications, [current.id]: failed },
-          },
-        ] as const);
-      })
+      .mutate((state) => Effect.succeed([undefined, withProvisioningFailed(state)] as const))
       .pipe(Effect.exit);
     if (Exit.isFailure(marked)) {
       console.error(
@@ -137,6 +142,7 @@ export function makeVerificationProvisioningCompensation(
           : `Pardes failed to persist advisory verification ${verification.id} refresh rollback`,
         Cause.squash(marked.cause),
       );
+      namespace.state = withProvisioningFailed(namespace.state);
       return false;
     }
     yield* callbacks.refresh().pipe(
@@ -236,16 +242,10 @@ export function makeVerificationProvisioningCompensation(
     verification: VerificationRecord,
     stopRuntime: boolean,
     deferDiscard = false,
+    reason = 'verifier request provisioning failed',
   ) {
     if (stopRuntime) yield* stopVerifierRuntimeSafely(verification.verifierAgentId);
-    if (
-      !(yield* markProvisioningFailed(
-        verification,
-        'verifier request provisioning failed',
-        'request',
-      ))
-    )
-      return;
+    if (!(yield* markProvisioningFailed(verification, reason, 'request'))) return;
     if (deferDiscard) return;
     if (!(yield* discardReviewCheckoutSafely(verification))) return;
     yield* removeRequestedVerificationAfterDiscard(verification);

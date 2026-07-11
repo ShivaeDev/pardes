@@ -11,15 +11,19 @@ import type { AgentRecord, ManagerEvent, ManagerState, WorktreeBootstrapRecord }
 const UNRECORDED_BOOTSTRAP_SUMMARY =
   '[state_persistence] script/update terminal outcome was not durably recorded; completion and process termination are unknown; automatic rerun is disabled.';
 
+export const EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY =
+  '[external_interrupt] script/update was interrupted; completion and process termination are unknown; automatic rerun is disabled.';
+
 /** Never leave retained crashed ownership claiming that repository bootstrap is still running. */
 export function settleUnrecordedWorktreeBootstrap(
   record: AgentRecord['worktreeBootstrap'],
   completedAt: string,
+  failureSummary = UNRECORDED_BOOTSTRAP_SUMMARY,
 ): WorktreeBootstrapRecord | undefined {
   if (record?.status !== 'running') return record;
   return {
     completedAt,
-    failureSummary: UNRECORDED_BOOTSTRAP_SUMMARY,
+    failureSummary,
     script: 'script/update',
     startedAt: record.startedAt,
     status: 'interrupted',

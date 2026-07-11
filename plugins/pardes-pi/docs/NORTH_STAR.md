@@ -167,9 +167,12 @@ lifecycle/timeout leaves termination uncertain. Verifier uncertainty keeps
 retryable scratch ownership rather than immediately declaring disposal safe. A
 crashed retained agent cannot remain durably marked as running bootstrap; a
 missing terminal record is normalized to interrupted with completion and
-termination unknown. Retained revive does not rerun bootstrap. After
-restoration, an observed in-flight bootstrap is marked interrupted and
-repository code is never rerun automatically.
+termination unknown. External cancellation during bootstrap performs an
+uninterruptible durable settlement at the manager boundary: writer leases and
+verifier scratch remain crashed, interrupted, and immediately eligible for
+conservative inspection or cleanup without a restart. Retained revive does not
+rerun bootstrap. After restoration, an observed in-flight bootstrap is marked
+interrupted and repository code is never rerun automatically.
 
 The process adapter signals its directly spawned process group on POSIX (the
 direct child elsewhere) on timeout and Effect interruption, observes

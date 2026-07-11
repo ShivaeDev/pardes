@@ -48,6 +48,7 @@ import {
   successfulHandoffAudit,
 } from './worker-events.ts';
 import {
+  EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY,
   runDurableWorktreeBootstrap,
   settleUnrecordedWorktreeBootstrap,
 } from './worktree-bootstrap.ts';
@@ -287,6 +288,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
     cleanup: Exclude<FailedLeaseCleanup, 'removed_clean'>,
     failedAt: string,
     failure: string,
+    bootstrapFailureSummary?: string,
   ) {
     const withRetainedOwnership = (state: ManagerState): ManagerState => {
       const current = state.agents[agent.id] ?? agent;
@@ -305,6 +307,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
             worktreeBootstrap: settleUnrecordedWorktreeBootstrap(
               current.worktreeBootstrap,
               failedAt,
+              bootstrapFailureSummary,
             ),
           },
         },
@@ -323,6 +326,28 @@ export function makeAgentAttachmentLifecycleCoordinator(
       return;
     }
     yield* callbacks.refresh();
+  });
+
+  const settleInterruptedWriterBootstrap = Effect.fnUntraced(function* (
+    agent: AgentRecord,
+    workstream: Workstream,
+  ) {
+    const interruptedAt = yield* nowIso;
+    yield* retainFailedAgentLease(
+      agent,
+      'preserved_unverified',
+      interruptedAt,
+      'Repository bootstrap was externally interrupted; completion and process termination are unknown.',
+      EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY,
+    );
+    yield* callbacks.appendEventSafely(
+      makeEvent(
+        'agent_worktree_bootstrap_interrupted',
+        `${agent.id} repository bootstrap was externally interrupted; no child worker was launched, process termination is not assumed, and conservative lease ownership was retained.`,
+        interruptedAt,
+        { agentId: agent.id, workstreamId: workstream.id },
+      ),
+    );
   });
 
   const handleSpawnPersistenceFailure = Effect.fnUntraced(function* (
@@ -468,7 +493,12 @@ export function makeAgentAttachmentLifecycleCoordinator(
         cwd: lease.path,
         label: `${agentId} fresh managed worktree`,
         namespace,
-      }).pipe(Effect.exit);
+      }).pipe(
+        Effect.exit,
+        Effect.onInterrupt(() =>
+          Effect.uninterruptible(settleInterruptedWriterBootstrap(agent, workstream)),
+        ),
+      );
       if (Exit.isFailure(bootstrapResult)) {
         const failedAt = yield* nowIso;
         const bootstrapError = Cause.squash(bootstrapResult.cause);

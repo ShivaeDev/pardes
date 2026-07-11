@@ -119,7 +119,10 @@ launched-state persistence failure also classifies cleanup before removing provi
 ownership: dirty or unverifiable leases remain attached to a durable crashed
 agent. A retained crashed agent never keeps a `running` bootstrap marker; an
 unrecorded terminal outcome is normalized to interrupted with unknown
-completion and termination. Retained revive does not rerun the hook, and
+completion and termination. External cancellation during bootstrap runs an
+uninterruptible manager settlement: writer leases and verifier scratch become
+crashed, interrupted, and immediately available to conservative cleanup without
+waiting for manager restoration. Retained revive does not rerun the hook, and
 restoration never automatically reruns a hook whose completion was not observed.
 
 Managed worktrees and verifier tool restrictions are workflow guardrails, not a

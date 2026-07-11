@@ -66,7 +66,7 @@ import {
 } from './controller.ts';
 import { currentVerificationAttempt, type PullRequestObservation } from './domain.ts';
 import { AgentNotFoundError, formatPardesError } from './errors.ts';
-import { MANAGER_INBOX_WAKE_MAX_ROWS } from './inbox.ts';
+import { MANAGER_INBOX_WAKE_MAX_ROWS, projectInboxAttention } from './inbox.ts';
 import { ManagerInputValidationError } from './inputs.ts';
 
 const temporaryDirectories: string[] = [];
@@ -8890,7 +8890,7 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
-  test('deduplicates equivalent pending conflict attention until acknowledgement rearms a later transition', async () => {
+  test('keeps conflict attention generation-sticky across acknowledgement, transient mergeability, and restart, then rearms after confirmed resolution', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
@@ -8905,28 +8905,140 @@ describe('manager controller', () => {
       makeWorkers: workers.makeWorkers,
     });
     await Effect.runPromise(controller.activate(fixture.ctx));
-    const { published } = await publishManagedFixture(controller, fixture.ctx, repo);
+    const { agent, published } = await publishManagedFixture(controller, fixture.ctx, repo);
     const pullRequestId = published.pullRequest.id;
 
     await Effect.runPromise(
       watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
     );
-    const conflict = requiredValue(
+    const firstConflict = requiredValue(
       controller.snapshot()?.inbox.find(({ type }) => type === 'conflict'),
     );
-    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
-    await Effect.runPromise(
-      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
-    );
-    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      generation: 1,
+      phase: 'conflicting',
+    });
+    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: firstConflict.id }));
 
-    await Effect.runPromise(controller.acknowledgeInbox(fixture.ctx, { cursor: conflict.id }));
-    await Effect.runPromise(watcher.observeLifecycle(pullRequestId, observedPullRequest()));
+    // Unknown and one-off mergeable projections remain externally visible but
+    // are not proof of conflict resolution.
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'unknown' })),
+    );
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'mergeable' })),
+    );
+    expect(controller.snapshot()?.pullRequests[pullRequestId]).toMatchObject({
+      conflictAttention: { generation: 1, phase: 'conflicting' },
+      observation: { mergeable: 'mergeable' },
+    });
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'unknown' })),
+    );
+    await Effect.runPromise(
+      watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'mergeable' })),
+    );
     await Effect.runPromise(
       watcher.observeLifecycle(pullRequestId, observedPullRequest({ mergeable: 'conflicting' })),
     );
-    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+    expect(controller.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toEqual([]);
+    expect(controller.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      generation: 1,
+      phase: 'conflicting',
+    });
+
     await Effect.runPromise(controller.shutdown(fixture.ctx));
+    const restoredWatcher = manualGithubWatcher();
+    const restoredGithub = stubGithub();
+    const restoredWorkers = stubWorkers();
+    const restored = new ManagerController(fixture.pi, {
+      github: restoredGithub.github,
+      githubWatcher: restoredWatcher.watcher,
+      makeWorkers: restoredWorkers.makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    await Effect.runPromise(
+      restoredWatcher.observeLifecycle(
+        pullRequestId,
+        observedPullRequest({ mergeable: 'unknown' }),
+      ),
+    );
+    await Effect.runPromise(
+      restoredWatcher.observeLifecycle(
+        pullRequestId,
+        observedPullRequest({ mergeable: 'conflicting' }),
+      ),
+    );
+    expect(restored.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toEqual([]);
+
+    // Two consecutive complete mergeable observations confirm resolution; a
+    // later conflicting observation is a materially new generation.
+    await Effect.runPromise(
+      restoredWatcher.observe(pullRequestId, observedPullRequest({ mergeable: 'mergeable' })),
+    );
+    await Effect.runPromise(
+      restoredWatcher.observe(pullRequestId, observedPullRequest({ mergeable: 'mergeable' })),
+    );
+    expect(restored.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      generation: 1,
+      phase: 'resolved',
+    });
+    await Effect.runPromise(
+      restoredWatcher.observeLifecycle(
+        pullRequestId,
+        observedPullRequest({ mergeable: 'conflicting' }),
+      ),
+    );
+    const reappeared = requiredValue(
+      restored.snapshot()?.inbox.find(({ type }) => type === 'conflict'),
+    );
+    expect(reappeared.id).not.toBe(firstConflict.id);
+    expect(restored.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      generation: 2,
+      phase: 'conflicting',
+    });
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(({ type }) => type === 'conflict'),
+    ).toHaveLength(2);
+
+    await Effect.runPromise(restored.acknowledgeInbox(fixture.ctx, { cursor: reappeared.id }));
+    const previousAuditedHead = restored.snapshot()?.pullRequests[pullRequestId]?.lastPushedHeadSha;
+    const worktree = requiredValue(agent.worktree);
+    writeFileSync(join(worktree.path, 'new-head.txt'), 'new audited generation\n');
+    git(worktree.path, 'add', 'new-head.txt');
+    git(worktree.path, 'commit', '-m', 'new audited conflict generation');
+    await Effect.runPromise(
+      restoredWorkers.emit({
+        agentId: agent.id,
+        lifecycleGeneration: restored.snapshot()?.agents[agent.id]?.lifecycleGeneration,
+        status: 'completed',
+        summary: 'Published a new audited head.',
+        type: 'report',
+      }),
+    );
+    const report = requiredValue(
+      restored.snapshot()?.inbox.find(({ type }) => type === 'agent_report_completed'),
+    );
+    expect(restoredGithub.syncs).toHaveLength(1);
+    expect(restored.snapshot()?.pullRequests[pullRequestId]?.lastPushedHeadSha).not.toBe(
+      previousAuditedHead,
+    );
+    await Effect.runPromise(restored.acknowledgeInbox(fixture.ctx, { cursor: report.id }));
+    await Effect.runPromise(
+      restoredWatcher.observeLifecycle(
+        pullRequestId,
+        observedPullRequest({ mergeable: 'conflicting' }),
+      ),
+    );
+    expect(restored.snapshot()?.pullRequests[pullRequestId]?.conflictAttention).toMatchObject({
+      generation: 3,
+      phase: 'conflicting',
+    });
+    expect(restored.snapshot()?.inbox.filter(({ type }) => type === 'conflict')).toHaveLength(1);
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(({ type }) => type === 'conflict'),
+    ).toHaveLength(3);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
   });
 
   test('surfaces bounded remote-head divergence once until matching watcher metadata clears its durable warning', async () => {
@@ -10952,6 +11064,126 @@ describe('manager controller', () => {
     expect(controller.snapshot()?.agents[discoveredAgent.id]?.changedPaths).toEqual([
       'discovered.txt',
     ]);
+  });
+
+  test('coalesces terminal-report-derived stale verification context without disturbing a delivered cursor or queued suffix across restart', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    fixture.setManagerIdle(true);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent } = await spawnManagedFixture(controller, fixture.ctx, repo, 'coalesced stale');
+    const worktree = requiredValue(agent.worktree);
+    writeFileSync(join(worktree.path, 'reviewed.txt'), 'reviewed\n');
+    git(worktree.path, 'add', 'reviewed.txt');
+    git(worktree.path, 'commit', '-m', 'reviewed head');
+    const verification = await Effect.runPromise(
+      controller.requestVerification({ sourceAgentId: agent.id }, fixture.ctx),
+    );
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        question: 'Preserve this delivered cursor?',
+        type: 'question',
+      }),
+    );
+    const deliveredQuestion = requiredValue(controller.snapshot()?.inboxWake);
+    const wakeMessageCount = fixture.messages.length;
+
+    writeFileSync(join(worktree.path, 'fixed.txt'), 'new source head\n');
+    git(worktree.path, 'add', 'fixed.txt');
+    git(worktree.path, 'commit', '-m', 'advance reviewed source');
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Implemented the requested fix.',
+        type: 'report',
+      }),
+    );
+
+    const afterReport = requiredValue(controller.snapshot());
+    const report = requiredValue(
+      afterReport.inbox.find((event) => event.type === 'agent_report_completed'),
+    );
+    expect(afterReport.inbox.map((event) => event.type)).toEqual([
+      'agent_question',
+      'agent_report_completed',
+    ]);
+    expect(report.summary).toContain('[Pardes-derived context]');
+    expect(report.coalescedVerificationEvidence).toEqual([
+      expect.objectContaining({
+        attempt: 1,
+        staleReasonCode: 'source_head_changed',
+        verificationId: verification.id,
+      }),
+    ]);
+    expect(
+      currentVerificationAttempt(requiredValue(afterReport.verifications[verification.id])),
+    ).toMatchObject({
+      evidenceStatus: 'stale',
+      staleReasonCode: 'source_head_changed',
+    });
+    expect(afterReport.inboxWake).toEqual(deliveredQuestion);
+    expect(projectInboxAttention(afterReport.inbox, afterReport.inboxWake).queuedSuffixCount).toBe(
+      1,
+    );
+    expect(fixture.messages).toHaveLength(wakeMessageCount);
+    const auditTypes = managerEvents(activationStateDir(fixture.entries)).map(({ type }) => type);
+    expect(auditTypes).toContain('agent_report_completed');
+    expect(auditTypes).toContain('verification_evidence_stale');
+
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+    // Simulate a manager exit after stale-state persistence but before the
+    // report presentation barrier refinement settled. Restore must retry the
+    // software-owned refinement without minting or consuming a cursor.
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const interrupted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      inbox: Array<Record<string, unknown>>;
+    };
+    const interruptedReport = requiredValue(
+      interrupted.inbox.find((event) => event.id === report.id),
+    );
+    interruptedReport.presentationBlocked = true;
+    interruptedReport.presentationBlockedReason = 'verification_reconciliation';
+    writeFileSync(statePath, `${JSON.stringify(interrupted, null, 2)}\n`);
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.inboxWake).toEqual(deliveredQuestion);
+    expect(restored.snapshot()?.inbox.find((event) => event.id === report.id)).not.toHaveProperty(
+      'presentationBlocked',
+    );
+    expect(restored.snapshot()?.inbox.map((event) => event.id)).toEqual(
+      afterReport.inbox.map((event) => event.id),
+    );
+    expect(
+      restored.snapshot()?.inbox.filter((event) => event.type === 'verification_evidence_stale'),
+    ).toEqual([]);
+
+    await Effect.runPromise(
+      restored.acknowledgeInbox(fixture.ctx, { cursor: deliveredQuestion.cursor }),
+    );
+    expect(restored.snapshot()?.inbox.map((event) => event.id)).toEqual([report.id]);
+    expect(restored.snapshot()?.inboxWake?.cursor).toBe(report.id);
+    expect(JSON.stringify(fixture.messages.at(-1)?.message)).toContain(
+      'Pardes stale verification context:1',
+    );
+    await Effect.runPromise(restored.acknowledgeInbox(fixture.ctx, { cursor: report.id }));
+    expect(restored.snapshot()?.inbox).toEqual([]);
+    expect(
+      currentVerificationAttempt(
+        requiredValue(restored.snapshot()?.verifications[verification.id]),
+      ),
+    ).toMatchObject({ evidenceStatus: 'stale', staleReasonCode: 'source_head_changed' });
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
   });
 
   test('refreshes an idle retained scratch verifier at the latest clean source head with stale attempt lineage', async () => {

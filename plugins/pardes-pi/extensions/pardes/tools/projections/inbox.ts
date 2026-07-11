@@ -85,8 +85,9 @@ function inboxIndexEventLines(event: ManagerEvent): ReadonlyArray<string> {
   const preview = compactText(event.summary, INBOX_REPORT_PREVIEW_LENGTH);
   const previewTruncated =
     event.reportPreviewTruncated === true || preview !== event.summary.replace(/\s+/g, ' ').trim();
+  const coalesced = event.coalescedVerificationEvidence?.length ?? 0;
   return [
-    `reportId:${event.reportId} · previewTruncated:${previewTruncated} · artifact: report_get({ reportId })`,
+    `reportId:${event.reportId} · previewTruncated:${previewTruncated}${coalesced === 0 ? '' : ` · derived-stale-verifications:${coalesced}`} · artifact: report_get({ reportId })`,
     `↳ ${event.id} [${event.type}] · ${childAuthoredPreviewLabel(event)}${refinement} · ${pointer}`,
   ];
 }
@@ -193,6 +194,7 @@ export interface InboxEventDetailMetadata {
   readonly verificationId?: string;
   readonly reportId?: string;
   readonly reportPreviewTruncated?: boolean;
+  readonly coalescedVerificationEvidenceCount?: number;
 }
 
 function inboxEventTrust(event: ManagerEvent): InboxEventTrust {
@@ -285,6 +287,9 @@ export function inboxEventDetailMetadata(
     ...(event.reportPreviewTruncated === undefined
       ? {}
       : { reportPreviewTruncated: event.reportPreviewTruncated }),
+    ...(event.coalescedVerificationEvidence === undefined
+      ? {}
+      : { coalescedVerificationEvidenceCount: event.coalescedVerificationEvidence.length }),
   };
 }
 
@@ -329,6 +334,17 @@ export function inboxEventDetailLines(
     ...(metadata.hasMore
       ? [
           `next: inbox_get({ eventId: ${JSON.stringify(metadata.eventId)}, offset: ${metadata.offset + metadata.returnedChars}, maxChars: ${metadata.maxChars} })`,
+        ]
+      : []),
+    ...(event.coalescedVerificationEvidence
+      ?.slice(0, 6)
+      .map(
+        (evidence) =>
+          `Pardes-derived verification context: verificationId:${JSON.stringify(evidence.verificationId)} · attempt:${evidence.attempt} · evidence:stale · reasonCode:${evidence.staleReasonCode} · reason:${JSON.stringify(evidence.staleReason)}`,
+      ) ?? []),
+    ...((event.coalescedVerificationEvidence?.length ?? 0) > 6
+      ? [
+          `… +${(event.coalescedVerificationEvidence?.length ?? 0) - 6} more coalesced stale verification contexts omitted; inspect pardes_status(view="verifications").`,
         ]
       : []),
     ...(metadata.reportId === undefined

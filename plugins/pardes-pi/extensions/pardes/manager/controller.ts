@@ -1037,7 +1037,8 @@ export class ManagerController {
         consumeWorkstreamCompletionIntent: (agentId, lifecycleGeneration) =>
           this.consumeWorkstreamCompletionIntent(agentId, lifecycleGeneration),
         isSuppressed: (agentId) => this.ignoredWorkerEvents.has(agentId),
-        reconcileVerificationsForSource: (agentId) => verifications.reconcileForSource(agentId),
+        reconcileVerificationsForSource: (agentId, options) =>
+          verifications.reconcileForSource(agentId, options),
         refresh: () => this.refreshActiveState(active),
         releaseInboxWake: () => this.releaseInboxWake(),
         render: () => this.render(),
@@ -1451,6 +1452,14 @@ export class ManagerController {
       workerEvents,
     });
     this.active = active;
+    for (const event of active.state.inbox.filter(
+      (candidate) => candidate.presentationBlockedReason === 'verification_reconciliation',
+    )) {
+      if (event.agentId === undefined) continue;
+      yield* verifications.reconcileForSource(event.agentId, {
+        coalesceIntoEventId: event.id,
+      });
+    }
     yield* this.consumeRestoredWorkstreamCompletionIntents(ctx);
     this.render(ctx);
     yield* reviewGates.retirePersistedMergedPullRequests();

@@ -72,7 +72,10 @@ interface WorkerEventFollowUp {
     readonly workstreamId: string;
   };
   readonly releaseInboxWake?: boolean;
-  readonly reconcileVerificationsForSource?: string;
+  readonly reconcileVerificationsForSource?: {
+    readonly sourceAgentId: string;
+    readonly coalesceIntoEventId?: string;
+  };
   readonly syncCompletedReport?: string;
 }
 
@@ -122,7 +125,10 @@ export interface WorkerSupervisorEventCoordinatorCallbacks {
   readonly serializeVerificationMutation: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E, R>;
-  readonly reconcileVerificationsForSource: (agentId: string) => Effect.Effect<void, unknown>;
+  readonly reconcileVerificationsForSource: (
+    agentId: string,
+    options?: { readonly coalesceIntoEventId?: string },
+  ) => Effect.Effect<void, unknown>;
   readonly retryResolvedVerificationRetirementForIdleVerifier: (
     agentId: string,
   ) => Effect.Effect<boolean, unknown>;
@@ -305,10 +311,25 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
           }
         : {}),
     };
+    const awaitsVerificationReconciliation =
+      workerEvent.type === 'report' &&
+      workerEvent.status !== 'progress' &&
+      persistedAgent.role === 'worker' &&
+      Object.values(namespace.state.verifications).some(
+        (verification) =>
+          verification.sourceAgentId === workerEvent.agentId &&
+          currentVerificationAttempt(verification).evidenceStatus === 'current',
+      );
     const attention = event?.actionable
       ? {
           ...makeEvent(event.type, event.summary, timestamp, association),
           ...(event.details === undefined ? {} : { details: event.details }),
+          ...(awaitsVerificationReconciliation
+            ? {
+                presentationBlocked: true,
+                presentationBlockedReason: 'verification_reconciliation',
+              }
+            : {}),
         }
       : undefined;
     const projection = yield* namespace.store.mutate<WorkerEventProjection, never>((state) => {
@@ -481,11 +502,18 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         ? { releaseInboxWake: true }
         : {}),
       ...(workerEvent.type === 'report' &&
-      workerEvent.status === 'completed' &&
+      workerEvent.status !== 'progress' &&
       persistedAgent.role === 'worker'
         ? {
-            reconcileVerificationsForSource: workerEvent.agentId,
-            syncCompletedReport: workerEvent.agentId,
+            reconcileVerificationsForSource: {
+              sourceAgentId: workerEvent.agentId,
+              ...(projection.enqueued && attention !== undefined
+                ? { coalesceIntoEventId: attention.id }
+                : {}),
+            },
+            ...(workerEvent.status === 'completed'
+              ? { syncCompletedReport: workerEvent.agentId }
+              : {}),
           }
         : {}),
     } satisfies WorkerEventFollowUp;
@@ -510,9 +538,18 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         yield* callbacks.retryResolvedVerificationRetirementForIdleVerifier(agentId);
       if (retiredVerifier) yield* reviewGates.retryMergedRetirementForWorkstream(workstreamId);
     }
-    if (followUp.releaseInboxWake) yield* callbacks.releaseInboxWake();
     if (followUp.reconcileVerificationsForSource)
-      yield* callbacks.reconcileVerificationsForSource(followUp.reconcileVerificationsForSource);
+      yield* callbacks.reconcileVerificationsForSource(
+        followUp.reconcileVerificationsForSource.sourceAgentId,
+        followUp.reconcileVerificationsForSource.coalesceIntoEventId === undefined
+          ? undefined
+          : {
+              coalesceIntoEventId: followUp.reconcileVerificationsForSource.coalesceIntoEventId,
+            },
+      );
+    // Reconcile derivative verification state before releasing the causative
+    // report cursor so one wake covers the complete software-owned context.
+    if (followUp.releaseInboxWake) yield* callbacks.releaseInboxWake();
     if (followUp.syncCompletedReport)
       yield* pullRequests.syncCompletedReport(followUp.syncCompletedReport);
   });

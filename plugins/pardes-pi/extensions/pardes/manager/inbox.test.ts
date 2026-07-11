@@ -187,6 +187,31 @@ describe('manager inbox notification projection', () => {
     });
   });
 
+  test('surfaces coalesced stale-verification context on the causative report wake without adding a row', () => {
+    const report: ManagerEvent = {
+      agentId: 'agent-1',
+      coalescedVerificationEvidence: [
+        {
+          attempt: 2,
+          staleReason: '[source_head_changed] source head changed',
+          staleReasonCode: 'source_head_changed',
+          verificationId: 'verify-1',
+        },
+      ],
+      createdAt,
+      id: 'event-report',
+      reportId: 'report-1',
+      summary: '[Pardes-derived context] verify-1 evidence is stale. Worker completed.',
+      type: 'agent_report_completed',
+    };
+
+    const message = render([report]);
+
+    expect(message.details.pendingCount).toBe(1);
+    expect(message.details.queuedSuffixCount).toBe(0);
+    expect(message.content).toContain('[child summary + Pardes stale verification context:1]');
+  });
+
   test('renders mixed event provenance without injecting unsafe diagnostics or unknown summaries', () => {
     const message = render([
       event('event-1', 'conflict', '#68 for agent-1 has merge conflicts.'),

@@ -74,8 +74,11 @@ When independent evidence is needed, call
 `verification_request({ sourceAgentId, ... })`. Wait for durable inbox delivery;
 do not poll. Inspect bounded `verification_status({ verificationId })` and call
 `report_get({ reportId })` only when the result or a concrete decision requires
-detail. After fixes, call `verification_refresh({ verificationId })` so the same
-retained verifier checks the latest clean HEAD. Verification is advisory and
+detail. A terminal writer report that advances the reviewed head may carry a
+Pardes-derived stale-evidence context on that same inbox row; treat it as the
+software-owned signal to refresh, not as a second missing notification. After
+fixes, call `verification_refresh({ verificationId })` so the same retained
+verifier checks the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering
 slices and when a concrete review question remains. Skip trivial documentation
 or test-only maintenance unless risk justifies it. Do not recreate verification
@@ -99,6 +102,11 @@ For a completed worker slice:
    rewrite published branch history because Pardes exact-SHA publication
    intentionally never force-pushes;
 7. leave merges under user control.
+
+Acknowledged conflict attention stays generation-scoped to its audited head and
+owner lifecycle. Transient `unknown` or one-off `mergeable` hosted projections do
+not re-arm it. A newly audited head/lifecycle or conflict reappearance after
+confirmed resolution does; inspect that new generation rather than polling.
 
 Browser handoff is explicit: omit `browserMode` or use `'none'` for no opener,
 use `'background'` for macOS `open -g` with a portable ordinary-opener fallback

@@ -2,6 +2,7 @@ import { Effect, Exit } from 'effect';
 import type { WorktreeInspection } from '../../git/index.ts';
 import {
   type AgentRecord,
+  type CoalescedVerificationEvidence,
   currentVerificationAttempt,
   type VerificationRecord,
   type VerificationStaleReasonCode,
@@ -9,6 +10,7 @@ import {
 } from '../domain.ts';
 import { VerificationRequestRejectedError } from '../errors.ts';
 import { managedLeaseOwner, validateRetainedAgentState } from '../namespace.ts';
+import { boundedEventSummary } from '../worker-events.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   makeVerificationEvent,
@@ -28,7 +30,10 @@ export interface VerificationEvidenceReconcilerShape {
   readonly inspectSource: (
     sourceAgentId: string,
   ) => Effect.Effect<InspectedVerificationSource, VerificationRequestRejectedError>;
-  readonly reconcile: (verification: VerificationRecord) => Effect.Effect<void, unknown>;
+  readonly reconcile: (
+    verification: VerificationRecord,
+    options?: { readonly coalesceIntoEventId?: string },
+  ) => Effect.Effect<void, unknown>;
 }
 
 function rejected(sourceAgentId: string, reason: string): VerificationRequestRejectedError {
@@ -65,6 +70,7 @@ export function makeVerificationEvidenceReconciler(
     verification: VerificationRecord,
     reasonCode: VerificationStaleReasonCode,
     detail?: string,
+    coalesceIntoEventId?: string,
   ) {
     if (currentVerificationAttempt(verification).evidenceStatus === 'stale') return;
     const timestamp = yield* nowIso;
@@ -78,15 +84,53 @@ export function makeVerificationEvidenceReconciler(
         workstreamId: verification.workstreamId,
       },
     );
-    const changed = yield* namespace.store.mutate((state) => {
+    const outcome = yield* namespace.store.mutate<
+      { readonly changed: boolean; readonly coalesced: boolean },
+      never
+    >((state) => {
       const current = state.verifications[verification.id];
       if (!current || currentVerificationAttempt(current).evidenceStatus === 'stale')
-        return Effect.succeed([false, state] as const);
+        return Effect.succeed([{ changed: false, coalesced: false }, state] as const);
+      const currentAttempt = currentVerificationAttempt(current);
+      const parentIndex =
+        coalesceIntoEventId === undefined
+          ? -1
+          : state.inbox.findIndex(
+              (candidate) =>
+                candidate.id === coalesceIntoEventId &&
+                (candidate.type === 'agent_report_completed' ||
+                  candidate.type === 'agent_report_blocked') &&
+                candidate.agentId === verification.sourceAgentId &&
+                (candidate.coalescedVerificationEvidence?.length ?? 0) < 32,
+            );
+      const coalesced = parentIndex >= 0;
+      const inbox = coalesced
+        ? state.inbox.map((candidate, index) => {
+            if (index !== parentIndex) return candidate;
+            const evidence: CoalescedVerificationEvidence = {
+              attempt: currentAttempt.attempt,
+              staleReason: verificationStaleReason(reasonCode, detail),
+              staleReasonCode: reasonCode,
+              verificationId: verification.id,
+            };
+            return {
+              ...candidate,
+              coalescedVerificationEvidence: [
+                ...(candidate.coalescedVerificationEvidence ?? []),
+                evidence,
+              ],
+              summary: boundedEventSummary([
+                `[Pardes-derived context] ${verification.id} attempt ${currentAttempt.attempt} evidence is stale: ${evidence.staleReason}.`,
+                candidate.summary,
+              ]),
+            };
+          })
+        : [...state.inbox, event];
       return Effect.succeed([
-        true,
+        { changed: true, coalesced },
         {
           ...state,
-          inbox: [...state.inbox, event],
+          inbox,
           verifications: {
             ...state.verifications,
             [verification.id]: withStaleCurrentEvidence(current, reasonCode, timestamp, detail),
@@ -94,18 +138,29 @@ export function makeVerificationEvidenceReconciler(
         },
       ] as const);
     });
-    if (!changed) return;
+    if (!outcome.changed) return;
+    // The stale fact remains append-only even when its derivative user attention
+    // is folded into the causative terminal-report row.
     yield* callbacks.appendEventSafely(event);
     yield* callbacks.refresh();
-    yield* callbacks.releaseInboxWake().pipe(Effect.catch(() => Effect.succeed(false)));
+    if (!outcome.coalesced)
+      yield* callbacks.releaseInboxWake().pipe(Effect.catch(() => Effect.succeed(false)));
   });
 
-  const reconcile = Effect.fnUntraced(function* (verification: VerificationRecord) {
+  const reconcile = Effect.fnUntraced(function* (
+    verification: VerificationRecord,
+    options?: { readonly coalesceIntoEventId?: string },
+  ) {
     const attempt = currentVerificationAttempt(verification);
     if (attempt.evidenceStatus === 'stale') return;
     const sourceResult = yield* inspectSource(verification.sourceAgentId).pipe(Effect.exit);
     if (Exit.isFailure(sourceResult)) {
-      yield* markStale(verification, 'source_unverifiable');
+      yield* markStale(
+        verification,
+        'source_unverifiable',
+        undefined,
+        options?.coalesceIntoEventId,
+      );
       return;
     }
     const source = sourceResult.value.inspected;
@@ -114,11 +169,12 @@ export function makeVerificationEvidenceReconciler(
         verification,
         'source_head_changed',
         `from ${attempt.reviewedHeadSha} to ${source.headSha}`,
+        options?.coalesceIntoEventId,
       );
       return;
     }
     if (source.dirty) {
-      yield* markStale(verification, 'source_dirty');
+      yield* markStale(verification, 'source_dirty', undefined, options?.coalesceIntoEventId);
       return;
     }
     const review = yield* worktrees
@@ -128,15 +184,30 @@ export function makeVerificationEvidenceReconciler(
       )
       .pipe(Effect.exit);
     if (Exit.isFailure(review)) {
-      yield* markStale(verification, 'review_checkout_unverifiable');
+      yield* markStale(
+        verification,
+        'review_checkout_unverifiable',
+        undefined,
+        options?.coalesceIntoEventId,
+      );
       return;
     }
     if (review.value.headSha !== attempt.reviewedHeadSha) {
-      yield* markStale(verification, 'review_checkout_head_changed');
+      yield* markStale(
+        verification,
+        'review_checkout_head_changed',
+        undefined,
+        options?.coalesceIntoEventId,
+      );
       return;
     }
     if (review.value.dirty) {
-      yield* markStale(verification, 'review_checkout_dirty');
+      yield* markStale(
+        verification,
+        'review_checkout_dirty',
+        undefined,
+        options?.coalesceIntoEventId,
+      );
     }
   });
 

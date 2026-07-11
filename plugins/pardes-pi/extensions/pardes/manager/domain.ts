@@ -344,6 +344,14 @@ export function currentVerificationTerminalReportStatus(
   return status === 'completed' || status === 'blocked' ? status : undefined;
 }
 
+export const CoalescedVerificationEvidenceSchema = Schema.Struct({
+  attempt: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  staleReason: NonEmptyString.check(Schema.isMaxLength(VERIFICATION_STALE_REASON_MAX_CHARS)),
+  staleReasonCode: VerificationStaleReasonCodeSchema,
+  verificationId: NonEmptyString,
+});
+export type CoalescedVerificationEvidence = typeof CoalescedVerificationEvidenceSchema.Type;
+
 export const PullRequestObservationSchema = Schema.Struct({
   ci: Schema.Literals(['unknown', 'pending', 'passing', 'failing']),
   mergeable: Schema.Literals(['unknown', 'mergeable', 'conflicting']),
@@ -353,9 +361,20 @@ export const PullRequestObservationSchema = Schema.Struct({
 });
 export type PullRequestObservation = typeof PullRequestObservationSchema.Type;
 
+export const PullRequestConflictAttentionSchema = Schema.Struct({
+  auditedHeadSha: Schema.optionalKey(FullCommitShaSchema),
+  generation: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  ownerLifecycleGeneration: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  ),
+  phase: Schema.Literals(['conflicting', 'resolution_candidate', 'resolved']),
+});
+export type PullRequestConflictAttention = typeof PullRequestConflictAttentionSchema.Type;
+
 export const PullRequestRecordSchema = Schema.Struct({
   agentId: NonEmptyString,
   baseBranch: Schema.optionalKey(NonEmptyString),
+  conflictAttention: Schema.optionalKey(PullRequestConflictAttentionSchema),
   createdAt: NonEmptyString,
   discussionCursor: Schema.optionalKey(GitHubDiscussionCursorSchema),
   discussionPaginationGaps: Schema.optionalKey(GitHubDiscussionPaginationGapsSchema),
@@ -380,6 +399,9 @@ export type PullRequestRecord = typeof PullRequestRecordSchema.Type;
 
 export const ManagerEventSchema = Schema.Struct({
   agentId: Schema.optionalKey(NonEmptyString),
+  coalescedVerificationEvidence: Schema.optionalKey(
+    Schema.Array(CoalescedVerificationEvidenceSchema).check(Schema.isMaxLength(32)),
+  ),
   createdAt: NonEmptyString,
   /** Optional lossless non-report prose. Compact rows expose only a bounded structural pointer. */
   details: Schema.optionalKey(

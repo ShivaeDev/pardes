@@ -17,6 +17,7 @@ import type {
   AgentRecord,
   ManagerEvent,
   ManagerState,
+  PullRequestConflictAttention,
   PullRequestObservation,
   PullRequestRecord,
 } from './domain.ts';
@@ -110,6 +111,68 @@ function monotonicPullRequestObservation(
 ): PullRequestObservation {
   const status = monotonicPullRequestStatus(pullRequest.status, observed.status);
   return status === observed.status ? observed : { ...observed, status };
+}
+
+interface ConflictAttentionTransition {
+  readonly attention: boolean;
+  readonly next: PullRequestConflictAttention | undefined;
+}
+
+/** Keep one conflict generation sticky across transient hosted mergeability projections. */
+function conflictAttentionTransition(
+  pullRequest: PullRequestRecord,
+  owner: AgentRecord | undefined,
+  observation: PullRequestObservation,
+  complete: boolean,
+): ConflictAttentionTransition {
+  const previous = pullRequest.conflictAttention;
+  const sameGeneration =
+    previous !== undefined &&
+    previous.auditedHeadSha === pullRequest.lastPushedHeadSha &&
+    previous.ownerLifecycleGeneration === owner?.lifecycleGeneration;
+  if (observation.mergeable === 'conflicting') {
+    const materiallyNew = !sameGeneration || previous?.phase === 'resolved';
+    return {
+      attention: materiallyNew,
+      next: {
+        ...(pullRequest.lastPushedHeadSha === undefined
+          ? {}
+          : { auditedHeadSha: pullRequest.lastPushedHeadSha }),
+        generation: materiallyNew ? (previous?.generation ?? 0) + 1 : (previous?.generation ?? 1),
+        ...(owner?.lifecycleGeneration === undefined
+          ? {}
+          : { ownerLifecycleGeneration: owner.lifecycleGeneration }),
+        phase: 'conflicting',
+      },
+    };
+  }
+  if (!sameGeneration || previous === undefined) return { attention: false, next: previous };
+  if (observation.mergeable === 'unknown')
+    return {
+      attention: false,
+      next:
+        previous.phase === 'resolution_candidate'
+          ? { ...previous, phase: 'conflicting' }
+          : previous,
+    };
+  if (!complete) return { attention: false, next: previous };
+  if (previous.phase === 'conflicting')
+    return { attention: false, next: { ...previous, phase: 'resolution_candidate' } };
+  if (previous.phase === 'resolution_candidate')
+    return { attention: false, next: { ...previous, phase: 'resolved' } };
+  return { attention: false, next: previous };
+}
+
+function conflictAttentionEqual(
+  left: PullRequestConflictAttention | undefined,
+  right: PullRequestConflictAttention | undefined,
+): boolean {
+  return (
+    left?.auditedHeadSha === right?.auditedHeadSha &&
+    left?.generation === right?.generation &&
+    left?.ownerLifecycleGeneration === right?.ownerLifecycleGeneration &&
+    left?.phase === right?.phase
+  );
 }
 
 function watcherEventMatchesAssociation(
@@ -853,6 +916,12 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
     // bounded discussion surfaces finish without clearing an outage warning.
     const complete = event.complete !== false;
     const nextObservation = monotonicPullRequestObservation(known, event.observation);
+    const nextConflictAttention = conflictAttentionTransition(
+      known,
+      namespace.state.agents[known.agentId],
+      nextObservation,
+      complete,
+    );
     const discussionPaginationGaps =
       event.discussion === undefined
         ? (known.discussionPaginationGaps ?? [])
@@ -870,6 +939,7 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
           );
     const changed =
       !pullRequestObservationsEqual(known.observation, nextObservation) ||
+      !conflictAttentionEqual(known.conflictAttention, nextConflictAttention.next) ||
       (discussionCursor !== undefined &&
         !githubDiscussionCursorsEqual(known.discussionCursor, discussionCursor)) ||
       !githubDiscussionPaginationGapsEqual(
@@ -898,10 +968,39 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       if (!pullRequest || !watcherEventMatchesAssociation(pullRequest, event.expectedHeadSha))
         return Effect.succeed([[] as ReadonlyArray<ManagerEvent>, state] as const);
       const nextObservation = monotonicPullRequestObservation(pullRequest, event.observation);
-      const nextTransitions = derivePullRequestTransitions(
+      const conflictTransition = conflictAttentionTransition(
+        pullRequest,
+        state.agents[pullRequest.agentId],
+        nextObservation,
+        complete,
+      );
+      const derivedTransitions = derivePullRequestTransitions(
         pullRequest.observation,
         nextObservation,
-      ).filter(
+      );
+      const conflictPosition = derivedTransitions.indexOf('conflict');
+      const terminalPosition = derivedTransitions.findIndex(
+        (transition) => transition === 'merged' || transition === 'closed_unmerged',
+      );
+      const transitionsWithConflict =
+        conflictPosition >= 0
+          ? derivedTransitions.flatMap((transition) =>
+              transition === 'conflict'
+                ? conflictTransition.attention
+                  ? (['conflict'] as const)
+                  : []
+                : [transition],
+            )
+          : conflictTransition.attention
+            ? [
+                ...(terminalPosition < 0
+                  ? derivedTransitions
+                  : derivedTransitions.slice(0, terminalPosition)),
+                'conflict' as const,
+                ...(terminalPosition < 0 ? [] : derivedTransitions.slice(terminalPosition)),
+              ]
+            : derivedTransitions;
+      const nextTransitions = transitionsWithConflict.filter(
         (transition) =>
           (transition !== 'merged' && transition !== 'closed_unmerged') ||
           pullRequest.status !== nextObservation.status,
@@ -951,6 +1050,9 @@ export const makeReviewGateLifecycleCoordinator = Effect.fnUntraced(function* (
       } = watcherCleared;
       const nextPullRequest: PullRequestRecord = {
         ...withoutDiscussionPaginationGaps,
+        ...(conflictTransition.next === undefined
+          ? {}
+          : { conflictAttention: conflictTransition.next }),
         number: nextObservation.number,
         observation: nextObservation,
         status: nextObservation.status,

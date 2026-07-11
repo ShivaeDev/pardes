@@ -52,17 +52,13 @@ function makeEvent(
 }
 
 interface WorkerEventProjection {
+  readonly cancelledCompletionIntent: boolean;
   readonly changed: boolean;
   readonly enqueued: boolean;
   readonly append: boolean;
 }
 
 interface WorkerEventFollowUp {
-  readonly cancelWorkstreamCompletionIntent?: {
-    readonly agentId: string;
-    readonly lifecycleGeneration: number | undefined;
-    readonly reason: string;
-  };
   readonly consumeWorkstreamCompletionIntent?: {
     readonly agentId: string;
     readonly lifecycleGeneration: number | undefined;
@@ -130,11 +126,6 @@ export interface WorkerSupervisorEventCoordinatorCallbacks {
   readonly retryResolvedVerificationRetirementForIdleVerifier: (
     agentId: string,
   ) => Effect.Effect<boolean, unknown>;
-  readonly cancelWorkstreamCompletionIntent?: (
-    agentId: string,
-    lifecycleGeneration: number | undefined,
-    reason: string,
-  ) => Effect.Effect<void, unknown>;
   readonly consumeWorkstreamCompletionIntent?: (
     agentId: string,
     lifecycleGeneration: number | undefined,
@@ -293,6 +284,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       suppressIdleWakeup,
       ...(verifierIdle === undefined ? {} : { verifierIdleDisposition: verifierIdle }),
     });
+    const invalidatesCompletionIntent =
+      workerEvent.type === 'report' ||
+      (workerEvent.type === 'status' &&
+        (workerEvent.status === 'starting' || workerEvent.status === 'running'));
     const association: ManagerEventAssociation = {
       agentId: workerEvent.agentId,
       workstreamId: persistedAgent.workstreamId,
@@ -319,7 +314,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
     const projection = yield* namespace.store.mutate<WorkerEventProjection, never>((state) => {
       const agent = state.agents[workerEvent.agentId];
       if (!agent)
-        return Effect.succeed([{ append: false, changed: false, enqueued: false }, state] as const);
+        return Effect.succeed([
+          { append: false, cancelledCompletionIntent: false, changed: false, enqueued: false },
+          state,
+        ] as const);
       const transitioned: AgentRecord =
         workerEvent.type === 'status'
           ? {
@@ -399,8 +397,22 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
                 updatedAt: timestamp,
               }),
             );
+      const workstreamCompletionIntents = { ...state.workstreamCompletionIntents };
+      const cancelledCompletionIntent =
+        invalidatesCompletionIntent &&
+        workstreamCompletionIntents[agent.workstreamId]?.pendingAgents.some(
+          (pending) =>
+            pending.agentId === agent.id &&
+            pending.lifecycleGeneration === workerEvent.lifecycleGeneration,
+        ) === true;
+      if (cancelledCompletionIntent) delete workstreamCompletionIntents[agent.workstreamId];
       return Effect.succeed([
-        { append: event !== undefined && !duplicateAttention, changed: true, enqueued: enqueue },
+        {
+          append: event !== undefined && !duplicateAttention,
+          cancelledCompletionIntent,
+          changed: true,
+          enqueued: enqueue,
+        },
         {
           ...state,
           agents: { ...state.agents, [agent.id]: nextAgent },
@@ -409,6 +421,7 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
             nextVerification === undefined
               ? state.verifications
               : { ...state.verifications, [nextVerification.id]: nextVerification },
+          workstreamCompletionIntents,
         },
       ] as const);
     });
@@ -416,6 +429,17 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
     if (event && projection.append)
       yield* callbacks.appendEventSafely(
         attention ?? makeEvent(event.type, event.summary, timestamp, association),
+      );
+    if (projection.cancelledCompletionIntent)
+      yield* callbacks.appendEventSafely(
+        makeEvent(
+          'workstream_completion_intent_cancelled',
+          workerEvent.type === 'report'
+            ? `Cancelled deferred completion for ${persistedAgent.workstreamId}: a later report from ${persistedAgent.id} replaced prior terminal-report authorization.`
+            : `Cancelled deferred completion for ${persistedAgent.workstreamId}: authoritative ${workerEvent.type === 'status' ? workerEvent.status : 'worker'} status for ${persistedAgent.id} advanced beyond the terminal-report-to-idle window.`,
+          timestamp,
+          { agentId: persistedAgent.id, workstreamId: persistedAgent.workstreamId },
+        ),
       );
     yield* callbacks.refresh();
     const safelyRetiredAfterIdle =
@@ -426,28 +450,12 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
           workerEvent.status === 'stopped' ||
           workerEvent.status === 'crashed')) ||
       workerEvent.type === 'unexpected_exit';
-    const invalidatesCompletionIntent =
-      workerEvent.type === 'report' ||
-      (workerEvent.type === 'status' &&
-        (workerEvent.status === 'starting' || workerEvent.status === 'running'));
     return {
       ...(terminalCompletionEdge
         ? {
             consumeWorkstreamCompletionIntent: {
               agentId: persistedAgent.id,
               lifecycleGeneration: workerEvent.lifecycleGeneration,
-            },
-          }
-        : {}),
-      ...(invalidatesCompletionIntent
-        ? {
-            cancelWorkstreamCompletionIntent: {
-              agentId: persistedAgent.id,
-              lifecycleGeneration: workerEvent.lifecycleGeneration,
-              reason:
-                workerEvent.type === 'report'
-                  ? 'a later report replaced prior terminal-report authorization'
-                  : `authoritative ${workerEvent.status} status advanced beyond the terminal-report-to-idle window`,
             },
           }
         : {}),
@@ -485,12 +493,6 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
 
   const runFollowUp = Effect.fnUntraced(function* (followUp: WorkerEventFollowUp | undefined) {
     if (!followUp) return;
-    if (followUp.cancelWorkstreamCompletionIntent && callbacks.cancelWorkstreamCompletionIntent)
-      yield* callbacks.cancelWorkstreamCompletionIntent(
-        followUp.cancelWorkstreamCompletionIntent.agentId,
-        followUp.cancelWorkstreamCompletionIntent.lifecycleGeneration,
-        followUp.cancelWorkstreamCompletionIntent.reason,
-      );
     if (followUp.consumeWorkstreamCompletionIntent && callbacks.consumeWorkstreamCompletionIntent)
       yield* callbacks.consumeWorkstreamCompletionIntent(
         followUp.consumeWorkstreamCompletionIntent.agentId,

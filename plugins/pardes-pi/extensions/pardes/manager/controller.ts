@@ -1027,12 +1027,6 @@ export class ManagerController {
       attachments,
       callbacks: {
         appendEventSafely: (event) => this.appendEventSafely(active.store, event),
-        cancelWorkstreamCompletionIntent: (agentId, lifecycleGeneration, reason) =>
-          this.cancelWorkstreamCompletionIntentForLifecycleEdge(
-            agentId,
-            lifecycleGeneration,
-            reason,
-          ),
         consumeWorkstreamCompletionIntent: (agentId, lifecycleGeneration) =>
           this.consumeWorkstreamCompletionIntent(agentId, lifecycleGeneration),
         isSuppressed: (agentId) => this.ignoredWorkerEvents.has(agentId),
@@ -1319,6 +1313,32 @@ export class ManagerController {
       state = yield* store.load();
       yield* validateManagerStateNamespace(namespace, state);
     }
+    const staleCompletionIntents = Object.values(state.workstreamCompletionIntents).filter(
+      (intent) => !this.completionIntentMatchesState(state, intent),
+    );
+    if (staleCompletionIntents.length > 0) {
+      const cancelledAt = yield* nowIso;
+      yield* store.mutate((current) => {
+        const workstreamCompletionIntents = { ...current.workstreamCompletionIntents };
+        for (const intent of staleCompletionIntents) {
+          if (workstreamCompletionIntents[intent.workstreamId]?.requestedAt === intent.requestedAt)
+            delete workstreamCompletionIntents[intent.workstreamId];
+        }
+        return Effect.succeed([undefined, { ...current, workstreamCompletionIntents }] as const);
+      });
+      for (const intent of staleCompletionIntents)
+        yield* this.appendEventSafely(
+          store,
+          makeEvent(
+            'workstream_completion_intent_cancelled',
+            `Cancelled deferred completion for ${intent.workstreamId} during restoration: durable lifecycle state advanced beyond its terminal-report authorization.`,
+            cancelledAt,
+            { workstreamId: intent.workstreamId },
+          ),
+        );
+      state = yield* store.load();
+      yield* validateManagerStateNamespace(namespace, state);
+    }
     yield* this.activationSafety.materialize(activation.stateDir);
     const detached = Object.values(state.agents).filter((agent) =>
       ATTACHED_STATUSES.has(agent.status),
@@ -1488,13 +1508,30 @@ export class ManagerController {
     state: ManagerState,
     intent: WorkstreamCompletionIntent,
   ): boolean {
+    const unownedBusyChild = Object.values(state.agents).some(
+      (agent) =>
+        agent.workstreamId === intent.workstreamId &&
+        (agent.status === 'starting' || agent.status === 'running') &&
+        !intent.pendingAgents.some(
+          (pending) =>
+            pending.agentId === agent.id &&
+            pending.lifecycleGeneration === agent.lifecycleGeneration,
+        ),
+    );
+    if (unownedBusyChild) return false;
     return intent.pendingAgents.every((pending) => {
       const agent = state.agents[pending.agentId];
+      if (
+        agent?.workstreamId !== intent.workstreamId ||
+        agent.lifecycleGeneration !== pending.lifecycleGeneration ||
+        agent.latestReport?.reportId !== pending.reportId ||
+        (agent.latestReport.status !== 'completed' && agent.latestReport.status !== 'blocked')
+      )
+        return false;
+      if (agent.status !== 'starting' && agent.status !== 'running') return true;
       return (
-        agent?.workstreamId === intent.workstreamId &&
-        agent.lifecycleGeneration === pending.lifecycleGeneration &&
-        agent.latestReport?.reportId === pending.reportId &&
-        (agent.latestReport.status === 'completed' || agent.latestReport.status === 'blocked')
+        agent.terminalReportAwaitingIdle?.lifecycleGeneration === pending.lifecycleGeneration &&
+        agent.terminalReportAwaitingIdle.reportId === pending.reportId
       );
     });
   }
@@ -1818,30 +1855,6 @@ export class ManagerController {
     );
   });
 
-  private readonly cancelWorkstreamCompletionIntentForLifecycleEdge = (
-    agentId: string,
-    lifecycleGeneration: number | undefined,
-    reason: string,
-  ): Effect.Effect<void, unknown> =>
-    Effect.suspend(() => {
-      const active = this.active;
-      if (
-        !active ||
-        lifecycleGeneration === undefined ||
-        !this.completionIntentForAgent(active, agentId, lifecycleGeneration)
-      )
-        return Effect.void;
-      return this.withActiveLifecyclePermit(() =>
-        this.cancelWorkstreamCompletionIntentForAgent(
-          active,
-          agentId,
-          reason,
-          undefined,
-          lifecycleGeneration,
-        ),
-      ).pipe(Effect.asVoid);
-    });
-
   private readonly consumeWorkstreamCompletionIntent = (
     agentId: string,
     lifecycleGeneration: number | undefined,
@@ -2110,16 +2123,16 @@ export class ManagerController {
   ) {
     const input = yield* decodePullRequestCreateInput(rawInput);
     const active = yield* this.requireActive();
-    const published = yield* active.pullRequests.publish(input, ctx);
-    const intent = active.state.workstreamCompletionIntents[published.pullRequest.workstreamId];
+    const state = yield* this.refresh(ctx);
+    const intent = state.workstreamCompletionIntents[input.workstreamId];
     if (intent)
       yield* this.cancelWorkstreamCompletionIntent(
         active,
         intent,
-        `open review gate ${published.pullRequest.id} acquired retained ownership`,
+        'review-gate publication attempt revoked prior terminal-report authorization',
         ctx,
       );
-    return published;
+    return yield* active.pullRequests.publish(input, ctx);
   });
 
   readonly createPullRequest = (rawInput: PullRequestCreateInput, ctx?: ExtensionContext) =>
@@ -2132,16 +2145,17 @@ export class ManagerController {
   ) {
     const input = yield* decodeVerificationRequestInput(rawInput);
     const active = yield* this.requireActive();
-    const verification = yield* active.verifications.request(input, ctx);
-    const intent = active.state.workstreamCompletionIntents[verification.workstreamId];
+    const state = yield* this.refresh(ctx);
+    const source = state.agents[input.sourceAgentId];
+    const intent = source && state.workstreamCompletionIntents[source.workstreamId];
     if (intent)
       yield* this.cancelWorkstreamCompletionIntent(
         active,
         intent,
-        `new advisory verification ${verification.id} acquired workstream activity`,
+        'advisory-verification request revoked prior terminal-report authorization',
         ctx,
       );
-    return verification;
+    return yield* active.verifications.request(input, ctx);
   });
 
   readonly requestVerification = (rawInput: unknown, ctx?: ExtensionContext) =>
@@ -2178,16 +2192,16 @@ export class ManagerController {
     const input = yield* decodeAgentSpawnInput(rawInput);
     const active = yield* this.requireActive();
     const snapshot = yield* this.requirePinnedChildRuntime('agent_spawn');
-    const agent = yield* active.attachments.spawn(input, snapshot.workerExtensionPath, ctx);
-    const intent = active.state.workstreamCompletionIntents[agent.workstreamId];
+    const state = yield* this.refresh(ctx);
+    const intent = state.workstreamCompletionIntents[input.workstreamId];
     if (intent)
       yield* this.cancelWorkstreamCompletionIntent(
         active,
         intent,
-        `new child ${agent.id} acquired workstream activity`,
+        'new-child spawn attempt revoked prior terminal-report authorization',
         ctx,
       );
-    return agent;
+    return yield* active.attachments.spawn(input, snapshot.workerExtensionPath, ctx);
   });
 
   readonly spawnAgent = (rawInput: AgentSpawnInput, ctx?: ExtensionContext) =>
@@ -2250,13 +2264,13 @@ export class ManagerController {
     const active = yield* this.requireActive();
     const state = yield* this.refresh(ctx);
     if (!state.agents[agentId]) return yield* new AgentNotFoundError({ agentId });
-    const delivery = yield* this.workers.send(agentId, message, behavior);
     yield* this.cancelWorkstreamCompletionIntentForAgent(
       active,
       agentId,
-      `accepted ${delivery.deliveredAs} message revoked prior terminal-report authorization`,
+      'message-delivery attempt revoked prior terminal-report authorization',
       ctx,
     );
+    const delivery = yield* this.workers.send(agentId, message, behavior);
     const timestamp = yield* nowIso;
     const routing =
       delivery.requestedBehavior === delivery.deliveredAs
@@ -2319,6 +2333,12 @@ export class ManagerController {
       sourceRole: source.role,
       ...(message === undefined ? {} : { message }),
     });
+    yield* this.cancelWorkstreamCompletionIntentForAgent(
+      active,
+      input.agentId,
+      'report-handoff attempt revoked prior terminal-report authorization',
+      ctx,
+    );
     yield* this.workers
       .send(input.agentId, handoff, 'prompt')
       .pipe(
@@ -2328,12 +2348,6 @@ export class ManagerController {
             : error,
         ),
       );
-    yield* this.cancelWorkstreamCompletionIntentForAgent(
-      active,
-      input.agentId,
-      'accepted report handoff revoked prior terminal-report authorization',
-      ctx,
-    );
     const timestamp = yield* nowIso;
     yield* this.appendEventSafely(
       active.store,

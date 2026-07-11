@@ -27,8 +27,8 @@ export function registerReportTools(pi: ExtensionAPI, manager: ManagerController
   const delivery = registerReportDelivery(pi);
   registerPardesTool(pi, {
     description:
-      'Retrieve one known manager-scoped durable worker or advisory-verifier report by reportId. Automatically selects the canonical full body (details when present, otherwise summary) and delivers every trust-labelled bounded part in order; never choose fields, offsets, page sizes, or continuation calls, and never lists, guesses, or loads other artifacts.',
-    async execute(_toolCallId, params) {
+      'Retrieve one known manager-scoped durable worker or advisory-verifier report by reportId. Automatically selects the canonical full body (details when present, otherwise summary) and delivers every trust-labelled bounded part in separate settlement runs so compaction can occur; never choose fields, offsets, page sizes, or continuation calls, and never lists, guesses, or loads other artifacts.',
+    async execute(toolCallId, params) {
       if (delivery.activeReportId)
         return textResult(
           `Error: Canonical report ${delivery.activeReportId} is still being delivered; wait for its final automatic part before retrieving another report.`,
@@ -36,8 +36,8 @@ export function registerReportTools(pi: ExtensionAPI, manager: ManagerController
       const result = await runTool(manager.getReport(params));
       if (!result.ok) return textResult(`Error: ${result.error}`);
       try {
-        const first = delivery.start(result.value);
-        return textResult(first.text, first.metadata);
+        const scheduled = delivery.start(result.value, toolCallId);
+        return textResult(scheduled.text, scheduled.metadata);
       } catch (error) {
         return textResult(`Error: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -58,7 +58,7 @@ export function registerReportTools(pi: ExtensionAPI, manager: ManagerController
     prepareArguments: prepareLegacyReportGetArguments,
     preview: (args) => [{ name: 'reportId', value: args.reportId }],
     promptGuidelines: [
-      'Call report_get once with only reportId; Pardes selects the canonical full body and delivers every bounded continuation automatically.',
+      'Call report_get once with only reportId; Pardes selects the canonical full body and delivers every bounded continuation automatically in separate settlement runs.',
     ],
     promptSnippet:
       'Retrieve the complete canonical trust-labelled body of one known durable Pardes child report by reportId',

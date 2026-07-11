@@ -108,7 +108,9 @@ branch overrides only intentionally. Worker reports are stored under the owning
 manager's `reports/` directory; concise summaries wake the manager. Retrieve a
 known report with `report_get({ reportId })`: Pardes selects `details` when
 present, otherwise `summary`, and automatically delivers the complete canonical
-body in bounded ordered parts without field or pagination parameters.
+body in bounded ordered settlement runs without field or pagination parameters.
+Separate runs permit compaction, retire prior raw parts from later model requests,
+and cancel rather than interleave when unrelated input interrupts delivery.
 
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`

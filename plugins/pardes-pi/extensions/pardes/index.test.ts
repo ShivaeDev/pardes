@@ -31,13 +31,11 @@ function registeredEvents(factory: (pi: ExtensionAPI) => void): ReadonlyArray<st
 }
 
 describe('Pardes package extension registration', () => {
-  test('installs coordinating-manager compaction from the package root extension', () => {
+  test('installs coordinating-manager compaction plus report-delivery settlement observation', () => {
     const events = registeredEvents(pardesManager);
 
-    expect(events.filter((event) => event === 'session_before_compact')).toEqual([
-      'session_before_compact',
-    ]);
-    expect(events).toContain('session_compact');
+    expect(events.filter((event) => event === 'session_before_compact')).toHaveLength(2);
+    expect(events.filter((event) => event === 'session_compact')).toHaveLength(2);
     expect(events).toContain('input');
   });
 

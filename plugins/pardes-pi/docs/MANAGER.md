@@ -44,7 +44,9 @@ do not poll. Inspect bounded `verification_status({ verificationId })` and call
 `report_get({ reportId })` only when the result or a concrete decision requires
 detail. Call it once with only the report ID: Pardes selects `details` when
 present, otherwise `summary`, and delivers the complete canonical body in
-bounded ordered parts without pagination calls. After fixes, call
+bounded ordered settlement runs without pagination calls. Let that automatic
+sequence finish before unrelated manager work; Pardes permits compaction between
+parts and fails closed on interruption. After fixes, call
 `verification_refresh({ verificationId })` so the same retained verifier checks
 the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering

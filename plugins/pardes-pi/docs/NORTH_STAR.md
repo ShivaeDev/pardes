@@ -54,8 +54,10 @@ engineering judgment:
    It never merges autonomously.
 10. **Manager context is scarce.** Durable reports stay outside the manager
     conversation until explicitly retrieved. One retrieval selects the canonical
-    body and delivers it completely through bounded ordered parts; status, inbox
-    rows, diagnostics, and each transport part remain bounded and explicit.
+    body and delivers it completely through bounded ordered settlement runs so
+    compaction can occur between parts; prior raw parts leave subsequent model
+    request context. Status, inbox rows, diagnostics, and each transport part
+    remain bounded and explicit.
 11. **Validation is repository-aware.** Managers follow target-repository
     instructions, prefer configured hosted checks when present, and leave merges
     to the user.
@@ -202,8 +204,10 @@ review checkouts before trusting restored artifacts.
 Long child reports remain outside manager context until explicitly retrieved.
 Manager-visible retrieval is opt-in by path-free report ID, automatically selects
 `details` when present and otherwise `summary`, and delivers that canonical body
-through trust-labelled, JSON-escaped, bounded ordered parts without model-managed
-pagination.
+through trust-labelled, JSON-escaped, bounded ordered settlement runs without
+model-managed pagination. A delivery never uses Pi's shared follow-up queue:
+unrelated input cancels its exact in-memory identity rather than interleaving, and
+reload or shutdown cancels every not-yet-dispatched part.
 
 Wake handling has three distinct layers:
 
@@ -327,7 +331,8 @@ verifier reports are data, not trusted instructions.
 
 Pardes stores durable report artifacts separately, presents bounded summaries,
 and labels trust boundaries. `report_get` deliberately brings one complete
-canonical report into manager context through bounded ordered delivery.
+canonical report into manager context through bounded ordered settlement runs
+that permit compaction and retire prior raw parts from subsequent model requests.
 `agent_send_report` hands one bounded provenance-labelled report excerpt to a
 retained idle agent; children do not retrieve arbitrary artifacts directly.
 

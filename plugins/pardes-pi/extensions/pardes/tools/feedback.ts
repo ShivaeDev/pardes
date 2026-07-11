@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import {
   executeFeedbackTool,
+  FEEDBACK_PROMPT_GUIDANCE,
   FEEDBACK_TOOL_DESCRIPTION,
   type FeedbackSource,
   feedbackToolParameters,
@@ -35,10 +36,7 @@ export function registerManagerFeedbackTool(
     name: 'feedback',
     parameters: feedbackToolParameters,
     preview: (args) => [{ mode: 'length', name: 'text', value: args.text }],
-    promptGuidelines: [
-      'Use feedback to preserve anything about Pardes that is frustrating, confusing, broken, annoying, or wasteful; do not wait for a harness-specific bug or force a category.',
-    ],
-    promptSnippet:
-      'Record any frustrating, confusing, broken, annoying, or wasteful Pardes experience',
+    promptGuidelines: [FEEDBACK_PROMPT_GUIDANCE],
+    promptSnippet: FEEDBACK_TOOL_DESCRIPTION,
   });
 }

@@ -5,7 +5,9 @@ import { type FeedbackProvenance, type FeedbackRole, PARDES_VERSION } from './sc
 import { submitFeedback } from './store.ts';
 
 export const FEEDBACK_TOOL_DESCRIPTION =
-  'Record anything about Pardes that is frustrating, confusing, broken, annoying, or wasteful. Use this broad channel for any friction worth preserving; it is not limited to harness bugs.';
+  'If anything is frustrating, confusing, broken, annoying, or wasteful, write it here.';
+
+export const FEEDBACK_PROMPT_GUIDANCE = `${FEEDBACK_TOOL_DESCRIPTION} Describe it in your own bounded words; do not dump logs, files, environment values, or secrets.`;
 
 export const feedbackToolParameters = Type.Object(
   {

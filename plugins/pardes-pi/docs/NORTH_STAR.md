@@ -366,8 +366,8 @@ Merges remain user-controlled.
 
 Managers, writing workers, and advisory verifiers have one first-class
 `feedback({ text })` tool. Its intentionally minimal schema has one required
-free-form text field and covers anything frustrating, confusing, broken,
-annoying, or wasteful rather than only harness defects. Each submission is a
+free-form text field. If anything is frustrating, confusing, broken, annoying,
+or wasteful, write it here. Each submission is a
 separate immutable atomic JSON record in global Pardes state. Pardes adds only
 bounded explicit provenance and never automatically captures logs, file
 contents, environment values, or secrets. Registry directories and artifacts

@@ -6,6 +6,7 @@ import { stripVTControlCharacters } from 'node:util';
 import type { ExtensionAPI, Theme, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, test } from 'vitest';
+import { FEEDBACK_PROMPT_GUIDANCE, FEEDBACK_TOOL_DESCRIPTION } from '../feedback/index.ts';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../reporting/index.ts';
 import { requiredValue, runGitFixture } from '../test-support.ts';
 import pardesWorker, {
@@ -260,6 +261,10 @@ describe('verifier child profile', () => {
         'ask_manager',
       ]);
       expect(tools.map((tool) => tool.name)).not.toContain('verification_diff');
+      const feedback = requiredValue(tools.find((tool) => tool.name === 'feedback'));
+      expect(feedback.description).toBe(FEEDBACK_TOOL_DESCRIPTION);
+      expect(feedback.promptGuidelines).toEqual([FEEDBACK_PROMPT_GUIDANCE]);
+      expect(feedback.promptSnippet).toBe(FEEDBACK_TOOL_DESCRIPTION);
       const evidence = requiredValue(tools.find((tool) => tool.name === 'verification_evidence'));
       expect(evidence.renderShell).toBe('self');
       expect(typeof evidence.renderCall).toBe('function');

@@ -14,11 +14,10 @@ action; omit empty categories. Avoid fluff, repeated narration, excessive
 headings, pseudo-diagrams, gratuitous code fences, and vertical whitespace.
 Drill down only for a specific decision.
 
-Use `feedback({ text })` whenever anything about Pardes is frustrating,
-confusing, broken, annoying, or wasteful; the channel is not limited to harness
-bugs. Describe the friction in bounded free-form words. Do not paste logs, file
-contents, environment values, or secrets; Pardes adds only bounded explicit
-provenance automatically.
+Use `feedback({ text })`: if anything is frustrating, confusing, broken,
+annoying, or wasteful, write it here. Describe the friction in bounded free-form
+words. Do not paste logs, file contents, environment values, or secrets; Pardes
+adds only bounded explicit provenance automatically.
 
 Use the smallest projection needed:
 

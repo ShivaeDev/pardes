@@ -9,6 +9,7 @@ import { Type } from 'typebox';
 import {
   childFeedbackSourceFromEnvironment,
   executeFeedbackTool,
+  FEEDBACK_PROMPT_GUIDANCE,
   FEEDBACK_TOOL_DESCRIPTION,
   feedbackToolParameters,
 } from '../feedback/index.ts';
@@ -408,11 +409,8 @@ export default function pardesWorker(pi: ExtensionAPI): void {
     label: 'Record Feedback',
     name: 'feedback',
     parameters: feedbackToolParameters,
-    promptGuidelines: [
-      'Use feedback to preserve anything about Pardes that is frustrating, confusing, broken, annoying, or wasteful; do not wait for a harness-specific bug or force a category.',
-    ],
-    promptSnippet:
-      'Record any frustrating, confusing, broken, annoying, or wasteful Pardes experience',
+    promptGuidelines: [FEEDBACK_PROMPT_GUIDANCE],
+    promptSnippet: FEEDBACK_TOOL_DESCRIPTION,
     renderCall(args, theme, context) {
       return renderChildToolCall(
         theme,

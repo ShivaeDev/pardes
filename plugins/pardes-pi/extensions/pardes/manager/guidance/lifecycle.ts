@@ -1,3 +1,4 @@
+import { FEEDBACK_PROMPT_GUIDANCE } from '../../feedback/index.ts';
 import {
   currentSnapshotLines,
   type ManagerGuidanceProjection,
@@ -31,7 +32,7 @@ Operating model:
 - Publication: use \`pull_request_create\` only for exact committed worker state, keep the owner attached for CI or review feedback, and leave merges under user control.
 - ${PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE}
 - Inbox has exactly two paths: ${INBOX_TWO_PATH_GUIDANCE}
-- Friction: use \`feedback({ text })\` for anything about Pardes that is frustrating, confusing, broken, annoying, or wasteful, not only harness bugs. Describe it in your own bounded words; do not dump logs, files, environment values, or secrets.
+- Friction: use \`feedback({ text })\`. ${FEEDBACK_PROMPT_GUIDANCE}
 - Communication: state facts, decision needed, blockers, and next action. Skip fluff, repeated narration, excess headings, pseudo-diagrams, gratuitous code fences, and vertical whitespace.
 `.trim();
 

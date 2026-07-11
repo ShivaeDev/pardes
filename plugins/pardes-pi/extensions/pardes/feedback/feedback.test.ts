@@ -28,6 +28,7 @@ import {
 import {
   childFeedbackSourceFromEnvironment,
   executeFeedbackTool,
+  FEEDBACK_PROMPT_GUIDANCE,
   FEEDBACK_TOOL_DESCRIPTION,
   feedbackProvenance,
   feedbackToolParameters,
@@ -255,12 +256,16 @@ describe('feedback provenance and model schema', () => {
     };
     expect(Object.keys(parameters.properties)).toEqual(['text']);
     expect(parameters.required).toEqual(['text']);
-    expect(FEEDBACK_TOOL_DESCRIPTION).toContain('frustrating');
-    expect(FEEDBACK_TOOL_DESCRIPTION).toContain('confusing');
-    expect(FEEDBACK_TOOL_DESCRIPTION).toContain('broken');
-    expect(FEEDBACK_TOOL_DESCRIPTION).toContain('annoying');
-    expect(FEEDBACK_TOOL_DESCRIPTION).toContain('wasteful');
-    expect(FEEDBACK_TOOL_DESCRIPTION).toContain('not limited to harness bugs');
+    expect(FEEDBACK_TOOL_DESCRIPTION).toBe(
+      'If anything is frustrating, confusing, broken, annoying, or wasteful, write it here.',
+    );
+    expect(FEEDBACK_PROMPT_GUIDANCE).toBe(
+      `${FEEDBACK_TOOL_DESCRIPTION} Describe it in your own bounded words; do not dump logs, files, environment values, or secrets.`,
+    );
+    for (const qualifier of ['Pardes', 'harness', 'tooling', 'category']) {
+      expect(FEEDBACK_TOOL_DESCRIPTION.toLowerCase()).not.toContain(qualifier.toLowerCase());
+      expect(FEEDBACK_PROMPT_GUIDANCE.toLowerCase()).not.toContain(qualifier.toLowerCase());
+    }
   });
 
   test('attaches only bounded explicit provenance and role-specific child identities', async () => {

@@ -42,6 +42,7 @@ export {
 export {
   childFeedbackSourceFromEnvironment,
   executeFeedbackTool,
+  FEEDBACK_PROMPT_GUIDANCE,
   FEEDBACK_TOOL_DESCRIPTION,
   type FeedbackSource,
   feedbackProvenance,

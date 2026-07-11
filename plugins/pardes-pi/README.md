@@ -161,9 +161,9 @@ for development or tests with `PARDES_PI_STATE_DIR`.
 ## Frustration feedback
 
 The model-facing `feedback({ text })` tool is available to managers, writing
-workers, and advisory verifiers. It is deliberately broad: use it for anything
-about Pardes that is frustrating, confusing, broken, annoying, or wasteful, not
-only harness bugs. The tool accepts only free-form text. Pardes adds bounded
+workers, and advisory verifiers. It is deliberately general: if anything is
+frustrating, confusing, broken, annoying, or wasteful, write it here. The tool
+accepts only free-form text. Pardes adds bounded
 provenance (time, id, role and available session/manager/agent/workstream,
 repository, verifier, and version identities); it never automatically captures
 logs, files, environment values, or secrets.

@@ -16,6 +16,7 @@ import {
   VerificationRequestRejectedError,
 } from '../errors.ts';
 import { validateRetainedAgentState } from '../namespace.ts';
+import { runDurableWorktreeBootstrap } from '../worktree-bootstrap.ts';
 import type { VerificationProvisioningCompensationShape } from './compensation.ts';
 import type {
   VerificationLifecycleCoordinatorOptions,
@@ -66,7 +67,7 @@ export function makeVerificationProvisioner(
   options: VerificationLifecycleCoordinatorOptions,
   operations: VerificationProvisionerOperations,
 ): VerificationProvisionerShape {
-  const { namespace, worktrees, workers, callbacks } = options;
+  const { namespace, worktrees, workers, worktreeBootstrap, callbacks } = options;
   const { compensation, inspectSource, requireVerification } = operations;
 
   const request: VerificationProvisionerShape['request'] = Effect.fnUntraced(
@@ -108,6 +109,11 @@ export function makeVerificationProvisioner(
         thinkingLevel,
         updatedAt: timestamp,
         workstreamId: source.workstreamId,
+        worktreeBootstrap: {
+          script: 'script/update',
+          startedAt: timestamp,
+          status: 'running',
+        },
       };
       const firstAttempt = verificationAttemptFor(
         1,
@@ -158,11 +164,40 @@ export function makeVerificationProvisioner(
       yield* callbacks.appendEventSafely(
         makeVerificationEvent(
           'verification_requested',
-          `Requested advisory ${verificationId} attempt 1 for ${source.id} at immutable head ${inspected.headSha}; launched scratch verifier ${verifierAgentId} in a fresh detached checkout.`,
+          `Requested advisory ${verificationId} attempt 1 for ${source.id} at immutable head ${inspected.headSha}; prepared scratch verifier ${verifierAgentId} in a fresh detached checkout.`,
           timestamp,
           { agentId: verifierAgentId, verificationId, workstreamId: source.workstreamId },
         ),
       );
+      const bootstrapResult = yield* runDurableWorktreeBootstrap({
+        agent: verifierAgent,
+        bootstrap: worktreeBootstrap,
+        callbacks: {
+          appendEventSafely: callbacks.appendEventSafely,
+          event: (type, summary, createdAt) =>
+            makeVerificationEvent(`verification_${type}`, summary, createdAt, {
+              agentId: verifierAgentId,
+              verificationId,
+              workstreamId: source.workstreamId,
+            }),
+        },
+        cwd: reviewCheckout.path,
+        label: `${verificationId} attempt 1 fresh detached verifier checkout`,
+        namespace,
+      }).pipe(Effect.exit);
+      if (Exit.isFailure(bootstrapResult)) {
+        const failedAt = yield* nowIso;
+        yield* compensation.rollbackRequestedVerification(verification, false);
+        yield* callbacks.appendEventSafely(
+          makeVerificationEvent(
+            'verification_spawn_failed',
+            `${verificationId} verifier worktree bootstrap failed; child launch was skipped and safe disposable checkout compensation was attempted.`,
+            failedAt,
+            { agentId: verifierAgentId, verificationId, workstreamId: source.workstreamId },
+          ),
+        );
+        return yield* Effect.failCause(bootstrapResult.cause);
+      }
       const runtimeResult = yield* workers
         .spawn({
           agentId: verifierAgentId,
@@ -414,6 +449,11 @@ export function makeVerificationProvisioner(
                   ...withoutOldAgentEvidence,
                   status: 'starting',
                   updatedAt: refreshedAt,
+                  worktreeBootstrap: {
+                    script: 'script/update',
+                    startedAt: refreshedAt,
+                    status: 'running',
+                  },
                 },
               },
               verifications: { ...state.verifications, [verificationId]: next },
@@ -439,6 +479,40 @@ export function makeVerificationProvisioner(
       );
       yield* callbacks.refresh(ctx);
       const refreshedVerification = yield* requireVerification(verificationId);
+      const refreshedAgent = namespace.state.agents[verifierAgent.id] ?? verifierAgent;
+      const bootstrapResult = yield* runDurableWorktreeBootstrap({
+        agent: refreshedAgent,
+        bootstrap: worktreeBootstrap,
+        callbacks: {
+          appendEventSafely: callbacks.appendEventSafely,
+          event: (type, summary, createdAt) =>
+            makeVerificationEvent(`verification_${type}`, summary, createdAt, {
+              agentId: verifierAgent.id,
+              verificationId,
+              workstreamId: verification.workstreamId,
+            }),
+        },
+        cwd: reviewCheckout.path,
+        label: `${verificationId} attempt ${attempt} refreshed detached verifier checkout`,
+        namespace,
+      }).pipe(Effect.exit);
+      if (Exit.isFailure(bootstrapResult)) {
+        const failedAt = yield* nowIso;
+        yield* compensation.cleanupRefreshProvisioningFailure(
+          refreshedVerification,
+          'refreshed verifier worktree bootstrap failed before child launch',
+          false,
+        );
+        yield* callbacks.appendEventSafely(
+          makeVerificationEvent(
+            'verification_refresh_failed',
+            `${verificationId} attempt ${attempt} worktree bootstrap failed; child relaunch was skipped and safe disposable checkout cleanup was attempted.`,
+            failedAt,
+            { agentId: verifierAgent.id, verificationId, workstreamId: verification.workstreamId },
+          ),
+        );
+        return yield* Effect.failCause(bootstrapResult.cause);
+      }
       const runtimeResult = yield* workers
         .spawn({
           agentId: verifierAgent.id,

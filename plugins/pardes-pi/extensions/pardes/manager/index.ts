@@ -113,6 +113,8 @@ export {
   WorkstreamSchema,
   type WorkstreamStatus,
   WorkstreamStatusSchema,
+  type WorktreeBootstrapRecord,
+  WorktreeBootstrapRecordSchema,
   type WorktreeLease,
   WorktreeLeaseSchema,
 } from './domain.ts';

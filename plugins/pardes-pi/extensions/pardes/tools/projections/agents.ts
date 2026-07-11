@@ -35,6 +35,11 @@ export function agentWarnings(
   const warnings: string[] = [];
   if (agent.lastError) warnings.push('error');
   if (effectiveAgentStatus(agent, runtime) === 'crashed') warnings.push('crashed');
+  if (
+    agent.worktreeBootstrap?.status === 'failed' ||
+    agent.worktreeBootstrap?.status === 'interrupted'
+  )
+    warnings.push('worktree bootstrap failed');
   if (agent.gitAudit?.status === 'failed') warnings.push('git audit failed');
   if (agent.gitAudit?.status === 'succeeded' && agent.gitAudit.dirty)
     warnings.push('dirty worktree');
@@ -95,6 +100,18 @@ function latestReportLines(agent: AgentRecord): ReadonlyArray<string> {
     `latest report: reportId:${structuralValue(report.reportId)} [${report.status}] · previewTruncated:${report.summaryTruncated}`,
     `retrieve: report_get({ reportId: ${JSON.stringify(report.reportId)} })`,
   ];
+}
+
+function worktreeBootstrapLine(agent: AgentRecord): string {
+  const bootstrap = agent.worktreeBootstrap;
+  if (!bootstrap) return 'legacy/not recorded';
+  if (bootstrap.status === 'absent') return 'no-op (script/update absent)';
+  if (bootstrap.status === 'running') return 'running script/update';
+  if (bootstrap.status === 'interrupted')
+    return `interrupted (${completeOrOmittedText(bootstrap.failureSummary, 80)})`;
+  if (bootstrap.status === 'failed')
+    return `failed (${completeOrOmittedText(bootstrap.failureSummary, 80)})`;
+  return `succeeded (output omitted; stdout chars:${bootstrap.output.stdoutChars}; stderr chars:${bootstrap.output.stderrChars})`;
 }
 
 function latestGitAuditLine(agent: AgentRecord): string {
@@ -183,7 +200,7 @@ export function auditAgentStatus(status: AgentStatus): string {
         latestGitAuditLine(agent),
         ...auditProvenanceLines(status),
         `${pathProjection.label}: ${plural(pathProjection.paths.length, 'path')} · complete first-N rows follow · omitted:see suffix row if present; otherwise 0`,
-        `last error: ${agent.lastError ? completeOrOmittedText(agent.lastError, 140) : 'none'} · worktree branch:${agent.worktree ? structuralValue(agent.worktree.branch) : 'none'} · runtime:${runtime ? 'attached' : 'detached'}`,
+        `last error: ${agent.lastError ? completeOrOmittedText(agent.lastError, 140) : 'none'} · worktree bootstrap:${worktreeBootstrapLine(agent)} · worktree branch:${agent.worktree ? structuralValue(agent.worktree.branch) : 'none'} · runtime:${runtime ? 'attached' : 'detached'}`,
       ],
       itemLines: pathProjection.paths.map((path) => `↳ ${structuralValue(path)}`),
       maxItems: AUDIT_PATH_PREVIEW_ITEMS,

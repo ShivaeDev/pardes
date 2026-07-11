@@ -142,12 +142,30 @@ A writing-worker spawn:
    branch override, and resolves it to one exact immutable commit SHA;
 3. acquires the repository worktree lock;
 4. creates a namespaced worktree and branch from that SHA;
-5. records the managed lease;
-6. launches a retained child Pi RPC process in the worktree;
-7. tracks lifecycle state and bounded activity telemetry;
-8. audits actual Git state at handoff and publication;
-9. preserves dirty or unverifiable worktrees;
-10. removes retained artifacts only through explicit conservative cleanup.
+5. records the managed lease and a durable worktree-bootstrap state;
+6. if the fresh checkout has `script/update`, executes it directly from the
+   checkout root (honoring its executable bit and shebang); absence is a no-op;
+7. launches a retained child Pi RPC process only after bootstrap succeeds;
+8. tracks lifecycle state and bounded activity telemetry;
+9. audits actual Git state at handoff and publication;
+10. preserves dirty or unverifiable worktrees;
+11. removes retained artifacts only through explicit conservative cleanup.
+
+Detached verifier checkout creation and refresh use the same pre-launch
+bootstrap convention. The hook inherits the manager process environment; Pardes
+does not inspect or copy repository secret files, though repository-owned hooks
+may deliberately symlink or generate local configuration. Hook output is
+bounded in memory, only body-free counts are durable, and terminal-only tails
+support local diagnosis. Failure or the fixed 15-minute timeout prevents child
+launch and enters the existing conservative writer-retention or
+disposable-verifier compensation path. Retained revive does not rerun
+bootstrap. After restoration, an observed
+in-flight bootstrap is marked interrupted and is never rerun automatically.
+
+This execution is not security isolation. Repository hooks and child Bash run as
+the same OS user as the manager and can access that user's files, credentials,
+processes, and network capabilities. Worktrees, tool profiles, bounded output,
+and cleanup policy are correctness guardrails rather than a sandbox.
 
 Parallel writing workers may overlap source paths because each writes in an
 isolated worktree. Actual changed paths are audited at handoff and publication so

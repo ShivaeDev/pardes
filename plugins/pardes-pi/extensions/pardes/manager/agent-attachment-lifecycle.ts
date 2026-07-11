@@ -15,6 +15,8 @@ import type {
   WorkerRuntimeSnapshot,
   WorkerSupervisorError,
   WorkerThinkingLevel,
+  WorktreeBootstrapShape,
+  WorktreeUpdateError,
 } from '../worker-runtime/index.ts';
 import type {
   AgentGitAuditTrigger,
@@ -45,6 +47,7 @@ import {
   handoffAuditSuffix,
   successfulHandoffAudit,
 } from './worker-events.ts';
+import { runDurableWorktreeBootstrap } from './worktree-bootstrap.ts';
 
 const ATTACHED_STATUSES = new Set(['starting', 'running', 'idle']);
 const nowIso = Clock.currentTimeMillis.pipe(Effect.map((millis) => new Date(millis).toISOString()));
@@ -103,6 +106,7 @@ export type AgentAttachmentLifecycleError =
   | WorktreeServiceError
   | RemoteBaselineError
   | WorkerSupervisorError
+  | WorktreeUpdateError
   | InvalidManagedStateError
   | WorkstreamNotFoundError
   | AgentSpawnConfigurationError
@@ -159,13 +163,14 @@ export interface AgentAttachmentLifecycleCoordinatorOptions {
   readonly namespace: AgentAttachmentLifecycleNamespace;
   readonly worktrees: ManagedWorktreeShape;
   readonly workers: GuardedWorkerSupervisorShape;
+  readonly worktreeBootstrap: WorktreeBootstrapShape;
   readonly callbacks: AgentAttachmentLifecycleCoordinatorCallbacks;
 }
 
 export function makeAgentAttachmentLifecycleCoordinator(
   options: AgentAttachmentLifecycleCoordinatorOptions,
 ): AgentAttachmentLifecycleCoordinatorShape {
-  const { namespace, worktrees, workers, callbacks } = options;
+  const { namespace, worktrees, workers, worktreeBootstrap, callbacks } = options;
 
   const requirePersistedAgent = Effect.fnUntraced(function* (agentId: string) {
     const agent = namespace.state.agents[agentId];
@@ -345,6 +350,11 @@ export function makeAgentAttachmentLifecycleCoordinator(
         updatedAt: timestamp,
         workstreamId: input.workstreamId,
         worktree: lease,
+        worktreeBootstrap: {
+          script: 'script/update',
+          startedAt: timestamp,
+          status: 'running',
+        },
       };
       const provisionalAt = yield* nowIso;
       const provisionalResult = yield* namespace.store
@@ -377,6 +387,38 @@ export function makeAgentAttachmentLifecycleCoordinator(
         return yield* Effect.failCause(provisionalResult.cause);
       }
       yield* callbacks.refresh(ctx);
+      const bootstrapResult = yield* runDurableWorktreeBootstrap({
+        agent,
+        bootstrap: worktreeBootstrap,
+        callbacks: {
+          appendEventSafely: callbacks.appendEventSafely,
+          event: (type, summary, createdAt) =>
+            makeEvent(`agent_${type}`, summary, createdAt, {
+              agentId,
+              workstreamId: workstream.id,
+            }),
+        },
+        cwd: lease.path,
+        label: `${agentId} fresh managed worktree`,
+        namespace,
+      }).pipe(Effect.exit);
+      if (Exit.isFailure(bootstrapResult)) {
+        const failedAt = yield* nowIso;
+        yield* rollbackProvisionalAgent(workstream, agentId);
+        const cleanup = yield* cleanupFailedLease(
+          { agentId, managerId: state.managerId, repo: state.repo },
+          lease,
+        );
+        yield* callbacks.appendEventSafely(
+          makeEvent(
+            'agent_spawn_failed',
+            `${failedLeaseSummary(agentId, lease.path, cleanup)} Repository worktree bootstrap did not complete successfully; child launch was skipped.`,
+            failedAt,
+            { agentId, workstreamId: workstream.id },
+          ),
+        );
+        return yield* Effect.failCause(bootstrapResult.cause);
+      }
       const runtimeResult = yield* workers
         .spawn({
           agentId,

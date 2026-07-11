@@ -36,6 +36,22 @@ Keep `docs/ARCHITECTURE.md` closed unless a task explicitly authorizes a factual
 inventory correction. New conventions require a separate decision. Keep
 `docs/MANAGER.md` coordinating-manager-owned.
 
+Fresh writer and detached-verifier checkouts are prepared before child launch.
+If the target repository has executable `script/update`, Pardes runs it from the
+fresh checkout root; otherwise preparation is a no-op. A failed or timed-out
+hook means no child was launched. Inspect the bounded error and `agent_status`
+bootstrap row rather than rerunning repository code manually. Writer cleanup
+removes only a verified-clean failed lease and retains dirty or unverifiable
+work; verifier compensation may retain retryable scratch ownership. A retained
+revive does not rerun preparation. Restoration marks an unobserved in-flight
+hook interrupted and never reruns it automatically; inspect retained ownership,
+then use conservative cleanup or make a deliberate fresh request/spawn.
+
+This convention is convenience and correctness policy, not a sandbox.
+Repository hooks, worker Bash, and verifier Bash are same-user processes with
+access to the manager user's files, credentials, and network. Never describe
+managed worktrees or verifier tool restrictions as security isolation.
+
 ## Advisory verification
 
 When independent evidence is needed, call

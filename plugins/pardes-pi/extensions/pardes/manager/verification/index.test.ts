@@ -14,6 +14,8 @@ import {
   type GuardedWorkerSupervisorShape,
   WorkerProcessError,
   type WorkerRuntimeSnapshot,
+  type WorktreeBootstrapShape,
+  WorktreeUpdateError,
 } from '../../worker-runtime/index.ts';
 import {
   currentVerificationAttempt,
@@ -57,6 +59,7 @@ interface VerificationFixtureOptions {
   readonly failDiscard?: boolean;
   readonly createDelay?: Duration.Input;
   readonly mutateWriterAfterReviewCreate?: boolean;
+  readonly worktreeBootstrap?: WorktreeBootstrapShape;
 }
 
 async function verificationFixture(options: VerificationFixtureOptions = {}) {
@@ -348,6 +351,9 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
       },
       namespace,
       workers: workers as unknown as GuardedWorkerSupervisorShape,
+      worktreeBootstrap: options.worktreeBootstrap ?? {
+        run: () => Effect.succeed({ status: 'absent' }),
+      },
       worktrees: worktrees as unknown as ManagedWorktreeShape,
     }),
   );
@@ -451,6 +457,9 @@ describe('advisory verification lifecycle', () => {
     );
     const firstPrompt = fixture.runtimes.get(verification.verifierAgentId)?.task ?? '';
 
+    expect(fixture.namespace.state.agents[verification.verifierAgentId]?.worktreeBootstrap).toEqual(
+      expect.objectContaining({ script: 'script/update', status: 'absent' }),
+    );
     expect(firstPrompt).toContain(`Requested review risk surface:\n${requestedRiskSurface}`);
     expect(firstPrompt).toContain(
       'Inspect the whole requested risk surface and relevant diff context before a terminal report',
@@ -474,6 +483,43 @@ describe('advisory verification lifecycle', () => {
     expect(refreshedPrompt).toContain('Prefer one comprehensive pass');
     expect(refreshedPrompt).toContain('Use progress reports only for genuine interim checkpoints');
     expect(refreshedPrompt).toContain('This review is advisory evidence only');
+  });
+
+  test('runs detached verifier checkout bootstrap before launch and compensates cleanly on failure', async () => {
+    let bootstrapCwd: string | undefined;
+    const fixture = await verificationFixture({
+      worktreeBootstrap: {
+        run: (cwd) => {
+          bootstrapCwd = cwd;
+          return Effect.fail(
+            new WorktreeUpdateError({
+              cwd,
+              diagnostic: {
+                stderrChars: 7,
+                stderrTail: 'fixture',
+                stdoutChars: 0,
+                stdoutTail: '',
+              },
+              exitCode: 17,
+              reason: 'nonzero_exit',
+            }),
+          );
+        },
+      },
+    });
+
+    await expect(
+      withoutConsoleError(() =>
+        Effect.runPromise(
+          fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }).pipe(Effect.flip),
+        ),
+      ),
+    ).resolves.toBeInstanceOf(WorktreeUpdateError);
+    expect(bootstrapCwd).toContain('/reviews/verify-');
+    expect(fixture.spawns()).toBe(0);
+    expect(fixture.reviewDiscards()).toBe(1);
+    expect(Object.keys(fixture.namespace.state.verifications)).toEqual([]);
+    expect(existsSync(fixture.sourcePath)).toBe(true);
   });
 
   test('discards detached scratch and removes provisional records when request runtime provisioning fails without touching writer files', async () => {
@@ -538,7 +584,7 @@ describe('advisory verification lifecycle', () => {
   });
 
   test('stops the unattached verifier and discards scratch when request runtime attachment persistence fails', async () => {
-    const fixture = await verificationFixture({ failMutationAt: 2 });
+    const fixture = await verificationFixture({ failMutationAt: 3 });
     await expect(
       Effect.runPromise(
         fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }).pipe(Effect.flip),
@@ -755,8 +801,54 @@ describe('advisory verification lifecycle', () => {
     expect(existsSync(fixture.sourcePath)).toBe(true);
   });
 
+  test('reruns bootstrap for a freshly refreshed verifier checkout and skips relaunch on failure', async () => {
+    const bootstrapCwds: string[] = [];
+    const fixture = await verificationFixture({
+      worktreeBootstrap: {
+        run: (cwd) => {
+          bootstrapCwds.push(cwd);
+          return bootstrapCwds.length === 1
+            ? Effect.succeed({ status: 'absent' as const })
+            : Effect.fail(
+                new WorktreeUpdateError({
+                  cwd,
+                  diagnostic: {
+                    stderrChars: 0,
+                    stderrTail: '',
+                    stdoutChars: 0,
+                    stdoutTail: '',
+                  },
+                  exitCode: 9,
+                  reason: 'nonzero_exit',
+                }),
+              );
+        },
+      },
+    });
+    const verification = await Effect.runPromise(
+      fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),
+    );
+    fixture.setVerifierIdle(verification);
+
+    await expect(
+      withoutConsoleError(() =>
+        Effect.runPromise(fixture.coordinator.refresh(verification.id).pipe(Effect.flip)),
+      ),
+    ).resolves.toBeInstanceOf(WorktreeUpdateError);
+    expect(bootstrapCwds).toHaveLength(2);
+    expect(bootstrapCwds[1]).toBe(requiredValue(bootstrapCwds[0]));
+    expect(fixture.spawns()).toBe(1);
+    expect(fixture.reviewRefreshes()).toBe(1);
+    expect(fixture.reviewDiscards()).toBe(1);
+    expect(
+      currentVerificationAttempt(
+        requiredValue(fixture.namespace.state.verifications[verification.id]),
+      ),
+    ).toMatchObject({ evidenceStatus: 'stale', status: 'crashed' });
+  });
+
   test('rolls back refreshed scratch after refreshed-attempt persistence or runtime provisioning fails', async () => {
-    for (const options of [{ failMutationAt: 4 }, { failSpawnAt: 2 }]) {
+    for (const options of [{ failMutationAt: 5 }, { failSpawnAt: 2 }]) {
       const fixture = await verificationFixture(options);
       const verification = await Effect.runPromise(
         fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }),

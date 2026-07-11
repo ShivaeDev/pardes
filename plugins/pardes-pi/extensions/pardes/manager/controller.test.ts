@@ -1025,6 +1025,836 @@ describe('manager controller', () => {
     await Effect.runPromise(controller.shutdown(fixture.ctx));
   });
 
+  test('defers the durable terminal-report race until the authoritative idle edge and consumes the intent once', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'terminal report idle race',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Durable completion before runtime settlement.',
+        type: 'report',
+      }),
+    );
+
+    const first = await Effect.runPromise(
+      controller.completeWorkstream(workstream.id, fixture.ctx),
+    );
+    const repeated = await Effect.runPromise(
+      controller.completeWorkstream(workstream.id, fixture.ctx),
+    );
+
+    expect(first.status).toBe('active');
+    expect(first.completionIntent).toEqual(repeated.completionIntent);
+    expect(first.completionIntent?.pendingAgents).toEqual([
+      {
+        agentId: agent.id,
+        lifecycleGeneration: 1,
+        reportId: controller.snapshot()?.agents[agent.id]?.latestReport?.reportId,
+      },
+    ]);
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toEqual(
+      first.completionIntent,
+    );
+    expect(workers.stops).toEqual([]);
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completion_deferred',
+      ),
+    ).toHaveLength(1);
+
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('stopped');
+    expect(workers.stops).toEqual([agent.id]);
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completed',
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('does not reuse a terminal report after its authoritative idle edge for later busy work', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'stale terminal report safety',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Completed the prior ask.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'running', type: 'status' }));
+
+    const rejected = await Effect.runPromise(
+      controller.completeWorkstream(workstream.id, fixture.ctx).pipe(Effect.flip),
+    );
+
+    expect(rejected).toMatchObject({ _tag: 'WorkstreamCompletionRejectedError' });
+    expect(controller.snapshot()?.agents[agent.id]?.latestReport?.status).toBe('completed');
+    expect(controller.snapshot()?.agents[agent.id]?.terminalReportAwaitingIdle).toBeUndefined();
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(workers.stops).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('cancels deferred completion when open review ownership appears before idle settlement', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'intent review safety',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal report.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pullRequests: Record<string, unknown>;
+    };
+    const timestamp = new Date().toISOString();
+    state.pullRequests['pr-new-owner'] = {
+      agentId: agent.id,
+      createdAt: timestamp,
+      id: 'pr-new-owner',
+      status: 'open',
+      updatedAt: timestamp,
+      url: 'https://github.test/acme/project/pull/new-owner',
+      workstreamId: workstream.id,
+    };
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('idle');
+    expect(workers.stops).toEqual([]);
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completion_intent_cancelled',
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('cancels deferred completion when the authoritative idle preflight still has queued work', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'intent queued work safety',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal report before a queued follow-up.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+    const pending = {
+      ...requiredValue(workers.runtimes.get(agent.id)),
+      isStreaming: false,
+      pendingMessageCount: 1,
+      status: 'idle' as const,
+    };
+    workers.runtimes.set(agent.id, pending);
+
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('idle');
+    expect(workers.stops).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('accepted same-generation follow-up revokes completion intent before later running and idle edges', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'follow-up revokes completion',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'First ask completed.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    await Effect.runPromise(
+      controller.sendAgent(agent.id, 'Perform one accepted follow-up.', 'prompt', fixture.ctx),
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'running', type: 'status' }));
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('idle');
+    expect(workers.stops).toEqual([]);
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completion_intent_cancelled',
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('durable pre-send revocation survives message rejection and immediate restore', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    let rejectSend = false;
+    let statePath = '';
+    let revokedBeforeSend = false;
+    const makeWorkers = (
+      onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
+    ): GuardedWorkerSupervisorShape => {
+      const supervisor = workers.makeWorkers(onEvent);
+      return {
+        ...supervisor,
+        send: (agentId, message, behavior) => {
+          if (!rejectSend) return supervisor.send(agentId, message, behavior);
+          const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+            workstreamCompletionIntents: Record<string, unknown>;
+          };
+          revokedBeforeSend = Object.keys(persisted.workstreamCompletionIntents).length === 0;
+          return Effect.fail(new AgentNotFoundError({ agentId }));
+        },
+      };
+    };
+    const controller = new ManagerController(fixture.pi, { makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'pre-send revocation',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal before rejected follow-up.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+    rejectSend = true;
+
+    expect(
+      await Effect.runPromise(
+        controller
+          .sendAgent(agent.id, 'Reject after durable revocation.', 'prompt', fixture.ctx)
+          .pipe(Effect.flip),
+      ),
+    ).toMatchObject({ _tag: 'AgentNotFoundError' });
+    expect(revokedBeforeSend).toBe(true);
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(restored.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('durable pre-handoff revocation survives report delivery rejection and restore', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    let rejectSend = false;
+    let statePath = '';
+    let revokedBeforeSend = false;
+    const makeWorkers = (
+      onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
+    ): GuardedWorkerSupervisorShape => {
+      const supervisor = workers.makeWorkers(onEvent);
+      return {
+        ...supervisor,
+        send: (agentId, message, behavior) => {
+          if (!rejectSend) return supervisor.send(agentId, message, behavior);
+          const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+            workstreamCompletionIntents: Record<string, unknown>;
+          };
+          revokedBeforeSend = Object.keys(persisted.workstreamCompletionIntents).length === 0;
+          return Effect.fail(new AgentNotFoundError({ agentId }));
+        },
+      };
+    };
+    const controller = new ManagerController(fixture.pi, { makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'pre-handoff revocation',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Durable source report.',
+        type: 'report',
+      }),
+    );
+    const reportId = requiredValue(controller.snapshot()?.agents[agent.id]?.latestReport).reportId;
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      workstreamCompletionIntents: Record<string, unknown>;
+    };
+    state.workstreamCompletionIntents[workstream.id] = {
+      pendingAgents: [{ agentId: agent.id, lifecycleGeneration: 1, reportId }],
+      requestedAt: new Date().toISOString(),
+      workstreamId: workstream.id,
+    };
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await Effect.runPromise(controller.refresh(fixture.ctx));
+    rejectSend = true;
+
+    expect(
+      await Effect.runPromise(
+        controller.sendReportToAgent({ agentId: agent.id, reportId }).pipe(Effect.flip),
+      ),
+    ).toMatchObject({
+      _tag: 'AgentReportHandoffRejectedError',
+      reason: 'target_not_attached',
+    });
+    expect(revokedBeforeSend).toBe(true);
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(restored.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('intervening authoritative running edge cancels the terminal-report-to-idle authorization', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'running edge revokes completion',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal report before intervening status.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'running', type: 'status' }));
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('idle');
+    expect(workers.stops).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('new same-workstream child ownership revokes a prior completion intent', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    let spawnCount = 0;
+    let statePath = '';
+    let revokedBeforeSecondSpawn = false;
+    const workers = stubWorkers({
+      onSpawn: () => {
+        spawnCount += 1;
+        if (spawnCount !== 2) return;
+        const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+          workstreamCompletionIntents: Record<string, unknown>;
+        };
+        revokedBeforeSecondSpawn = Object.keys(persisted.workstreamCompletionIntents).length === 0;
+      },
+    });
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'new child revokes completion',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Original child completed.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    const newOwner = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Acquire new workstream activity.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+
+    expect(newOwner.status).toBe('running');
+    expect(revokedBeforeSecondSpawn).toBe(true);
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(workers.stops).toEqual([]);
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(restored.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('review-gate publication ownership is preceded by durable revocation', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const github = stubGithub();
+    const controller = new ManagerController(fixture.pi, {
+      github: github.github,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'publication revokes completion',
+    );
+    writeFileSync(join(requiredValue(agent.worktree).path, 'publish.txt'), 'publish safely\n');
+    git(requiredValue(agent.worktree).path, 'add', 'publish.txt');
+    git(requiredValue(agent.worktree).path, 'commit', '-m', 'add publication fixture');
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal before publication.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+    let revokedBeforePublish = false;
+    github.setDuringPublish(() =>
+      Effect.sync(() => {
+        const persisted = JSON.parse(
+          readFileSync(join(activationStateDir(fixture.entries), 'state.json'), 'utf8'),
+        ) as { workstreamCompletionIntents: Record<string, unknown> };
+        revokedBeforePublish = Object.keys(persisted.workstreamCompletionIntents).length === 0;
+      }),
+    );
+
+    const published = await Effect.runPromise(
+      controller.createPullRequest(
+        {
+          agentId: agent.id,
+          baseBranch: 'main',
+          body: 'Publication after durable revocation.',
+          title: 'Revocation publication',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+
+    expect(published.pullRequest.status).toBe('open');
+    expect(revokedBeforePublish).toBe(true);
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('advisory verification ownership is preceded by durable revocation and remains safe on restore', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    let spawnCount = 0;
+    let statePath = '';
+    let revokedBeforeVerifierSpawn = false;
+    const workers = stubWorkers({
+      onSpawn: () => {
+        spawnCount += 1;
+        if (spawnCount !== 2) return;
+        const persisted = JSON.parse(readFileSync(statePath, 'utf8')) as {
+          workstreamCompletionIntents: Record<string, unknown>;
+        };
+        revokedBeforeVerifierSpawn =
+          Object.keys(persisted.workstreamCompletionIntents).length === 0;
+      },
+    });
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'verification revokes completion',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal before verification request.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    const verification = await Effect.runPromise(
+      controller.requestVerification({ sourceAgentId: agent.id }, fixture.ctx),
+    );
+
+    expect(verification.workstreamId).toBe(workstream.id);
+    expect(revokedBeforeVerifierSpawn).toBe(true);
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(restored.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('explicit stop terminal edge consumes a matching completion intent', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'stop consumes completion',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Complete before explicit stop.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    await Effect.runPromise(controller.stopAgent(agent.id, fixture.ctx));
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('stopped');
+    expect(workers.stops).toEqual([agent.id]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('unexpected-exit terminal edge consumes a matching completion intent', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'crash consumes completion',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Complete before unexpected exit.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        exitCode: 1,
+        signal: null,
+        stderr: { omittedChars: 0, originalChars: 0, shownChars: 0, tail: '' },
+        type: 'unexpected_exit',
+      }),
+    );
+
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.agents[agent.id]?.status).toBe('crashed');
+    expect(workers.stops).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('verifier refresh advancement atomically cancels its prior completion intent', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'verifier refresh cancels completion',
+    );
+    const verification = await Effect.runPromise(
+      controller.requestVerification({ sourceAgentId: agent.id }, fixture.ctx),
+    );
+    await Effect.runPromise(workers.emit({ agentId: agent.id, status: 'idle', type: 'status' }));
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verification.verifierAgentId,
+        lifecycleGeneration: 1,
+        status: 'completed',
+        summary: 'Attempt one terminal report.',
+        type: 'report',
+      }),
+    );
+    const reportId = requiredValue(
+      controller.snapshot()?.agents[verification.verifierAgentId]?.latestReport,
+    ).reportId;
+    await Effect.runPromise(
+      workers.emit({
+        agentId: verification.verifierAgentId,
+        lifecycleGeneration: 1,
+        status: 'idle',
+        type: 'status',
+      }),
+    );
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      workstreamCompletionIntents: Record<string, unknown>;
+    };
+    state.workstreamCompletionIntents[workstream.id] = {
+      pendingAgents: [{ agentId: verification.verifierAgentId, lifecycleGeneration: 1, reportId }],
+      requestedAt: new Date().toISOString(),
+      workstreamId: workstream.id,
+    };
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    await Effect.runPromise(controller.refresh(fixture.ctx));
+
+    const refreshed = await Effect.runPromise(
+      controller.refreshVerification({ verificationId: verification.id }, fixture.ctx),
+    );
+
+    expect(currentVerificationAttempt(refreshed).attempt).toBe(2);
+    expect(controller.snapshot()?.agents[verification.verifierAgentId]?.lifecycleGeneration).toBe(
+      2,
+    );
+    expect(controller.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completion_intent_cancelled',
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  });
+
+  test('restore cancels the exact invalidating running-state intermediate instead of consuming stale authorization', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'restart invalidating intermediate',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Terminal authorization that later became stale.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+    const statePath = join(activationStateDir(fixture.entries), 'state.json');
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      agents: Record<string, { terminalReportAwaitingIdle?: unknown }>;
+    };
+    delete requiredValue(state.agents[agent.id]).terminalReportAwaitingIdle;
+    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(restored.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(restored.snapshot()?.agents[agent.id]?.status).toBe('crashed');
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completion_intent_cancelled',
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('restores and consumes a persisted completion intent after the reported child is detached', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, { makeWorkers: workers.makeWorkers });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const { agent, workstream } = await spawnManagedFixture(
+      controller,
+      fixture.ctx,
+      repo,
+      'restart-safe completion intent',
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Persist before manager restart.',
+        type: 'report',
+      }),
+    );
+    await Effect.runPromise(controller.completeWorkstream(workstream.id, fixture.ctx));
+
+    const restoredWorkers = stubWorkers();
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: restoredWorkers.makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+
+    expect(restored.snapshot()?.workstreams[workstream.id]?.status).toBe('complete');
+    expect(restored.snapshot()?.workstreamCompletionIntents[workstream.id]).toBeUndefined();
+    expect(restored.snapshot()?.agents[agent.id]?.status).toBe('crashed');
+    expect(restoredWorkers.stops).toEqual([]);
+    expect(
+      managerEvents(activationStateDir(fixture.entries)).filter(
+        ({ type }) => type === 'workstream_completed',
+      ),
+    ).toHaveLength(1);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
   test('explicit completion accepts already-stopped retained children without touching preserved artifacts again', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));

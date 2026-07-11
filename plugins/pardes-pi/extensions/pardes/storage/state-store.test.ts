@@ -460,13 +460,19 @@ describe('filesystem state store', () => {
       legacyPullRequest,
     );
 
-    const { verifications: _newerVerifications, ...legacyState } = state;
+    const {
+      verifications: _newerVerifications,
+      workstreamCompletionIntents: _newerCompletionIntents,
+      ...legacyState
+    } = state;
     await writeFile(
       store.statePath,
       `${JSON.stringify({ ...legacyState, pullRequests: { [legacyPullRequest.id]: legacyPullRequest } }, null, 2)}\n`,
       'utf8',
     );
-    expect((await Effect.runPromise(store.load())).verifications).toEqual({});
+    const restoredLegacyState = await Effect.runPromise(store.load());
+    expect(restoredLegacyState.verifications).toEqual({});
+    expect(restoredLegacyState.workstreamCompletionIntents).toEqual({});
 
     const additive = {
       ...legacyPullRequest,

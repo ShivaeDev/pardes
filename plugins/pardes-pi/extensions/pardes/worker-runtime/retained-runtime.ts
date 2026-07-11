@@ -42,7 +42,7 @@ export interface WorkerSpawnInput {
   readonly thinkingLevel: WorkerThinkingLevel;
   readonly workerExtensionPath?: string;
   readonly childProfile?: ChildLaunchProfile;
-  /** Ephemeral launch ownership token used to reject delayed prior-generation events. */
+  /** Launch ownership token propagated to runtime events; the manager may durably mirror it. */
   readonly lifecycleGeneration?: number;
 }
 
@@ -77,7 +77,7 @@ export interface WorkerRuntimeSnapshot {
   readonly stats: WorkerSessionStats | undefined;
   readonly sampledAt: number | undefined;
   readonly completedCompactionCount: number;
-  /** Ephemeral launch ownership token; never persisted in manager state. */
+  /** Runtime projection of the launch ownership token. */
   readonly lifecycleGeneration?: number;
   readonly totalActiveMs?: number;
   readonly currentAskElapsedMs?: number;
@@ -97,7 +97,7 @@ export interface WorkerRuntimeSnapshot {
 }
 
 export interface WorkerSupervisorEventOwnership {
-  /** Ephemeral launch ownership token used to reject delayed prior-generation events. */
+  /** Launch ownership token used to reject delayed prior-generation events. */
   readonly lifecycleGeneration?: number;
 }
 

@@ -152,6 +152,11 @@ export function summaryLines(
   ).length;
   const openReviews = pullRequests.filter((pullRequest) => pullRequest.status === 'open').length;
   const attention = pullRequests.filter(pullRequestNeedsAttention).length;
+  const completionIntentCount = Object.keys(state.workstreamCompletionIntents).length;
+  const completionIntentAgents = Object.values(state.workstreamCompletionIntents).reduce(
+    (count, intent) => count + intent.pendingAgents.length,
+    0,
+  );
   const attentionRows = summaryAttentionRows(state, runtimes);
   const refinementPending = state.inbox.some((event) => event.presentationBlocked === true);
   const visibleAttentionRows = attentionRows.slice(0, SUMMARY_ATTENTION_MAX_ROWS);
@@ -163,6 +168,11 @@ export function summaryLines(
         `workstreams: ${workstreamCount('active')} active · ${workstreamCount('planned')} planned · ${workstreamCount('complete')} complete · ${workstreamCount('cancelled')} cancelled`,
         `workers: ${agentCount('running')} running · ${agentCount('idle')} idle · ${agentCount('starting')} starting · ${agentCount('crashed')} crashed · ${warnings} warnings`,
         `review gates: ${openReviews} open · ${attention} attention · advisory verifications: ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'current').length} current · ${Object.values(state.verifications).filter((verification) => currentVerificationAttempt(verification).evidenceStatus === 'stale').length} stale · inbox: ${state.inbox.length} pending`,
+        ...(completionIntentCount === 0
+          ? []
+          : [
+              `completion intents: ${completionIntentCount} pending · ${completionIntentAgents} generation-owned terminal ${completionIntentAgents === 1 ? 'child' : 'children'} awaiting authoritative idle`,
+            ]),
         ...(state.inboxWake || state.inboxHandoff || refinementPending
           ? [inboxDeliveryLine(state)]
           : []),

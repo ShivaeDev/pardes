@@ -35,7 +35,7 @@ export default function pardes(pi: ExtensionAPI): void {
   const presentation = registerManagerPresentation(pi);
   const manager = new ManagerController(pi, { presentation });
   registerQuestionTool(pi);
-  registerWorkstreamTools(pi, manager);
+  const reportDelivery = registerWorkstreamTools(pi, manager);
   registerAgentTools(pi, manager);
 
   pi.registerCommand('pardes', {
@@ -124,7 +124,9 @@ export default function pardes(pi: ExtensionAPI): void {
     return { action: 'continue' };
   });
 
-  registerManagerCompactionStrategy(pi, manager);
+  registerManagerCompactionStrategy(pi, manager, {
+    reportDeliveryLifecycle: reportDelivery,
+  });
 
   pi.on('session_compact', (_event, ctx) => {
     manager.observeCompactionSuccess(ctx);

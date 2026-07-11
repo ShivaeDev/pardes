@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { CanonicalReport, CanonicalReportMetadata } from '../reporting/index.ts';
+import { sanitizeReportDeliveryCompactionPreparation } from './report-delivery-compaction.ts';
 import {
   type CanonicalReportDelivery,
+  type DeliveryMessageDetails,
+  isReportDeliveryCustomMessage,
+  isReportDeliveryMessage,
   partitionCanonicalReport,
   REPORT_DELIVERY_DETAIL_TYPE,
   REPORT_DELIVERY_MESSAGE_TYPE,
   renderCanonicalReportPart,
+  reportDeliveryMessageDetails,
 } from './report-delivery-content.ts';
 
 export const REPORT_DELIVERY_COMPACTION_TIMEOUT_MS = 5 * 60 * 1_000;
@@ -21,14 +26,6 @@ export interface ReportDeliveryStartMetadata extends CanonicalReportMetadata {
 export interface ReportDeliveryStart {
   readonly metadata: ReportDeliveryStartMetadata;
   readonly text: string;
-}
-
-interface DeliveryMessageDetails {
-  readonly deliveryId: string;
-  readonly part: number;
-  readonly parts: number;
-  readonly reportId: string;
-  readonly type: typeof REPORT_DELIVERY_DETAIL_TYPE;
 }
 
 type DeliveryPhase = 'initial_run' | 'waiting_for_settlement' | 'dispatching' | 'part_run';
@@ -56,28 +53,6 @@ function deliveryId(reportId: string, toolCallId: string): string {
     .digest('hex')
     .slice(0, 24);
   return `report-delivery-${digest}`;
-}
-
-function isDeliveryMessage(message: unknown): message is {
-  readonly role: 'custom';
-  readonly customType: typeof REPORT_DELIVERY_MESSAGE_TYPE;
-  readonly details: DeliveryMessageDetails;
-} {
-  if (!message || typeof message !== 'object') return false;
-  const candidate = message as {
-    readonly role?: unknown;
-    readonly customType?: unknown;
-    readonly details?: Partial<DeliveryMessageDetails>;
-  };
-  return (
-    candidate.role === 'custom' &&
-    candidate.customType === REPORT_DELIVERY_MESSAGE_TYPE &&
-    candidate.details?.type === REPORT_DELIVERY_DETAIL_TYPE &&
-    typeof candidate.details.deliveryId === 'string' &&
-    typeof candidate.details.reportId === 'string' &&
-    Number.isInteger(candidate.details.part) &&
-    Number.isInteger(candidate.details.parts)
-  );
 }
 
 function terminalStopReason(messages: ReadonlyArray<unknown>): unknown {
@@ -114,6 +89,10 @@ export class ReportDeliveryCoordinator {
     return this.active?.report.reportId;
   }
 
+  get isActive(): boolean {
+    return this.active !== undefined;
+  }
+
   start(report: CanonicalReport, toolCallId: string): ReportDeliveryStart {
     if (this.active)
       throw new Error(
@@ -147,7 +126,7 @@ export class ReportDeliveryCoordinator {
   observeMessageStart(message: unknown): void {
     const active = this.active;
     if (!active) return;
-    if (isDeliveryMessage(message)) {
+    if (isReportDeliveryMessage(message)) {
       if (!this.matchesExpectedPart(active, message.details)) {
         this.clear();
         return;
@@ -169,7 +148,7 @@ export class ReportDeliveryCoordinator {
     const active = this.active;
     if (
       !active ||
-      !isDeliveryMessage(message) ||
+      !isReportDeliveryMessage(message) ||
       !this.matchesExpectedPart(active, message.details)
     )
       return;
@@ -216,21 +195,25 @@ export class ReportDeliveryCoordinator {
   }
 
   observeCompactionComplete(ctx: ExtensionContext): void {
-    this.compactionInProgress = false;
-    this.cancelCompactionTimeout?.();
-    this.cancelCompactionTimeout = undefined;
-    if (this.active?.phase === 'waiting_for_settlement') this.scheduleDispatch(ctx, 0);
+    this.settleCompaction(ctx);
+  }
+
+  /** Manager-owned compaction was canceled after its custom override failed. */
+  observeCompactionFailure(ctx: ExtensionContext): void {
+    this.settleCompaction(ctx);
   }
 
   contextMessages<A>(messages: ReadonlyArray<A>): A[] {
     const active = this.active;
     return messages.filter((message) => {
-      if (!isDeliveryMessage(message)) return true;
+      if (!isReportDeliveryCustomMessage(message)) return true;
+      const details = reportDeliveryMessageDetails(message);
+      if (!details) return false;
       return (
         active !== undefined &&
-        message.details.deliveryId === active.deliveryId &&
-        message.details.reportId === active.report.reportId &&
-        message.details.part === active.nextPart + 1 &&
+        details.deliveryId === active.deliveryId &&
+        details.reportId === active.report.reportId &&
+        details.part === active.nextPart + 1 &&
         active.phase === 'part_run'
       );
     });
@@ -301,6 +284,13 @@ export class ReportDeliveryCoordinator {
     this.cancelDispatch?.();
     this.cancelDispatch = undefined;
   }
+
+  private settleCompaction(ctx: ExtensionContext): void {
+    this.compactionInProgress = false;
+    this.cancelCompactionTimeout?.();
+    this.cancelCompactionTimeout = undefined;
+    if (this.active?.phase === 'waiting_for_settlement') this.scheduleDispatch(ctx, 0);
+  }
 }
 
 export function registerReportDelivery(pi: ExtensionAPI): ReportDeliveryCoordinator {
@@ -315,7 +305,8 @@ export function registerReportDelivery(pi: ExtensionAPI): ReportDeliveryCoordina
   pi.on('agent_end', (event, ctx) => {
     delivery.observeAgentEnd(event.messages, ctx);
   });
-  pi.on('session_before_compact', () => {
+  pi.on('session_before_compact', (event) => {
+    sanitizeReportDeliveryCompactionPreparation(event.preparation);
     delivery.observeCompactionStart();
   });
   pi.on('session_compact', (_event, ctx) => {

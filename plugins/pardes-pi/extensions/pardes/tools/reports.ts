@@ -9,7 +9,7 @@ import {
   REPORT_ID_PATTERN,
 } from '../reporting/index.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
-import { registerReportDelivery } from './report-delivery.ts';
+import { type ReportDeliveryCoordinator, registerReportDelivery } from './report-delivery.ts';
 
 function prepareLegacyReportGetArguments(args: unknown): { readonly reportId: string } {
   if (!args || typeof args !== 'object' || Array.isArray(args))
@@ -23,7 +23,10 @@ function prepareLegacyReportGetArguments(args: unknown): { readonly reportId: st
   return current as { readonly reportId: string };
 }
 
-export function registerReportTools(pi: ExtensionAPI, manager: ManagerController): void {
+export function registerReportTools(
+  pi: ExtensionAPI,
+  manager: ManagerController,
+): ReportDeliveryCoordinator {
   const delivery = registerReportDelivery(pi);
   registerPardesTool(pi, {
     description:
@@ -129,4 +132,5 @@ export function registerReportTools(pi: ExtensionAPI, manager: ManagerController
     promptSnippet:
       'Hand one bounded untrusted-review-data excerpt from a known durable report to one retained idle Pardes agent',
   });
+  return delivery;
 }

@@ -1,4 +1,10 @@
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import {
+  DEFAULT_COMPACTION_SETTINGS,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type SessionBeforeCompactEvent,
+  type SessionEntry,
+} from '@earendil-works/pi-coding-agent';
 import { describe, expect, test } from 'vitest';
 import { type CanonicalReport, REPORT_DETAILS_MAX_CHARS } from '../reporting/index.ts';
 import { requiredValue } from '../test-support.ts';
@@ -8,11 +14,31 @@ import {
   type ReportDeliveryScheduler,
 } from './report-delivery.ts';
 import {
+  REPORT_DELIVERY_COMPACTION_MAX_PLACEHOLDERS,
+  REPORT_DELIVERY_COMPACTION_PLACEHOLDER_MAX_BYTES,
+  sanitizeReportDeliveryCompactionPreparation,
+} from './report-delivery-compaction.ts';
+import {
   partitionCanonicalReport,
   REPORT_DELIVERY_DETAIL_TYPE,
+  REPORT_DELIVERY_MESSAGE_TYPE,
   REPORT_DELIVERY_PART_MAX_BYTES,
   renderCanonicalReportPart,
 } from './report-delivery-content.ts';
+
+type CompactionPreparation = SessionBeforeCompactEvent['preparation'];
+
+async function prepareWithPinnedPi(entries: SessionEntry[]): Promise<CompactionPreparation> {
+  const packageEntry = import.meta.resolve('@earendil-works/pi-coding-agent');
+  const implementationUrl = new URL('./core/compaction/compaction.js', packageEntry).href;
+  const implementation = (await import(/* @vite-ignore */ implementationUrl)) as {
+    readonly prepareCompaction: (
+      entries: SessionEntry[],
+      settings: typeof DEFAULT_COMPACTION_SETTINGS,
+    ) => CompactionPreparation | undefined;
+  };
+  return requiredValue(implementation.prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS));
+}
 
 function report(content: string, reportId = 'report-one'): CanonicalReport {
   return {
@@ -178,6 +204,122 @@ describe('canonical report delivery', () => {
     expect(delivery.contextMessages(transcript)).toEqual([]);
   });
 
+  test('sanitizes raw persisted report parts in Pi compaction preparation without rewriting durable entries', async () => {
+    const entries: SessionEntry[] = [];
+    let parentId: string | null = null;
+    const rawBody = `RAW_REPORT_BODY_${'x'.repeat(45_000)}`;
+    for (let index = 0; index < 100; index += 1) {
+      const customId = `custom-${index}`;
+      entries.push({
+        content: rawBody,
+        customType: REPORT_DELIVERY_MESSAGE_TYPE,
+        details: {
+          deliveryId: 'delivery-persisted',
+          part: index + 1,
+          parts: 100,
+          reportId: 'report-persisted',
+          type: REPORT_DELIVERY_DETAIL_TYPE,
+        },
+        display: false,
+        id: customId,
+        parentId,
+        timestamp: new Date(index * 2).toISOString(),
+        type: 'custom_message',
+      });
+      const assistantId = `assistant-${index}`;
+      entries.push({
+        id: assistantId,
+        message: {
+          api: 'fixture',
+          content: [{ text: 'manager response '.repeat(80), type: 'text' }],
+          model: 'fixture',
+          provider: 'fixture',
+          role: 'assistant',
+          stopReason: 'stop',
+          timestamp: index * 2 + 1,
+          usage: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
+            input: 300,
+            output: 20,
+            totalTokens: 320,
+          },
+        },
+        parentId: customId,
+        timestamp: new Date(index * 2 + 1).toISOString(),
+        type: 'message',
+      } as SessionEntry);
+      parentId = assistantId;
+    }
+
+    const preparation = await prepareWithPinnedPi(entries);
+    const rawPrepared = preparation.messagesToSummarize.filter(
+      (message) => message.role === 'custom' && message.customType === REPORT_DELIVERY_MESSAGE_TYPE,
+    );
+    expect(rawPrepared.length).toBeGreaterThan(10);
+    expect(Buffer.byteLength(JSON.stringify(rawPrepared), 'utf8')).toBeGreaterThan(500_000);
+    preparation.turnPrefixMessages.push({
+      ...requiredValue(rawPrepared[0]),
+      details: {
+        part: 1,
+        parts: 100,
+        reportId: 'legacy-report',
+        type: REPORT_DELIVERY_DETAIL_TYPE,
+      },
+    } as CompactionPreparation['turnPrefixMessages'][number]);
+
+    sanitizeReportDeliveryCompactionPreparation(preparation);
+
+    const sanitized = [
+      ...preparation.messagesToSummarize,
+      ...preparation.turnPrefixMessages,
+    ].filter(
+      (message) => message.role === 'custom' && message.customType === REPORT_DELIVERY_MESSAGE_TYPE,
+    );
+    expect(sanitized).toHaveLength(2);
+    expect(sanitized.length).toBeLessThanOrEqual(REPORT_DELIVERY_COMPACTION_MAX_PLACEHOLDERS);
+    for (const message of sanitized) {
+      const messageContent = (message as { readonly content: unknown }).content;
+      expect(typeof messageContent).toBe('string');
+      expect(messageContent).not.toContain('RAW_REPORT_BODY_');
+      expect(Buffer.byteLength(messageContent as string, 'utf8')).toBeLessThanOrEqual(
+        REPORT_DELIVERY_COMPACTION_PLACEHOLDER_MAX_BYTES,
+      );
+    }
+    expect(Buffer.byteLength(JSON.stringify(sanitized), 'utf8')).toBeLessThanOrEqual(
+      REPORT_DELIVERY_COMPACTION_MAX_PLACEHOLDERS *
+        REPORT_DELIVERY_COMPACTION_PLACEHOLDER_MAX_BYTES,
+    );
+    const manyDeliveries: CompactionPreparation = {
+      ...preparation,
+      messagesToSummarize: rawPrepared.map((message, index) => ({
+        ...message,
+        details: {
+          deliveryId: `delivery-${index}`,
+          part: 1,
+          parts: 1,
+          reportId: `report-${index}`,
+          type: REPORT_DELIVERY_DETAIL_TYPE,
+        },
+      })) as CompactionPreparation['messagesToSummarize'],
+      turnPrefixMessages: [],
+    };
+    sanitizeReportDeliveryCompactionPreparation(manyDeliveries);
+    const cappedPlaceholders = manyDeliveries.messagesToSummarize.filter(
+      (message) => message.role === 'custom' && message.customType === REPORT_DELIVERY_MESSAGE_TYPE,
+    );
+    expect(cappedPlaceholders).toHaveLength(REPORT_DELIVERY_COMPACTION_MAX_PLACEHOLDERS);
+    expect(Buffer.byteLength(JSON.stringify(cappedPlaceholders), 'utf8')).toBeLessThanOrEqual(
+      REPORT_DELIVERY_COMPACTION_MAX_PLACEHOLDERS *
+        REPORT_DELIVERY_COMPACTION_PLACEHOLDER_MAX_BYTES,
+    );
+
+    const durableParts = entries.filter((entry) => entry.type === 'custom_message');
+    expect(durableParts).toHaveLength(100);
+    expect(durableParts.every((entry) => entry.content === rawBody)).toBe(true);
+  });
+
   test('cancels exact pending identities across abort, clear, and reload without stale dispatch', () => {
     const first = harness();
     first.delivery.start(report('x'.repeat(80_000)), 'tool-call-old');
@@ -204,7 +346,7 @@ describe('canonical report delivery', () => {
     expect(reloaded.tasks.filter((task) => !task.cancelled)).toEqual([]);
   });
 
-  test('fails closed on unrelated interleaving and on unsettled compaction', () => {
+  test('fails closed on unrelated interleaving and resumes known failed compaction', () => {
     const interleaved = harness();
     interleaved.delivery.start(report('x'.repeat(80_000)), 'tool-call-interleaved');
     interleaved.delivery.observeAgentEnd(stoppedRun, interleaved.ctx);
@@ -225,6 +367,15 @@ describe('canonical report delivery', () => {
     compacting.delivery.observeCompactionComplete(compacting.ctx);
     compacting.runNext();
     expect(compacting.sent).toHaveLength(1);
+
+    const failed = harness();
+    failed.delivery.start(report('x'.repeat(80_000)), 'tool-call-failed');
+    failed.delivery.observeAgentEnd(stoppedRun, failed.ctx);
+    failed.delivery.observeCompactionStart();
+    failed.delivery.observeCompactionFailure(failed.ctx);
+    failed.runNext();
+    expect(failed.delivery.activeReportId).toBe('report-one');
+    expect(failed.sent).toHaveLength(1);
 
     const stalled = harness();
     stalled.delivery.start(report('x'.repeat(80_000)), 'tool-call-stalled');

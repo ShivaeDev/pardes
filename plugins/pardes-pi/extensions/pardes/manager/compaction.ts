@@ -145,6 +145,7 @@ export interface ManagerCompactionOverrideInput {
   readonly compactConversation?: CompactPiConversation;
   readonly projectState?: typeof projectManagerCompactionState;
   readonly appendProjection?: typeof appendManagerCompactionProjection;
+  readonly fallbackAction?: 'builtin' | 'cancel_for_report_delivery';
   readonly reportFallback?: (diagnostic: string) => void;
 }
 
@@ -153,12 +154,19 @@ export interface ManagerCompactionRegistrationOwner {
   readonly snapshot: () => ManagerState | undefined;
   readonly runtimeSnapshots: () => ReadonlyMap<string, WorkerRuntimeSnapshot>;
   readonly observeCompactionStart: (signal: AbortSignal, ctx?: ExtensionContext) => boolean;
+  readonly observeCompactionFailure?: (ctx?: ExtensionContext) => boolean;
+}
+
+export interface ManagerCompactionDeliveryLifecycle {
+  readonly isActive: boolean;
+  readonly observeCompactionFailure: (ctx: ExtensionContext) => void;
 }
 
 export interface ManagerCompactionRegistrationOptions {
   readonly compactConversation?: CompactPiConversation;
   readonly projectState?: typeof projectManagerCompactionState;
   readonly appendProjection?: typeof appendManagerCompactionProjection;
+  readonly reportDeliveryLifecycle?: ManagerCompactionDeliveryLifecycle;
   readonly reportFallback?: (diagnostic: string) => void;
 }
 
@@ -505,18 +513,23 @@ export function renderManagerCompactionFallbackDiagnostic(
   stage: ManagerCompactionFallbackStage,
   cause: unknown,
   _model?: ManagerModel,
+  fallbackAction: 'builtin' | 'cancel_for_report_delivery' = 'builtin',
 ): string {
+  const action =
+    fallbackAction === 'cancel_for_report_delivery'
+      ? 'action: canceling failed compaction so active canonical report delivery can resume safely'
+      : 'action: declining custom manager override; Pi built-in default compaction remains owner';
   const diagnostic = [
     '[Pardes manager compaction fallback]',
     `stage: ${canonicalManagerCompactionFallbackStage(stage)}`,
-    'action: declining custom manager override; Pi built-in default compaction remains owner',
+    action,
     `reason: ${sanitizeManagerCompactionDiagnostic(cause)}`,
   ].join('\n');
   if (diagnostic.length <= MANAGER_COMPACTION_FALLBACK_MAX_CHARS) return diagnostic;
   return [
     '[Pardes manager compaction fallback]',
     `stage: ${canonicalManagerCompactionFallbackStage(stage)}`,
-    'action: declining custom manager override; Pi built-in default compaction remains owner',
+    action,
     'reason: [custom_override_cause_omitted] Arbitrary custom manager-compaction failure text omitted. chars(original=unknown, shown=0, omitted=unknown)',
   ].join('\n');
 }
@@ -556,12 +569,17 @@ export function reportManagerCompactionFallback(
 }
 
 function reportFallback(
-  input: Pick<ManagerCompactionOverrideInput, 'ctx' | 'reportFallback'>,
+  input: Pick<ManagerCompactionOverrideInput, 'ctx' | 'fallbackAction' | 'reportFallback'>,
   stage: ManagerCompactionFallbackStage,
   cause: unknown,
   model?: ManagerModel,
 ): void {
-  const diagnostic = renderManagerCompactionFallbackDiagnostic(stage, cause, model);
+  const diagnostic = renderManagerCompactionFallbackDiagnostic(
+    stage,
+    cause,
+    model,
+    input.fallbackAction,
+  );
   if (!input.reportFallback) {
     deliverManagerCompactionFallback(input.ctx, diagnostic, (message) => console.error(message));
     return;
@@ -577,8 +595,9 @@ function reportFallback(
  * Reuse Pi's public compact() implementation with the exact selected manager model.
  * Pi does not expose the active Agent stream wrapper or manager sessionId through
  * ExtensionContext, so this can share model/provider scope but not claim reuse of
- * the manager thread's provider cache key. Returning undefined intentionally
- * delegates to Pi's built-in fallback path.
+ * the manager thread's provider cache key. Returning undefined delegates to Pi's
+ * built-in fallback unless active canonical-report delivery requires explicit
+ * cancellation and lifecycle recovery.
  */
 export async function managerCompactionOverride(
   input: ManagerCompactionOverrideInput,
@@ -656,6 +675,25 @@ export async function managerCompactionOverride(
   }
 }
 
+function cancelFailedCompactionForActiveReportDelivery(
+  manager: ManagerCompactionRegistrationOwner,
+  options: ManagerCompactionRegistrationOptions,
+  ctx: ExtensionContext,
+): { readonly cancel: true } | undefined {
+  if (!options.reportDeliveryLifecycle?.isActive) return undefined;
+  try {
+    manager.observeCompactionFailure?.(ctx);
+  } catch {
+    // Report-delivery cancellation must not depend on manager presentation recovery.
+  }
+  try {
+    options.reportDeliveryLifecycle.observeCompactionFailure(ctx);
+  } catch {
+    // Cancellation still prevents an unobservable built-in fallback from holding delivery.
+  }
+  return { cancel: true };
+}
+
 /** Register the override only in the coordinating-manager package extension. */
 export function registerManagerCompactionStrategy(
   pi: ExtensionAPI,
@@ -666,33 +704,50 @@ export function registerManagerCompactionStrategy(
     let model: ManagerModel | undefined;
     try {
       manager.observeCompactionStart(event.signal, ctx);
-      if (!manager.isActive()) return;
+      if (!manager.isActive())
+        return cancelFailedCompactionForActiveReportDelivery(manager, options, ctx);
       const state = manager.snapshot();
       if (!state) {
         reportFallback(
-          { ctx, reportFallback: options.reportFallback },
+          {
+            ctx,
+            fallbackAction: options.reportDeliveryLifecycle?.isActive
+              ? 'cancel_for_report_delivery'
+              : 'builtin',
+            reportFallback: options.reportFallback,
+          },
           'register_strategy',
           'The active manager snapshot is unavailable.',
         );
-        return;
+        return cancelFailedCompactionForActiveReportDelivery(manager, options, ctx);
       }
       model = ctx.model;
-      return await managerCompactionOverride({
+      const result = await managerCompactionOverride({
         ctx,
         event,
         runtimes: manager.runtimeSnapshots(),
         state,
         thinkingLevel: pi.getThinkingLevel(),
         ...options,
+        fallbackAction: options.reportDeliveryLifecycle?.isActive
+          ? 'cancel_for_report_delivery'
+          : 'builtin',
       });
+      return result ?? cancelFailedCompactionForActiveReportDelivery(manager, options, ctx);
     } catch (error) {
       reportFallback(
-        { ctx, reportFallback: options.reportFallback },
+        {
+          ctx,
+          fallbackAction: options.reportDeliveryLifecycle?.isActive
+            ? 'cancel_for_report_delivery'
+            : 'builtin',
+          reportFallback: options.reportFallback,
+        },
         event.signal.aborted ? 'cancelled' : 'register_strategy',
         error,
         model,
       );
-      return;
+      return cancelFailedCompactionForActiveReportDelivery(manager, options, ctx);
     }
   });
 }

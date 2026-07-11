@@ -56,7 +56,9 @@ engineering judgment:
     conversation until explicitly retrieved. One retrieval selects the canonical
     body and delivers it completely through bounded ordered settlement runs so
     compaction can occur between parts; prior raw parts leave subsequent model
-    request context. Status, inbox rows, diagnostics, and each transport part
+    request context and become bounded identity-only placeholders in compaction
+    input while durable session entries remain unchanged. Status, inbox rows,
+    diagnostics, and each transport part
     remain bounded and explicit.
 11. **Validation is repository-aware.** Managers follow target-repository
     instructions, prefer configured hosted checks when present, and leave merges
@@ -343,10 +345,14 @@ it.
 ## Compaction
 
 Manager compaction reuses Pi compaction with the selected manager model, strips
-prior cumulative Pardes and Pi file-operation suffixes, and appends one bounded
-deterministic coordination projection. If the custom override cannot complete
-safely, it emits a bounded redacted diagnostic and leaves Pi's built-in fallback
-in control.
+prior cumulative Pardes and Pi file-operation suffixes, replaces persisted
+canonical-report bodies in both compaction message arrays with bounded identity
+metadata, and appends one bounded deterministic coordination projection. Durable
+session history is not rewritten. If the custom override cannot complete safely,
+it emits a bounded redacted diagnostic and normally leaves Pi's built-in fallback
+in control. During active canonical-report delivery, it instead cancels that
+unobservable fallback and explicitly resumes delivery; a later settlement run can
+retry compaction without stalling the report sequence.
 
 While manager compaction is unsettled, Pardes holds owned wake injection and
 resumes it through generation-checked bounded recovery. Worker automatic

@@ -33,6 +33,48 @@ export interface ReportDeliveryPart {
   readonly text: string;
 }
 
+export interface DeliveryMessageDetails {
+  readonly deliveryId: string;
+  readonly part: number;
+  readonly parts: number;
+  readonly reportId: string;
+  readonly type: typeof REPORT_DELIVERY_DETAIL_TYPE;
+}
+
+export interface ReportDeliveryCustomMessage {
+  readonly role: 'custom';
+  readonly customType: typeof REPORT_DELIVERY_MESSAGE_TYPE;
+  readonly content: unknown;
+  readonly details?: unknown;
+}
+type ReportDeliveryMessage = ReportDeliveryCustomMessage & {
+  readonly details: DeliveryMessageDetails;
+};
+
+export function isReportDeliveryCustomMessage(
+  message: unknown,
+): message is ReportDeliveryCustomMessage {
+  if (!message || typeof message !== 'object') return false;
+  const candidate = message as { readonly role?: unknown; readonly customType?: unknown };
+  return candidate.role === 'custom' && candidate.customType === REPORT_DELIVERY_MESSAGE_TYPE;
+}
+
+export function reportDeliveryMessageDetails(message: unknown): DeliveryMessageDetails | undefined {
+  if (!isReportDeliveryCustomMessage(message)) return undefined;
+  const details = message.details as Partial<DeliveryMessageDetails> | undefined;
+  return details?.type === REPORT_DELIVERY_DETAIL_TYPE &&
+    typeof details.deliveryId === 'string' &&
+    typeof details.reportId === 'string' &&
+    Number.isInteger(details.part) &&
+    Number.isInteger(details.parts)
+    ? (details as DeliveryMessageDetails)
+    : undefined;
+}
+
+export function isReportDeliveryMessage(message: unknown): message is ReportDeliveryMessage {
+  return reportDeliveryMessageDetails(message) !== undefined;
+}
+
 function jsonBytes(text: string): number {
   return Buffer.byteLength(JSON.stringify(text), 'utf8');
 }

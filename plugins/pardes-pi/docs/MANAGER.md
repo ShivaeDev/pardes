@@ -45,8 +45,11 @@ do not poll. Inspect bounded `verification_status({ verificationId })` and call
 detail. Call it once with only the report ID: Pardes selects `details` when
 present, otherwise `summary`, and delivers the complete canonical body in
 bounded ordered settlement runs without pagination calls. Let that automatic
-sequence finish before unrelated manager work; Pardes permits compaction between
-parts and fails closed on interruption. After fixes, call
+sequence finish before unrelated manager work. Pardes permits compaction between
+parts, replaces prior persisted report bodies with bounded metadata only in the
+compaction request, and resumes delivery if its manager-owned compactor fails;
+durable history remains intact. It fails closed on unrelated interruption. After
+fixes, call
 `verification_refresh({ verificationId })` so the same retained verifier checks
 the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering

@@ -110,7 +110,9 @@ known report with `report_get({ reportId })`: Pardes selects `details` when
 present, otherwise `summary`, and automatically delivers the complete canonical
 body in bounded ordered settlement runs without field or pagination parameters.
 Separate runs permit compaction, retire prior raw parts from later model requests,
-and cancel rather than interleave when unrelated input interrupts delivery.
+and replace persisted report bodies with bounded identity metadata in compaction
+preparation without rewriting durable session history. A failed manager compaction
+is canceled so delivery can resume; unrelated input cancels rather than interleaves.
 
 `pull_request_create` publishes a clean committed worker state as a
 user-controlled review gate. Browser handoff is explicit: `browserMode: 'none'`

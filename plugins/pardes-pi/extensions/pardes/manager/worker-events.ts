@@ -165,7 +165,13 @@ export function successfulHandoffAudit(
 ): HandoffAuditOutcome {
   return {
     changedPaths: inspection.changedPaths,
-    gitAudit: { checkedAt, dirty: inspection.dirty, status: 'succeeded', trigger },
+    gitAudit: {
+      checkedAt,
+      dirty: inspection.dirty,
+      ...(inspection.provenance === undefined ? {} : { provenance: inspection.provenance }),
+      status: 'succeeded',
+      trigger,
+    },
     status: 'succeeded',
   };
 }
@@ -207,11 +213,31 @@ export function applyHandoffAudit(
   return { ...withoutStalePaths, gitAudit: audit.gitAudit, updatedAt: audit.gitAudit.checkedAt };
 }
 
+function counted(value: number, singular: string, plural = `${singular}s`): string {
+  return `${value} ${value === 1 ? singular : plural}`;
+}
+
 export function handoffAuditSuffix(audit: HandoffAuditOutcome | undefined): string {
   if (!audit) return '';
   if (audit.status === 'failed') return `Git audit failed: ${audit.gitAudit.failureSummary}.`;
-  const count = audit.changedPaths.length;
-  return `Git audit: ${count} changed path${count === 1 ? '' : 's'}.${audit.gitAudit.dirty ? ' Worktree is dirty.' : ''}`;
+  const provenance = audit.gitAudit.provenance;
+  const dirtySuffix = audit.gitAudit.dirty ? ' Worktree is dirty.' : '';
+  if (provenance === undefined)
+    return `Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: ${counted(audit.changedPaths.length, 'path')}.${dirtySuffix}`;
+  if (provenance.status === 'unavailable') {
+    if (provenance.reason === 'dirty_worktree')
+      return `Git audit: worker feature change set unavailable (dirty worktree). Dirty paths: ${counted(provenance.dirtyPaths.length, 'path')}. Merge context and total branch-point delta were not attributed.${dirtySuffix}`;
+    return `Git audit: worker feature change set unavailable (${provenance.reason}). Total audited change set: ${counted(audit.changedPaths.length, 'path')}. Merge context was not attributed.${dirtySuffix}`;
+  }
+  const latest = provenance.latestDelta;
+  return [
+    `Git audit — worker feature change set: ${counted(provenance.firstParentNonMergePaths.length, 'path')}/${counted(provenance.firstParentNonMergeCommitCount, 'first-parent non-merge commit')}.`,
+    `Merge context: ${counted(provenance.mergePaths.length, 'first-parent-diff path')}/${counted(provenance.mergeCommitCount, 'merge commit')}; exact conflict-resolution ownership not inferred.`,
+    `Total branch-point delta: ${counted(provenance.totalBranchDeltaPaths.length, 'path')}/${counted(provenance.totalBranchCommitCount, 'commit')} ${provenance.branchPointSha}..${provenance.headSha}.`,
+    latest === undefined
+      ? 'Latest delta: none; branch remains at its immutable baseline.'
+      : `Latest delta: ${latest.kind} ${latest.commitSha}; ${counted(latest.changedPaths.length, 'path')}.`,
+  ].join(' ');
 }
 
 export function reportPersistenceSuffix(

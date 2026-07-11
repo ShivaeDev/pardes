@@ -3,6 +3,7 @@ import {
   DetachedReviewCheckoutLeaseSchema,
   type RepoState,
   RepoStateSchema,
+  WorktreeCommitProvenanceSchema,
   WorktreeLeaseSchema,
 } from '../git/index.ts';
 import {
@@ -60,6 +61,7 @@ export type AgentGitAuditTrigger = typeof AgentGitAuditTriggerSchema.Type;
 const AgentGitAuditSucceededSchema = Schema.Struct({
   checkedAt: NonEmptyString,
   dirty: Schema.Boolean,
+  provenance: Schema.optionalKey(WorktreeCommitProvenanceSchema),
   status: Schema.Literal('succeeded'),
   trigger: AgentGitAuditTriggerSchema,
 });

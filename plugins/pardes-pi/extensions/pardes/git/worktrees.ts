@@ -8,7 +8,14 @@ import {
   WorktreeError,
   WorktreeLockError,
 } from './errors.ts';
-import type { DetachedReviewCheckoutLease, RepoState, WorktreeLease } from './schemas.ts';
+import type {
+  DetachedReviewCheckoutLease,
+  RepoState,
+  WorktreeCommitProvenance,
+  WorktreeCommitProvenanceBounds,
+  WorktreeCommitProvenanceUnavailableReason,
+  WorktreeLease,
+} from './schemas.ts';
 import { type RunGitOptions, runGit } from './transport.ts';
 
 const MANAGED_EXCLUDE = '/.worktrees/pardes/';
@@ -47,49 +54,6 @@ export const WORKTREE_PROVENANCE_MAX_FIRST_PARENT_COMMITS = 200;
 export const WORKTREE_PROVENANCE_MAX_PATHS = 512;
 export const WORKTREE_PROVENANCE_GIT_TIMEOUT_MS = 2_000;
 export const WORKTREE_PROVENANCE_GIT_MAX_BUFFER_BYTES = 256 * 1_024;
-
-export interface WorktreeLatestCommitDelta {
-  readonly changedPaths: ReadonlyArray<string>;
-  readonly commitSha: string;
-  readonly kind: 'first_parent_non_merge' | 'merge_commit';
-}
-
-export interface WorktreeCommitProvenanceBounds {
-  readonly maxFirstParentCommits: number;
-  readonly maxPaths: number;
-}
-
-export type WorktreeCommitProvenanceUnavailableReason =
-  | 'dirty_worktree'
-  | 'worktree_not_registered'
-  | 'branch_mismatch'
-  | 'baseline_not_ancestor'
-  | 'unsupported_graph'
-  | 'bounds_exceeded'
-  | 'inspection_failed';
-
-export type WorktreeCommitProvenance =
-  | {
-      readonly status: 'available';
-      readonly attribution: 'cooperative_first_parent';
-      readonly bounds: WorktreeCommitProvenanceBounds;
-      readonly branchPointSha: string;
-      readonly headSha: string;
-      readonly latestDelta?: WorktreeLatestCommitDelta;
-      readonly mergeCommitCount: number;
-      readonly mergePaths: ReadonlyArray<string>;
-      readonly firstParentNonMergeCommitCount: number;
-      readonly firstParentNonMergePaths: ReadonlyArray<string>;
-      readonly totalBranchCommitCount: number;
-      readonly totalBranchDeltaPaths: ReadonlyArray<string>;
-    }
-  | {
-      readonly status: 'unavailable';
-      readonly bounds: WorktreeCommitProvenanceBounds;
-      readonly dirtyPaths: ReadonlyArray<string>;
-      readonly observedBranch?: string;
-      readonly reason: WorktreeCommitProvenanceUnavailableReason;
-    };
 
 const WORKTREE_PROVENANCE_BOUNDS: WorktreeCommitProvenanceBounds = {
   maxFirstParentCommits: WORKTREE_PROVENANCE_MAX_FIRST_PARENT_COMMITS,
@@ -174,7 +138,7 @@ export interface ManagedWorktreeShape {
     owner: ManagedLeaseOwner,
     lease: WorktreeLease,
   ) => Effect.Effect<WorktreeInspection, WorktreeServiceError>;
-  /** Opt-in richer commit provenance for human/model audit drill-downs, never routine lifecycle checks. */
+  /** Bounded richer commit provenance for completion handoffs and explicit audit drill-downs. */
   readonly inspectWithProvenance?: (
     owner: ManagedLeaseOwner,
     lease: WorktreeLease,

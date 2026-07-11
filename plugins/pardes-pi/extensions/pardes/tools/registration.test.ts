@@ -103,11 +103,11 @@ describe('Pardes interactive tool-call previews', () => {
     } as unknown as ExtensionAPI;
     const manager = {} as ManagerController;
 
-    registerQuestionTool(pi);
+    registerQuestionTool(pi, manager);
     registerWorkstreamTools(pi, manager);
     registerAgentTools(pi, manager);
 
-    expect(tools).toHaveLength(26);
+    expect(tools).toHaveLength(25);
     for (const tool of tools) {
       expect(tool.executionMode, tool.name).toBe('sequential');
       expect(typeof tool.renderCall, tool.name).toBe('function');

@@ -107,12 +107,18 @@ export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: Manager
 
   registerPardesTool(pi, {
     description:
-      'Complete a Pardes workstream and safely stop its idle attached children while preserving worktrees, branch history, sessions, reports, and review gates. Fails closed without interrupting busy children or unresolved open-review owners.',
+      'Complete a Pardes workstream and safely stop its idle attached children while preserving worktrees, branch history, sessions, reports, and review gates. In the narrow terminal-report-to-idle race, stores one bounded generation-owned intent and completes automatically only after authoritative idle or terminal edges; accepted follow-up work revokes it. Fails closed without interrupting genuinely busy/nonterminal children or unresolved open-review owners.',
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.completeWorkstream(params.workstreamId, ctx));
-      return result.ok
-        ? textResult(`Completed workstream ${result.value.id}.`, result.value)
-        : textResult(`Error: ${result.error}`);
+      if (!result.ok) return textResult(`Error: ${result.error}`);
+      const completionIntent =
+        'completionIntent' in result.value ? result.value.completionIntent : undefined;
+      return completionIntent
+        ? textResult(
+            `Deferred workstream ${result.value.id} completion until ${completionIntent.pendingAgents.length} generation-owned terminal child${completionIntent.pendingAgents.length === 1 ? '' : 'ren'} reaches an authoritative idle edge.`,
+            result.value,
+          )
+        : textResult(`Completed workstream ${result.value.id}.`, result.value);
     },
     label: 'Complete Workstream',
     name: 'workstream_complete',

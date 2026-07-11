@@ -8,7 +8,7 @@ This folder owns deterministic model-facing orientation for coordinating manager
 - `projection.ts` derives count-only lifecycle snapshots from durable state and attached runtimes. Its explicit count formatter bounds interpolated dynamic values without touching authored prompt text.
 - `index.ts` appends the dynamic snapshot to the intact authored prompt and queues next-turn lifecycle reminders.
 
-Adjacent model-facing surfaces must reuse or faithfully preserve the lifecycle inbox rule: inbox wake suffixes, inbox status/detail projections, and the descriptions/snippets/guidelines for `inbox_get`, `inbox_acknowledge`, `question`, and `await_user_feedback`.
+Adjacent model-facing surfaces must reuse or faithfully preserve the lifecycle inbox rule: inbox wake suffixes, inbox status/detail projections, and the descriptions/snippets/guidelines for `inbox_get`, `inbox_acknowledge`, and the unified `question` tool.
 
 ## Lifecycle variants
 
@@ -23,7 +23,7 @@ Restoration is a concise reconnect/check pass: durable state returned while prio
 Keep the two inbox paths explicit everywhere:
 
 1. Autonomous rows may be acknowledged once handled.
-2. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first. Surface it, use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.
+2. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first. Surface it with `question`; use structured options or `options: []` for free-form feedback (4,000-character maximum). The tool binds the currently delivered cursor and consumes only it after a valid non-blank answer; blank or oversized input preserves it.
 
 Do not encode semantic classification into software. The manager judges which path applies. Keep exact-cursor controller behavior unchanged: a delivered cursor covers only its inspectable batch and never a later queued suffix.
 

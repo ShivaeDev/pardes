@@ -49,6 +49,35 @@ export const WorkstreamSchema = Schema.Struct({
 });
 export type Workstream = typeof WorkstreamSchema.Type;
 
+export const WORKSTREAM_COMPLETION_INTENT_MAX_AGENTS = 32;
+
+export const WorkstreamCompletionIntentAgentSchema = Schema.Struct({
+  agentId: NonEmptyString,
+  lifecycleGeneration: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  reportId: ReportIdSchema,
+});
+export type WorkstreamCompletionIntentAgent = typeof WorkstreamCompletionIntentAgentSchema.Type;
+
+/**
+ * One bounded, generation-owned request admitted only between durable terminal
+ * report persistence and the worker runtime's authoritative idle edge.
+ */
+export const WorkstreamCompletionIntentSchema = Schema.Struct({
+  pendingAgents: Schema.Array(WorkstreamCompletionIntentAgentSchema).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(WORKSTREAM_COMPLETION_INTENT_MAX_AGENTS),
+  ),
+  requestedAt: NonEmptyString,
+  workstreamId: NonEmptyString,
+});
+export type WorkstreamCompletionIntent = typeof WorkstreamCompletionIntentSchema.Type;
+
+export const TerminalReportAwaitingIdleSchema = Schema.Struct({
+  lifecycleGeneration: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  reportId: ReportIdSchema,
+});
+export type TerminalReportAwaitingIdle = typeof TerminalReportAwaitingIdleSchema.Type;
+
 export const AgentGitAuditTriggerSchema = Schema.Literals([
   'completion',
   'stop',
@@ -93,6 +122,48 @@ export const AgentLeaseCleanupSchema = Schema.Struct({
 });
 export type AgentLeaseCleanup = typeof AgentLeaseCleanupSchema.Type;
 
+const WorktreeUpdateOutputSchema = Schema.Struct({
+  countAccuracy: Schema.optionalKey(Schema.Literals(['exact', 'lower_bound'])),
+  stderrChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  stdoutChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+
+export const WorktreeBootstrapRecordSchema = Schema.Union([
+  Schema.Struct({
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('running'),
+  }),
+  Schema.Struct({
+    checkedAt: NonEmptyString,
+    script: Schema.Literal('script/update'),
+    status: Schema.Literal('absent'),
+  }),
+  Schema.Struct({
+    completedAt: NonEmptyString,
+    output: WorktreeUpdateOutputSchema,
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('succeeded'),
+  }),
+  Schema.Struct({
+    completedAt: NonEmptyString,
+    failureSummary: NonEmptyString.check(Schema.isMaxLength(240)),
+    output: WorktreeUpdateOutputSchema,
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('failed'),
+  }),
+  Schema.Struct({
+    completedAt: NonEmptyString,
+    failureSummary: NonEmptyString.check(Schema.isMaxLength(240)),
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('interrupted'),
+  }),
+]);
+export type WorktreeBootstrapRecord = typeof WorktreeBootstrapRecordSchema.Type;
+
 export const AgentRecordSchema = Schema.Struct({
   changedPaths: Schema.optionalKey(Schema.Array(NonEmptyString)),
   createdAt: NonEmptyString,
@@ -101,6 +172,10 @@ export const AgentRecordSchema = Schema.Struct({
   lastError: Schema.optionalKey(NonEmptyString),
   latestReport: Schema.optionalKey(AgentReportReferenceSchema),
   leaseCleanup: Schema.optionalKey(AgentLeaseCleanupSchema),
+  /** Persisted launch ownership; optional only for snapshots written before generation ownership. */
+  lifecycleGeneration: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  ),
   model: NonEmptyString,
   /** Stable manager-owned remote branch reservation; the manager-scoped worktree branch remains local. */
   publishedReviewBranch: Schema.optionalKey(ManagedPublishedReviewBranchSchema),
@@ -113,11 +188,14 @@ export const AgentRecordSchema = Schema.Struct({
   sessionFile: Schema.optionalKey(NonEmptyString),
   status: Schema.Literals(['starting', 'running', 'idle', 'stopped', 'crashed']),
   task: NonEmptyString,
+  /** Narrow durable handoff marker cleared by the next authoritative lifecycle status edge. */
+  terminalReportAwaitingIdle: Schema.optionalKey(TerminalReportAwaitingIdleSchema),
   thinkingLevel: Schema.Literals(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']),
   title: Schema.optionalKey(WorkerTitleSchema),
   updatedAt: NonEmptyString,
   workstreamId: NonEmptyString,
   worktree: Schema.optionalKey(WorktreeLeaseSchema),
+  worktreeBootstrap: Schema.optionalKey(WorktreeBootstrapRecordSchema),
 });
 export type AgentRecord = typeof AgentRecordSchema.Type;
 
@@ -351,7 +429,7 @@ export const InboxWakeSchema = Schema.Struct({
 });
 export type InboxWake = typeof InboxWakeSchema.Type;
 
-/** Durable marker that the delivered cursor was explicitly surfaced for user feedback. */
+/** Durable marker that the delivered cursor was explicitly bound to a user question. */
 export const InboxHandoffSchema = Schema.Struct({
   cursor: NonEmptyString,
   surfacedAt: NonEmptyString,
@@ -375,6 +453,9 @@ export const ManagerStateSchema = Schema.Struct({
   verifications: Schema.Record(Schema.String, VerificationRecordSchema).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed({})),
   ),
+  workstreamCompletionIntents: Schema.Record(Schema.String, WorkstreamCompletionIntentSchema).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed({})),
+  ),
   workstreams: Schema.Record(Schema.String, WorkstreamSchema),
 });
 export type ManagerState = typeof ManagerStateSchema.Type;
@@ -396,6 +477,7 @@ export function initialManagerState(managerId: string, repo: RepoState): Manager
     revision: 0,
     schemaVersion: 1,
     verifications: {},
+    workstreamCompletionIntents: {},
     workstreams: {},
   };
 }

@@ -6,6 +6,7 @@ import type {
   GuardedWorkerSupervisorShape,
   WorkerRuntimeSnapshot,
   WorkerThinkingLevel,
+  WorktreeBootstrapShape,
 } from '../../worker-runtime/index.ts';
 import type { ManagerEvent, ManagerState } from '../domain.ts';
 import type { ManagerNamespaceContext } from '../namespace.ts';
@@ -39,5 +40,6 @@ export interface VerificationLifecycleCoordinatorOptions {
   readonly namespace: VerificationLifecycleNamespace;
   readonly worktrees: ManagedWorktreeShape;
   readonly workers: GuardedWorkerSupervisorShape;
+  readonly worktreeBootstrap: WorktreeBootstrapShape;
   readonly callbacks: VerificationLifecycleCallbacks;
 }

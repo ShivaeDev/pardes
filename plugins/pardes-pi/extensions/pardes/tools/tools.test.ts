@@ -187,7 +187,7 @@ describe('Pardes model-visible tools', () => {
   test('preserves the model-visible registration order used by the extension', () => {
     const { pi, tools } = registry();
     const manager = {} as ManagerController;
-    registerQuestionTool(pi);
+    registerQuestionTool(pi, manager);
     registerWorkstreamTools(pi, manager);
     registerAgentTools(pi, manager);
 
@@ -202,7 +202,6 @@ describe('Pardes model-visible tools', () => {
       'agent_send_report',
       'inbox_get',
       'inbox_acknowledge',
-      'await_user_feedback',
       'pull_request_create',
       'pull_request_ci_inspect',
       'pull_request_ci_log_excerpt_get',
@@ -287,11 +286,6 @@ describe('Pardes model-visible tools', () => {
       minimum: 1,
     });
     assertLexicalId('inbox_acknowledge', 'cursor');
-    expect(tools.get('await_user_feedback')?.parameters.properties.prompt).toMatchObject({
-      maxLength: 256,
-      minLength: 1,
-    });
-
     const publish = requiredValue(tools.get('pull_request_create'));
     assertLexicalId('pull_request_create', 'workstreamId');
     assertLexicalId('pull_request_create', 'agentId');
@@ -387,7 +381,7 @@ describe('Pardes model-visible tools', () => {
 
   test('teaches the same explicit two-path cursor rule across inbox and user-judgment tool descriptions', () => {
     const { pi, tools } = registry();
-    registerQuestionTool(pi);
+    registerQuestionTool(pi, {} as ManagerController);
     registerWorkstreamTools(pi, {} as ManagerController);
 
     const canonicalGuidelines = [
@@ -400,7 +394,7 @@ describe('Pardes model-visible tools', () => {
     expect(status.promptSnippet).toBe(
       'Inspect concise bounded Pardes manager status and judge inbox attention before acknowledgement',
     );
-    for (const name of ['inbox_get', 'inbox_acknowledge', 'await_user_feedback', 'question']) {
+    for (const name of ['inbox_get', 'inbox_acknowledge', 'question']) {
       const tool = requiredValue(tools.get(name));
       expect(tool.description, name).toContain(INBOX_TWO_PATH_GUIDANCE);
       expect(tool.promptGuidelines, name).toEqual(expect.arrayContaining(canonicalGuidelines));
@@ -411,20 +405,14 @@ describe('Pardes model-visible tools', () => {
     expect(requiredValue(tools.get('inbox_acknowledge')).promptSnippet).toBe(
       'Acknowledge autonomous handled Pardes inbox rows through one exact cursor; never pre-acknowledge user judgment',
     );
-    expect(requiredValue(tools.get('await_user_feedback')).promptSnippet).toBe(
-      'Surface the active delivered Pardes attention cursor for free-form user feedback without acknowledging it first',
-    );
     expect(requiredValue(tools.get('question')).promptSnippet).toBe(
-      'Ask a structured user-judgment question while leaving any active Pardes attention cursor open until response',
+      'Ask one structured or free-form user question and safely resolve any cursor delivered when it opens',
     );
     expect(requiredValue(tools.get('inbox_acknowledge')).description).toContain(
       'Use only for the autonomous path after rows are handled',
     );
-    expect(requiredValue(tools.get('await_user_feedback')).description).toContain(
-      'Do not acknowledge the active cursor first',
-    );
     expect(requiredValue(tools.get('question')).description).toContain(
-      'this tool does not consume that cursor',
+      'consumes only it after a valid non-blank answer',
     );
   });
 
@@ -574,6 +562,15 @@ describe('Pardes model-visible tools', () => {
       agents: { [agentZ.id]: agentZ, [agentA.id]: agentA },
       inbox,
       pullRequests: { [reviewZ.id]: reviewZ, [reviewA.id]: reviewA },
+      workstreamCompletionIntents: {
+        [active.id]: {
+          pendingAgents: [
+            { agentId: agentA.id, lifecycleGeneration: 1, reportId: 'report-terminal' },
+          ],
+          requestedAt: createdAt,
+          workstreamId: active.id,
+        },
+      },
       workstreams: { [active.id]: active },
     };
     const manager = {
@@ -593,21 +590,22 @@ describe('Pardes model-visible tools', () => {
     const text = result.content[0]?.text;
     const lines = text.split('\n');
 
-    expect(lines.slice(0, 5)).toEqual([
+    expect(lines.slice(0, 6)).toEqual([
       'pardes manager-12345678 · revision 0',
       'workstreams: 1 active · 0 planned · 0 complete · 0 cancelled',
       'workers: 2 running · 0 idle · 0 starting · 0 crashed · 2 warnings',
       'review gates: 2 open · 2 attention · advisory verifications: 0 current · 0 stale · inbox: 2 pending',
+      'completion intents: 1 pending · 1 generation-owned terminal child awaiting authoritative idle',
       'attention index: 6 signals · first 5 shown · drill down: inbox | reviews(attention) | agents(warnings)',
     ]);
-    expect(lines.slice(5, 10)).toEqual([
+    expect(lines.slice(6, 11)).toEqual([
       '! inbox event-z [discussion_feedback] · judge first: inbox_get({ eventId })',
       '! inbox redacted-event [agent_question] · judge first: inbox_get({ eventId })',
       '! review #41 [open] · ws-active · agent-a · ⚠ ci:failing',
       '! review #42 [open] · ws-active · agent-z · ⚠ merge:conflicting',
       '! worker agent-a [running] · ws-active · ⚠ dirty worktree',
     ]);
-    expect(lines[10]).toBe('… +1 more attention signal omitted (1 worker)');
+    expect(lines[11]).toBe('… +1 more attention signal omitted (1 worker)');
     expect(lines.filter((line) => line.startsWith('! '))).toHaveLength(5);
     expect(text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
     expect(text).not.toContain('/tmp');
@@ -2185,6 +2183,12 @@ describe('Pardes model-visible tools', () => {
         Effect.succeed({
           action: 'created' as const,
           browserHandoff: { requestedMode: 'none' as const, status: 'not_requested' as const },
+          localTracking: {
+            localBranch: 'local/pardes/review-gate',
+            remote: 'origin' as const,
+            remoteBranch: 'remote/pardes/review-gate',
+            status: 'configured' as const,
+          },
           openedInBrowser: false,
           pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
         }),
@@ -2193,7 +2197,7 @@ describe('Pardes model-visible tools', () => {
 
     const publish = requiredValue(tools.get('pull_request_create'));
     expect(publish.description).toBe(
-      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its exact SHA to a managed remote review branch, verify the hosted head, configure the retained local branch to track that remote branch, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
     );
     expect(publish.promptSnippet).toBe(
       'Publish a committed Pardes worker branch as a pull-request review gate',
@@ -2237,7 +2241,7 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(result.content[0]?.text).toBe(
-      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: none.',
+      'Created PR #42: https://github.test/acme/project/pull/42. Local tracking: local/pardes/review-gate -> origin/remote/pardes/review-gate. Browser handoff: none.',
     );
   });
 
@@ -2415,6 +2419,12 @@ describe('Pardes model-visible tools', () => {
             requestedMode: 'background' as const,
             status: 'failed' as const,
           },
+          localTracking: {
+            reason: 'local_tracking_failed' as const,
+            remote: 'origin' as const,
+            remoteBranch: 'remote/pardes/review-gate',
+            status: 'failed' as const,
+          },
           openedInBrowser: false,
           pullRequest: { number: 42, url: 'https://github.test/acme/project/pull/42' },
         }),
@@ -2437,7 +2447,7 @@ describe('Pardes model-visible tools', () => {
     );
 
     expect(result.content[0]?.text).toBe(
-      'Created PR #42: https://github.test/acme/project/pull/42. Browser handoff: background failed safely.',
+      'Created PR #42: https://github.test/acme/project/pull/42. Local tracking: origin/remote/pardes/review-gate failed safely; remote publication remains verified. Browser handoff: background failed safely.',
     );
     expect(result.details).toMatchObject({
       browserHandoff: {
@@ -2824,7 +2834,7 @@ describe('Pardes model-visible tools', () => {
       'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
     expect(external.content[0]?.text).toContain(
-      'judgment handoff: Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+      'judgment handoff: Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.',
     );
     expect(external.details).toEqual({
       agentId: 'agent-1',
@@ -3062,7 +3072,7 @@ describe('Pardes model-visible tools', () => {
       'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
     expect(hostile.content[0]?.text).toContain(
-      'judgment handoff: Use `question` for structured options or `await_user_feedback` for free-form feedback, and leave the cursor open until response.',
+      'judgment handoff: Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.',
     );
     expect(hostile.details).toMatchObject({
       eventId: 'event-hostile',
@@ -3125,248 +3135,6 @@ describe('Pardes model-visible tools', () => {
     expect(maximumRequestedOffset).toBeGreaterThan(MANAGER_EVENT_DETAILS_MAX_CHARS);
   });
 
-  test('submits valid feedback but disarms cancelled, blank, and oversized handoffs without consuming unseen rows', async () => {
-    const submittedTokens: string[] = [];
-    const disarmedTokens: string[] = [];
-    let begins = 0;
-    const manager = {
-      beginInboxHandoff: () =>
-        Effect.sync(() => {
-          begins += 1;
-          return {
-            cursor: 'event-presented',
-            surfacedAt: '2026-06-01T00:00:00.000Z',
-            token: `handoff-${begins}`,
-            wakeToken: 'wake-presented',
-          };
-        }),
-      disarmInboxHandoff: (started: { readonly token: string }) =>
-        Effect.sync(() => {
-          disarmedTokens.push(started.token);
-          return true;
-        }),
-      submitInboxHandoff: (started: { readonly cursor: string; readonly token: string }) =>
-        Effect.sync(() => {
-          submittedTokens.push(started.token);
-          return {
-            acknowledgedCount: 1,
-            cursor: started.cursor,
-            pendingCount: 2,
-            reason: 'feedback_tool_submitted' as const,
-            staleCursor: false,
-          };
-        }),
-    } as unknown as ManagerController;
-    const { pi, tools } = registry();
-    registerWorkstreamTools(pi, manager);
-    const handoff = requiredValue(tools.get('await_user_feedback'));
-    const theme = { bold: (text: string) => text, fg: (_color: string, text: string) => text };
-    const interactiveContext = (keys: string[]) =>
-      ({
-        hasUI: true,
-        ui: {
-          custom: async (
-            factory: (
-              tui: { requestRender: () => void },
-              theme: unknown,
-              keybindings: unknown,
-              done: (value: unknown) => void,
-            ) => { handleInput?: (data: string) => void },
-          ) =>
-            await new Promise((resolve) => {
-              const component = factory({ requestRender: () => {} }, theme, {}, resolve);
-              for (const key of keys) component.handleInput?.(key);
-            }),
-        },
-      }) as unknown as ExtensionContext;
-
-    const submitted = await handoff.execute(
-      'call-submit',
-      { prompt: 'How should this proceed?' },
-      signal,
-      onUpdate,
-      interactiveContext(['Proceed', '\r']),
-    );
-    expect(submitted.content[0]?.text).toBe('User feedback: Proceed');
-    expect(submitted.details).toMatchObject({
-      acknowledgedCount: 1,
-      cursor: 'event-presented',
-      pendingCount: 2,
-      reason: 'feedback_tool_submitted',
-      submitted: true,
-    });
-    expect(submittedTokens).toEqual(['handoff-1']);
-
-    const cancelled = await handoff.execute(
-      'call-cancel',
-      { prompt: 'Still proceed?' },
-      signal,
-      onUpdate,
-      interactiveContext(['\x1b']),
-    );
-    expect(cancelled.content[0]?.text).toContain('cursor remains pending');
-    expect(cancelled.details).toEqual({
-      cursor: 'event-presented',
-      cursorPreserved: true,
-      handoffDisarmed: true,
-      submitted: false,
-    });
-
-    const blank = await handoff.execute(
-      'call-blank',
-      { prompt: 'Still proceed?' },
-      signal,
-      onUpdate,
-      interactiveContext(['  ', '\r']),
-    );
-    expect(blank.content[0]?.text).toContain('submitted no feedback');
-    expect(blank.details).toEqual({
-      cursor: 'event-presented',
-      cursorPreserved: true,
-      handoffDisarmed: true,
-      submitted: false,
-    });
-
-    const oversized = await handoff.execute(
-      'call-oversized',
-      { prompt: 'Still proceed?' },
-      signal,
-      onUpdate,
-      interactiveContext(['x'.repeat(4_001), '\r']),
-    );
-    expect(oversized.content[0]?.text).toContain('exceeded the 4000-character handoff bound');
-    expect(oversized.details).toEqual({
-      cursor: 'event-presented',
-      cursorPreserved: true,
-      handoffDisarmed: true,
-      submitted: false,
-    });
-
-    expect(submittedTokens).toEqual(['handoff-1']);
-    expect(disarmedTokens).toEqual(['handoff-2', 'handoff-3', 'handoff-4']);
-    expect(begins).toBe(4);
-  });
-
-  test('disarms rejected, thrown-input, and aborted dialogs before unrelated normal input can consume their surfaced cursor', async () => {
-    interface Handoff {
-      readonly cursor: string;
-      readonly wakeToken: string;
-      readonly surfacedAt: string;
-      readonly token: string;
-    }
-
-    let marker: Handoff | undefined;
-    let begins = 0;
-    let unrelatedAcknowledgements = 0;
-    const disarmedTokens: string[] = [];
-    const manager = {
-      acknowledgeInboxAfterHandoff: () =>
-        Effect.sync(() => {
-          if (!marker) return undefined;
-          unrelatedAcknowledgements += 1;
-          marker = undefined;
-          return { acknowledgedCount: 1 };
-        }),
-      beginInboxHandoff: () =>
-        Effect.sync(() => {
-          begins += 1;
-          marker = {
-            cursor: 'event-presented',
-            surfacedAt: '2026-06-01T00:00:00.000Z',
-            token: `handoff-${begins}`,
-            wakeToken: 'wake-presented',
-          };
-          return marker;
-        }),
-      disarmInboxHandoff: (started: Handoff) =>
-        Effect.sync(() => {
-          if (marker?.token !== started.token) return false;
-          disarmedTokens.push(started.token);
-          marker = undefined;
-          return true;
-        }),
-    } as unknown as ManagerController;
-    const { pi, tools } = registry();
-    registerWorkstreamTools(pi, manager);
-    const handoff = requiredValue(tools.get('await_user_feedback'));
-    const theme = { bold: (text: string) => text, fg: (_color: string, text: string) => text };
-    const context = (ui: Record<string, unknown>) =>
-      ({ hasUI: true, ui }) as unknown as ExtensionContext;
-    const expectUnrelatedInputPreserved = async () => {
-      expect(await Effect.runPromise(manager.acknowledgeInboxAfterHandoff())).toBeUndefined();
-      expect(marker).toBeUndefined();
-      expect(unrelatedAcknowledgements).toBe(0);
-    };
-
-    const alreadyAborted = new AbortController();
-    alreadyAborted.abort();
-    const alreadyAbortedResult = await handoff.execute(
-      'call-already-aborted',
-      { prompt: 'Do not surface this dialog' },
-      alreadyAborted.signal,
-      onUpdate,
-      context({}),
-    );
-    expect(alreadyAbortedResult.details).toEqual({ aborted: true, submitted: false });
-    expect(begins).toBe(0);
-
-    await expect(
-      handoff.execute(
-        'call-rejected',
-        { prompt: 'Reject this dialog' },
-        signal,
-        onUpdate,
-        context({
-          custom: async () => {
-            throw new Error('dialog rejected');
-          },
-        }),
-      ),
-    ).rejects.toThrow('dialog rejected');
-    await expectUnrelatedInputPreserved();
-
-    await expect(
-      handoff.execute(
-        'call-input-threw',
-        { prompt: 'Throw from fallback input' },
-        signal,
-        onUpdate,
-        context({
-          custom: async () => undefined,
-          input: async () => {
-            throw new Error('input threw');
-          },
-        }),
-      ),
-    ).rejects.toThrow('input threw');
-    await expectUnrelatedInputPreserved();
-
-    const aborted = new AbortController();
-    const abortedResult = await handoff.execute(
-      'call-aborted',
-      { prompt: 'Abort this dialog' },
-      aborted.signal,
-      onUpdate,
-      context({
-        custom: async (
-          factory: (
-            tui: { requestRender: () => void },
-            theme: unknown,
-            keybindings: unknown,
-            done: (value: unknown) => void,
-          ) => unknown,
-        ) =>
-          await new Promise((resolve) => {
-            factory({ requestRender: () => {} }, theme, {}, resolve);
-            queueMicrotask(() => aborted.abort());
-          }),
-      }),
-    );
-    expect(abortedResult.content[0]?.text).toContain('cursor remains pending');
-    await expectUnrelatedInputPreserved();
-    expect(disarmedTokens).toEqual(['handoff-1', 'handoff-2', 'handoff-3']);
-  });
-
   test('registers bounded lifecycle workflows for completion and inbox acknowledgement', async () => {
     const { pi, tools } = registry();
     const manager = {
@@ -3378,7 +3146,25 @@ describe('Pardes model-visible tools', () => {
           queuedSuffixCount: 1,
         }),
       completeWorkstream: (workstreamId: string) =>
-        Effect.succeed({ id: workstreamId, status: 'complete' }),
+        Effect.succeed(
+          workstreamId === 'ws-deferred'
+            ? {
+                completionIntent: {
+                  pendingAgents: [
+                    {
+                      agentId: 'agent-one',
+                      lifecycleGeneration: 1,
+                      reportId: 'report-one',
+                    },
+                  ],
+                  requestedAt: '2026-01-01T00:00:00.000Z',
+                  workstreamId,
+                },
+                id: workstreamId,
+                status: 'active',
+              }
+            : { id: workstreamId, status: 'complete' },
+        ),
     } as unknown as ManagerController;
     registerWorkstreamTools(pi, manager);
 
@@ -3390,6 +3176,17 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     expect(completed.content[0]?.text).toBe('Completed workstream ws-1.');
+
+    const deferred = await requiredValue(tools.get('workstream_complete')).execute(
+      'call-deferred',
+      { workstreamId: 'ws-deferred' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(deferred.content[0]?.text).toBe(
+      'Deferred workstream ws-deferred completion until 1 generation-owned terminal child reaches an authoritative idle edge.',
+    );
 
     const acknowledged = await requiredValue(tools.get('inbox_acknowledge')).execute(
       'call-2',

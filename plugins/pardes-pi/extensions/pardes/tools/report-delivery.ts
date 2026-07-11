@@ -140,6 +140,8 @@ export class ReportDeliveryCoordinator {
       () => {
         if (this.ownedWakeInterlude?.identity !== identity) return;
         if (this.active) this.cancelActive('owned_wake_timeout', ctx);
+        else if (this.acquisitionPermit && this.ownedWakeInterlude.started)
+          this.cancelStartedWakeAcquisition(ctx);
         else this.clearOwnedWakeInterlude(ctx);
       },
     );
@@ -151,7 +153,7 @@ export class ReportDeliveryCoordinator {
       !this.acceptingDeliveries ||
       this.active ||
       this.acquisitionPermit ||
-      this.ownedWakeInterlude
+      (this.ownedWakeInterlude && !this.ownedWakeInterlude.started)
     )
       return undefined;
     const permit = { epoch: this.deliveryEpoch };
@@ -232,8 +234,7 @@ export class ReportDeliveryCoordinator {
       interlude.started = true;
       return;
     }
-    if (!active) return;
-    if (isReportDeliveryMessage(message)) {
+    if (active && isReportDeliveryMessage(message)) {
       if (!this.matchesExpectedPart(active, message.details)) {
         this.cancelActive('delivery_marker_mismatch', ctx);
         return;
@@ -247,8 +248,10 @@ export class ReportDeliveryCoordinator {
       typeof message === 'object' &&
       ((message as { role?: unknown }).role === 'user' ||
         (message as { role?: unknown }).role === 'custom')
-    )
-      this.cancelActive('unrelated_input', ctx);
+    ) {
+      if (active) this.cancelActive('unrelated_input', ctx);
+      else if (interlude?.started) this.cancelStartedWakeAcquisition(ctx);
+    }
   }
 
   observeMessageEnd(message: unknown): void {
@@ -384,6 +387,12 @@ export class ReportDeliveryCoordinator {
   private completeActive(ctx: ExtensionContext): void {
     if (!this.resetActive()) return;
     this.releaseOwnedWake?.(ctx);
+  }
+
+  private cancelStartedWakeAcquisition(ctx?: ExtensionContext): void {
+    this.deliveryEpoch += 1;
+    this.acquisitionPermit = undefined;
+    this.clearOwnedWakeInterlude(ctx);
   }
 
   private clearOwnedWakeInterlude(ctx?: ExtensionContext): void {

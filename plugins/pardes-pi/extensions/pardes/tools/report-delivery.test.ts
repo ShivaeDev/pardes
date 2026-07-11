@@ -694,11 +694,38 @@ describe('canonical report delivery', () => {
     expect(leased.delivery.registerOwnedWake(committedWake, leased.ctx)).toBe(true);
     expect(leased.delivery.acquirePermit()).toBeUndefined();
     leased.delivery.observeMessageStart(committedWake, leased.ctx);
-    leased.delivery.observeMessageEnd(committedWake);
-    leased.delivery.observeAgentEnd(stoppedRun, leased.ctx);
+    const inWakePermit = requiredValue(leased.delivery.acquirePermit());
+    leased.delivery.start(
+      report('x'.repeat(80_000), 'report-in-wake'),
+      'tool-in-wake',
+      inWakePermit,
+    );
+    expect(leased.delivery.acquirePermit()).toBeUndefined();
+    expect(leased.sent).toEqual([]);
 
-    const afterWake = requiredValue(leased.delivery.acquirePermit());
-    expect(leased.delivery.releasePermit(afterWake)).toBe(true);
+    leased.delivery.observeMessageEnd(committedWake);
+    expect(leased.sent).toEqual([]);
+    leased.delivery.observeAgentEnd(stoppedRun, leased.ctx);
+    expect(leased.sent).toEqual([]);
+    leased.runNext();
+    expect(leased.sent[0]?.message).toMatchObject({
+      details: { part: 1, reportId: 'report-in-wake' },
+    });
+
+    const duplicated = harness();
+    const duplicatedWake = ownedWakeMessage('event-duplicate-before-start');
+    expect(duplicated.delivery.registerOwnedWake(duplicatedWake, duplicated.ctx)).toBe(true);
+    duplicated.delivery.observeMessageStart(duplicatedWake, duplicated.ctx);
+    const invalidatedPermit = requiredValue(duplicated.delivery.acquirePermit());
+    duplicated.delivery.observeMessageStart(duplicatedWake, duplicated.ctx);
+    expect(() =>
+      duplicated.delivery.start(
+        report('duplicate body', 'report-duplicate-before-start'),
+        'tool-duplicate-before-start',
+        invalidatedPermit,
+      ),
+    ).toThrow('canceled by a manager lifecycle change');
+    expect(duplicated.delivery.isHoldingOwnedWakes).toBe(false);
 
     const timedOut = harness();
     expect(

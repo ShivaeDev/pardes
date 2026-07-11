@@ -84,13 +84,14 @@ durable history remains intact. Pardes defers its own durable inbox wakes until
 the sequence settles, then releases exactly the still-pending cursor from durable
 state. A transient acquisition lease starts before report artifact I/O; failure
 or cancellation releases it for retry, while success converts it atomically into
-active delivery.
-Wake release rechecks that lease after cursor persistence and rolls back an
-unsent reservation if delivery won the race. A wake that wins the serialized
-final boundary registers its one-time exact rendered identity synchronously with
-send; that single run settles as an interlude and the same report phase resumes.
-It fails closed on unrelated interruption and
-emits a bounded cancellation record with the one-call report_get resume path
+active delivery. Wake release rechecks that lease after cursor persistence and
+rolls back an unsent reservation if delivery won the race. A wake that wins the
+serialized final boundary registers its one-time exact rendered identity
+synchronously with send. It blocks acquisition only while queued; after its
+exact `message_start`, the manager may retrieve one report in that wake turn.
+Successful delivery attaches to the interlude, and part one waits for exact
+`message_end` plus wake `agent_end`. It fails closed on unrelated interruption
+and emits a bounded cancellation record with the one-call report_get resume path
 instead of silently stalling.
 `/pardes stop` synchronously cancels every active report identity and invalidates
 pre-read lifecycle permits before manager deactivation. Restart advances the

@@ -252,14 +252,16 @@ model-managed pagination. A delivery never uses Pi's shared follow-up queue for
 report parts. Pardes holds its own durable inbox wake injection until that
 delivery completes or cancels. The hold starts with a transient acquisition
 lease before report artifact I/O and converts atomically into active delivery;
-read failure or cancellation releases it for durable retry. Wake release rechecks after cursor
-persistence and rolls back an unsent reservation when the lease wins. If wake
-injection wins, exact identity registration and send share one synchronous final
-boundary; only that one message lifecycle is a bounded interlude, and its agent
-settlement deterministically resumes the same report phase. Unregistered,
-malformed, mismatched, or replayed custom messages
-remain foreign. Unrelated user or custom input still cancels the exact in-memory
-identity rather than interleaving and emits one bounded resumable cancellation
+read failure or cancellation releases it for durable retry. Wake release
+rechecks after cursor persistence and rolls back an unsent reservation when the
+lease wins. If wake injection wins, exact identity registration and send share
+one synchronous final boundary. The queued wake blocks acquisition only until
+its exact `message_start`; one retrieval may then lease the wake turn, attach
+successful delivery to that interlude, and wait for `message_end` plus
+`agent_end` before dispatching part one. Unregistered, malformed, mismatched, or
+replayed custom messages remain foreign. Unrelated user or custom input still
+cancels the exact in-memory identity rather than interleaving and emits one
+bounded resumable cancellation
 record. Reload or
 shutdown cancels every not-yet-dispatched part and releases the transient hold;
 restored durable inbox state remains the wake retry authority. Explicit manager

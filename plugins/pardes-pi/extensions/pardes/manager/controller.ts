@@ -38,6 +38,7 @@ import { makeFileSystemStateStore, type StateStoreShape } from '../storage/index
 import {
   type GuardedWorkerSupervisorShape,
   makeWorkerSupervisor,
+  makeWorktreeBootstrap,
   renderWorkerCompactionFailure,
   type WorkerRuntimeSnapshot,
   type WorkerSendBehavior,
@@ -45,6 +46,7 @@ import {
   type WorkerStatus,
   type WorkerSupervisorEvent,
   type WorkerThinkingLevel,
+  type WorktreeBootstrapShape,
 } from '../worker-runtime/index.ts';
 import {
   makeProcessLoadedPluginActivationSafety,
@@ -303,6 +305,7 @@ export interface ManagerControllerOptions {
   readonly makeWorkers?: (
     onEvent: (event: WorkerSupervisorEvent) => Effect.Effect<void, unknown>,
   ) => GuardedWorkerSupervisorShape;
+  readonly worktreeBootstrap?: WorktreeBootstrapShape;
   readonly presentation?: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
   readonly compactionSafetyScheduler?: ManagerCompactionSafetyScheduler;
   readonly activationSafety?: PluginActivationSafetyShape;
@@ -368,6 +371,7 @@ export class ManagerController {
   private readonly githubHostedDrilldown: GitHubHostedDrilldownShape;
   private readonly githubRateLimitSymptomOwnership: GitHubRateLimitSymptomOwnershipPort | undefined;
   private readonly workers: GuardedWorkerSupervisorShape;
+  private readonly worktreeBootstrap: WorktreeBootstrapShape;
   private readonly presentation: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
   private readonly activationSafety: PluginActivationSafetyShape;
   private readonly liveRuntimes = new Map<string, WorkerRuntimeSnapshot>();
@@ -414,6 +418,7 @@ export class ManagerController {
     const onEvent = (event: WorkerSupervisorEvent) =>
       this.active?.workerEvents.handle(event) ?? Effect.void;
     this.workers = options.makeWorkers?.(onEvent) ?? makeWorkerSupervisor({ onEvent });
+    this.worktreeBootstrap = options.worktreeBootstrap ?? makeWorktreeBootstrap();
   }
 
   snapshot(): ManagerState | undefined {
@@ -949,6 +954,7 @@ export class ManagerController {
       },
       namespace: active,
       workers: this.workers,
+      worktreeBootstrap: this.worktreeBootstrap,
       worktrees: this.worktrees,
     });
   }
@@ -1010,6 +1016,7 @@ export class ManagerController {
       },
       namespace: active,
       workers: this.workers,
+      worktreeBootstrap: this.worktreeBootstrap,
       worktrees: this.worktrees,
     });
   });
@@ -1340,19 +1347,23 @@ export class ManagerController {
       yield* validateManagerStateNamespace(namespace, state);
     }
     yield* this.activationSafety.materialize(activation.stateDir);
-    const detached = Object.values(state.agents).filter((agent) =>
-      ATTACHED_STATUSES.has(agent.status),
+    const detached = Object.values(state.agents).filter(
+      (agent) =>
+        ATTACHED_STATUSES.has(agent.status) || agent.worktreeBootstrap?.status === 'running',
     );
     if (detached.length > 0) {
       const timestamp = yield* nowIso;
-      const detachedAttention = detached.map((agent) =>
-        makeEvent(
-          'agent_detached',
-          `${agent.id} runtime is detached after manager restoration.`,
+      const detachedAttention = detached.map((agent) => {
+        const bootstrapInterrupted = agent.worktreeBootstrap?.status === 'running';
+        return makeEvent(
+          bootstrapInterrupted ? 'worktree_bootstrap_interrupted' : 'agent_detached',
+          bootstrapInterrupted
+            ? `${agent.id} manager process ended while script/update was running; Pardes did not rerun repository code automatically and retained cleanup ownership.`
+            : `${agent.id} runtime is detached after manager restoration.`,
           timestamp,
           { agentId: agent.id, workstreamId: agent.workstreamId },
-        ),
-      );
+        );
+      });
       yield* store.mutate((current) =>
         Effect.succeed([
           undefined,
@@ -1361,12 +1372,27 @@ export class ManagerController {
             agents: Object.fromEntries(
               Object.entries(current.agents).map(([id, agent]) => [
                 id,
-                ATTACHED_STATUSES.has(agent.status)
+                ATTACHED_STATUSES.has(agent.status) || agent.worktreeBootstrap?.status === 'running'
                   ? {
                       ...agent,
-                      lastError: 'Worker runtime is not attached to this manager process.',
+                      lastError:
+                        agent.worktreeBootstrap?.status === 'running'
+                          ? 'Manager ended during script/update; completion and process termination are unknown, and bootstrap was not rerun automatically. Inspect retained ownership before cleanup or a new attempt.'
+                          : 'Worker runtime is not attached to this manager process.',
                       status: 'crashed' as const,
                       updatedAt: timestamp,
+                      ...(agent.worktreeBootstrap?.status === 'running'
+                        ? {
+                            worktreeBootstrap: {
+                              completedAt: timestamp,
+                              failureSummary:
+                                '[manager_restart] script/update completion and process termination were not observed; automatic rerun is disabled.',
+                              script: 'script/update' as const,
+                              startedAt: agent.worktreeBootstrap.startedAt,
+                              status: 'interrupted' as const,
+                            },
+                          }
+                        : {}),
                     }
                   : agent,
               ]),
@@ -1395,7 +1421,7 @@ export class ManagerController {
         store,
         makeEvent(
           'agents_detached',
-          `Marked ${detached.length} detached worker runtime${detached.length === 1 ? '' : 's'} as crashed.`,
+          `Reconciled ${detached.length} detached worker runtime or interrupted bootstrap record${detached.length === 1 ? '' : 's'} as crashed.`,
           timestamp,
         ),
       );

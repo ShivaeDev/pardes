@@ -10,11 +10,13 @@ import {
   type WorktreeServiceError,
 } from '../git/index.ts';
 import type { StateStoreShape, StoreError } from '../storage/index.ts';
-import type {
-  GuardedWorkerSupervisorShape,
-  WorkerRuntimeSnapshot,
-  WorkerSupervisorError,
-  WorkerThinkingLevel,
+import {
+  type GuardedWorkerSupervisorShape,
+  type WorkerRuntimeSnapshot,
+  type WorkerSupervisorError,
+  type WorkerThinkingLevel,
+  type WorktreeBootstrapShape,
+  WorktreeUpdateError,
 } from '../worker-runtime/index.ts';
 import type {
   AgentGitAuditTrigger,
@@ -45,6 +47,11 @@ import {
   handoffAuditSuffix,
   successfulHandoffAudit,
 } from './worker-events.ts';
+import {
+  EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY,
+  runDurableWorktreeBootstrap,
+  settleUnrecordedWorktreeBootstrap,
+} from './worktree-bootstrap.ts';
 
 const ATTACHED_STATUSES = new Set(['starting', 'running', 'idle']);
 const nowIso = Clock.currentTimeMillis.pipe(Effect.map((millis) => new Date(millis).toISOString()));
@@ -75,13 +82,13 @@ function failedLeaseSummary(
     return `Failed to start ${agentId}; removed clean managed worktree ${leasePath}.`;
   if (cleanup === 'preserved_dirty')
     return `Failed to start ${agentId}; preserved dirty managed worktree ${leasePath}.`;
-  return `Failed to start ${agentId}; preserved managed worktree ${leasePath} after cleanup verification failed.`;
+  return `Failed to start ${agentId}; preserved managed worktree ${leasePath} because safe cleanup could not be established.`;
 }
 
 function leaseCleanupSummary(leasePath: string, cleanup: FailedLeaseCleanup): string {
   if (cleanup === 'removed_clean') return `Removed clean managed worktree ${leasePath}.`;
   if (cleanup === 'preserved_dirty') return `Preserved dirty managed worktree ${leasePath}.`;
-  return `Preserved managed worktree ${leasePath} because cleanup could not be verified.`;
+  return `Preserved managed worktree ${leasePath} because safe cleanup could not be established.`;
 }
 
 export interface AgentAttachmentSpawnInput {
@@ -103,6 +110,7 @@ export type AgentAttachmentLifecycleError =
   | WorktreeServiceError
   | RemoteBaselineError
   | WorkerSupervisorError
+  | WorktreeUpdateError
   | InvalidManagedStateError
   | WorkstreamNotFoundError
   | AgentSpawnConfigurationError
@@ -159,13 +167,14 @@ export interface AgentAttachmentLifecycleCoordinatorOptions {
   readonly namespace: AgentAttachmentLifecycleNamespace;
   readonly worktrees: ManagedWorktreeShape;
   readonly workers: GuardedWorkerSupervisorShape;
+  readonly worktreeBootstrap: WorktreeBootstrapShape;
   readonly callbacks: AgentAttachmentLifecycleCoordinatorCallbacks;
 }
 
 export function makeAgentAttachmentLifecycleCoordinator(
   options: AgentAttachmentLifecycleCoordinatorOptions,
 ): AgentAttachmentLifecycleCoordinatorShape {
-  const { namespace, worktrees, workers, callbacks } = options;
+  const { namespace, worktrees, workers, worktreeBootstrap, callbacks } = options;
 
   const requirePersistedAgent = Effect.fnUntraced(function* (agentId: string) {
     const agent = namespace.state.agents[agentId];
@@ -208,18 +217,30 @@ export function makeAgentAttachmentLifecycleCoordinator(
   const stopUnpersistedRuntime = Effect.fnUntraced(function* (agentId: string) {
     callbacks.suppressWorkerEvents(agentId);
     callbacks.forgetRuntime(agentId);
-    yield* workers.stop(agentId).pipe(
-      Effect.catch((error) =>
-        Effect.sync(() => {
-          console.error(
-            `Pardes failed to stop unattached worker runtime ${agentId} after persistence failure`,
-            error,
-          );
-        }),
-      ),
-    );
+    const stop = yield* workers.stop(agentId).pipe(Effect.exit);
     callbacks.resumeWorkerEvents(agentId);
     callbacks.forgetRuntime(agentId);
+    if (Exit.isSuccess(stop)) return true;
+    console.error(
+      `Pardes failed to stop unattached worker runtime ${agentId} after persistence failure`,
+      Cause.squash(stop.cause),
+    );
+    return false;
+  });
+
+  const settleFailedRuntimeLaunch = Effect.fnUntraced(function* (agentId: string) {
+    callbacks.suppressWorkerEvents(agentId);
+    const stopped = yield* workers.stop(agentId).pipe(Effect.exit);
+    callbacks.resumeWorkerEvents(agentId);
+    callbacks.forgetRuntime(agentId);
+    if (Exit.isSuccess(stopped)) return true;
+    const error = Cause.squash(stopped.cause);
+    if (error instanceof AgentNotFoundError) return true;
+    console.error(
+      `Pardes could not prove failed worker runtime launch ${agentId} was stopped`,
+      error,
+    );
+    return false;
   });
 
   const rollbackProvisionalAgent = Effect.fnUntraced(function* (
@@ -262,24 +283,100 @@ export function makeAgentAttachmentLifecycleCoordinator(
     yield* callbacks.refresh();
   });
 
+  const retainFailedAgentLease = Effect.fnUntraced(function* (
+    agent: AgentRecord,
+    cleanup: Exclude<FailedLeaseCleanup, 'removed_clean'>,
+    failedAt: string,
+    failure: string,
+    bootstrapFailureSummary?: string,
+  ) {
+    const withRetainedOwnership = (state: ManagerState): ManagerState => {
+      const current = state.agents[agent.id] ?? agent;
+      return {
+        ...state,
+        agents: {
+          ...state.agents,
+          [agent.id]: {
+            ...current,
+            lastError:
+              cleanup === 'preserved_dirty'
+                ? `${failure} The dirty managed worktree and durable lease ownership were retained for inspection and cleanup.`
+                : `${failure} Safe managed-worktree cleanup or process termination could not be established; durable lease ownership was retained.`,
+            status: 'crashed' as const,
+            updatedAt: failedAt,
+            worktreeBootstrap: settleUnrecordedWorktreeBootstrap(
+              current.worktreeBootstrap,
+              failedAt,
+              bootstrapFailureSummary,
+            ),
+          },
+        },
+      };
+    };
+    const retained = yield* namespace.store
+      .mutate((state) => Effect.succeed([undefined, withRetainedOwnership(state)] as const))
+      .pipe(Effect.exit);
+    if (Exit.isFailure(retained)) {
+      console.error(
+        `Pardes failed to persist retained managed-worktree ownership for ${agent.id}`,
+        Cause.squash(retained.cause),
+      );
+      namespace.state = withRetainedOwnership(namespace.state);
+      callbacks.render();
+      return;
+    }
+    yield* callbacks.refresh();
+  });
+
+  const settleInterruptedWriterBootstrap = Effect.fnUntraced(function* (
+    agent: AgentRecord,
+    workstream: Workstream,
+  ) {
+    const interruptedAt = yield* nowIso;
+    yield* retainFailedAgentLease(
+      agent,
+      'preserved_unverified',
+      interruptedAt,
+      'Repository bootstrap was externally interrupted; completion and process termination are unknown.',
+      EXTERNALLY_INTERRUPTED_BOOTSTRAP_SUMMARY,
+    );
+    yield* callbacks.appendEventSafely(
+      makeEvent(
+        'agent_worktree_bootstrap_interrupted',
+        `${agent.id} repository bootstrap was externally interrupted; no child worker was launched, process termination is not assumed, and conservative lease ownership was retained.`,
+        interruptedAt,
+        { agentId: agent.id, workstreamId: workstream.id },
+      ),
+    );
+  });
+
   const handleSpawnPersistenceFailure = Effect.fnUntraced(function* (
     state: ManagerState,
     workstream: Workstream,
-    agentId: string,
+    agent: AgentRecord,
     lease: NonNullable<AgentRecord['worktree']>,
     cause: Cause.Cause<unknown>,
   ) {
-    yield* stopUnpersistedRuntime(agentId);
-    yield* rollbackProvisionalAgent(workstream, agentId);
-    const cleanup = yield* cleanupFailedLease(
-      { agentId, managerId: state.managerId, repo: state.repo },
-      lease,
-    );
+    const stopped = yield* stopUnpersistedRuntime(agent.id);
+    const cleanup = stopped
+      ? yield* cleanupFailedLease(
+          { agentId: agent.id, managerId: state.managerId, repo: state.repo },
+          lease,
+        )
+      : ('preserved_unverified' as const);
     const timestamp = yield* nowIso;
+    if (cleanup === 'removed_clean') yield* rollbackProvisionalAgent(workstream, agent.id);
+    else
+      yield* retainFailedAgentLease(
+        agent,
+        cleanup,
+        timestamp,
+        'The spawned worker attachment could not be persisted.',
+      );
     yield* callbacks.appendEventSafely(
       makeEvent(
         'agent_spawn_persist_failed',
-        `Started ${agentId} but failed to persist the runtime; stopped the unattached worker. ${leaseCleanupSummary(lease.path, cleanup)} ${formatPardesError(Cause.squash(cause))}`,
+        `Started ${agent.id} but failed to persist the runtime; ${stopped ? 'stopped the unattached worker' : 'could not prove the unattached worker stopped'}. ${leaseCleanupSummary(lease.path, cleanup)} ${formatPardesError(Cause.squash(cause))}`,
         timestamp,
       ),
     );
@@ -290,7 +387,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
     fallbackStatus: AgentRecord['status'],
     cause: Cause.Cause<unknown>,
   ) {
-    yield* stopUnpersistedRuntime(agentId);
+    const stopped = yield* stopUnpersistedRuntime(agentId);
     const timestamp = yield* nowIso;
     yield* namespace.store
       .mutate((state) => {
@@ -321,7 +418,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
     yield* callbacks.appendEventSafely(
       makeEvent(
         'agent_revive_persist_failed',
-        `Revived ${agentId} but failed to persist the runtime; stopped the unattached worker. ${formatPardesError(Cause.squash(cause))}`,
+        `Revived ${agentId} but failed to persist the runtime; ${stopped ? 'stopped the unattached worker' : 'could not prove the unattached worker stopped'}. ${formatPardesError(Cause.squash(cause))}`,
         timestamp,
       ),
     );
@@ -373,6 +470,11 @@ export function makeAgentAttachmentLifecycleCoordinator(
         updatedAt: timestamp,
         workstreamId: input.workstreamId,
         worktree: lease,
+        worktreeBootstrap: {
+          script: 'script/update',
+          startedAt: timestamp,
+          status: 'running',
+        },
       };
       const provisionalAt = yield* nowIso;
       const provisionalResult = yield* namespace.store
@@ -405,6 +507,56 @@ export function makeAgentAttachmentLifecycleCoordinator(
         return yield* Effect.failCause(provisionalResult.cause);
       }
       yield* callbacks.refresh(ctx);
+      const bootstrapResult = yield* runDurableWorktreeBootstrap({
+        agent,
+        bootstrap: worktreeBootstrap,
+        callbacks: {
+          appendEventSafely: callbacks.appendEventSafely,
+          event: (type, summary, createdAt) =>
+            makeEvent(`agent_${type}`, summary, createdAt, {
+              agentId,
+              workstreamId: workstream.id,
+            }),
+        },
+        cwd: lease.path,
+        label: `${agentId} fresh managed worktree`,
+        namespace,
+      }).pipe(
+        Effect.exit,
+        Effect.onInterrupt(() =>
+          Effect.uninterruptible(settleInterruptedWriterBootstrap(agent, workstream)),
+        ),
+      );
+      if (Exit.isFailure(bootstrapResult)) {
+        const failedAt = yield* nowIso;
+        const bootstrapError = Cause.squash(bootstrapResult.cause);
+        const cleanup =
+          bootstrapError instanceof WorktreeUpdateError &&
+          (bootstrapError.reason === 'timeout' ||
+            bootstrapError.reason === 'process_lifecycle_unsettled')
+            ? ('preserved_unverified' as const)
+            : yield* cleanupFailedLease(
+                { agentId, managerId: state.managerId, repo: state.repo },
+                lease,
+              );
+        if (cleanup === 'removed_clean') yield* rollbackProvisionalAgent(workstream, agentId);
+        else
+          yield* retainFailedAgentLease(
+            agent,
+            cleanup,
+            failedAt,
+            'Repository script/update failed.',
+          );
+        yield* callbacks.appendEventSafely(
+          makeEvent(
+            'agent_spawn_failed',
+            `${failedLeaseSummary(agentId, lease.path, cleanup)} Repository worktree bootstrap did not complete successfully; child launch was skipped.`,
+            failedAt,
+            { agentId, workstreamId: workstream.id },
+          ),
+        );
+        return yield* Effect.failCause(bootstrapResult.cause);
+      }
       const runtimeResult = yield* workers
         .spawn({
           agentId,
@@ -420,11 +572,21 @@ export function makeAgentAttachmentLifecycleCoordinator(
         .pipe(Effect.exit);
       if (Exit.isFailure(runtimeResult)) {
         const failedAt = yield* nowIso;
-        yield* rollbackProvisionalAgent(workstream, agentId);
-        const cleanup = yield* cleanupFailedLease(
-          { agentId, managerId: state.managerId, repo: state.repo },
-          lease,
-        );
+        const runtimeSettled = yield* settleFailedRuntimeLaunch(agentId);
+        const cleanup = runtimeSettled
+          ? yield* cleanupFailedLease(
+              { agentId, managerId: state.managerId, repo: state.repo },
+              lease,
+            )
+          : ('preserved_unverified' as const);
+        if (cleanup === 'removed_clean') yield* rollbackProvisionalAgent(workstream, agentId);
+        else
+          yield* retainFailedAgentLease(
+            agent,
+            cleanup,
+            failedAt,
+            'Worker runtime launch failed after repository bootstrap succeeded.',
+          );
         const error = Cause.squash(runtimeResult.cause);
         yield* callbacks.appendEventSafely(
           makeEvent(
@@ -459,13 +621,7 @@ export function makeAgentAttachmentLifecycleCoordinator(
         })
         .pipe(Effect.exit);
       if (Exit.isFailure(persistResult)) {
-        yield* handleSpawnPersistenceFailure(
-          state,
-          workstream,
-          agentId,
-          lease,
-          persistResult.cause,
-        );
+        yield* handleSpawnPersistenceFailure(state, workstream, agent, lease, persistResult.cause);
         return yield* Effect.failCause(persistResult.cause);
       }
       yield* callbacks.appendEventSafely(

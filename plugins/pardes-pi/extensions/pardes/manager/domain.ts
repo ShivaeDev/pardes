@@ -120,6 +120,48 @@ export const AgentLeaseCleanupSchema = Schema.Struct({
 });
 export type AgentLeaseCleanup = typeof AgentLeaseCleanupSchema.Type;
 
+const WorktreeUpdateOutputSchema = Schema.Struct({
+  countAccuracy: Schema.optionalKey(Schema.Literals(['exact', 'lower_bound'])),
+  stderrChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  stdoutChars: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+
+export const WorktreeBootstrapRecordSchema = Schema.Union([
+  Schema.Struct({
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('running'),
+  }),
+  Schema.Struct({
+    checkedAt: NonEmptyString,
+    script: Schema.Literal('script/update'),
+    status: Schema.Literal('absent'),
+  }),
+  Schema.Struct({
+    completedAt: NonEmptyString,
+    output: WorktreeUpdateOutputSchema,
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('succeeded'),
+  }),
+  Schema.Struct({
+    completedAt: NonEmptyString,
+    failureSummary: NonEmptyString.check(Schema.isMaxLength(240)),
+    output: WorktreeUpdateOutputSchema,
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('failed'),
+  }),
+  Schema.Struct({
+    completedAt: NonEmptyString,
+    failureSummary: NonEmptyString.check(Schema.isMaxLength(240)),
+    script: Schema.Literal('script/update'),
+    startedAt: NonEmptyString,
+    status: Schema.Literal('interrupted'),
+  }),
+]);
+export type WorktreeBootstrapRecord = typeof WorktreeBootstrapRecordSchema.Type;
+
 export const AgentRecordSchema = Schema.Struct({
   changedPaths: Schema.optionalKey(Schema.Array(NonEmptyString)),
   createdAt: NonEmptyString,
@@ -151,6 +193,7 @@ export const AgentRecordSchema = Schema.Struct({
   updatedAt: NonEmptyString,
   workstreamId: NonEmptyString,
   worktree: Schema.optionalKey(WorktreeLeaseSchema),
+  worktreeBootstrap: Schema.optionalKey(WorktreeBootstrapRecordSchema),
 });
 export type AgentRecord = typeof AgentRecordSchema.Type;
 

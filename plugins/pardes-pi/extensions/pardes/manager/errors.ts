@@ -29,7 +29,11 @@ import type {
   ReportWriteLimitExceededError,
 } from '../reporting/index.ts';
 import type { StoreError } from '../storage/index.ts';
-import type { WorkerProcessError, WorkerRpcError } from '../worker-runtime/index.ts';
+import type {
+  WorkerProcessError,
+  WorkerRpcError,
+  WorktreeUpdateError,
+} from '../worker-runtime/index.ts';
 import type {
   PluginActivationAlignment,
   PluginActivationGuardOperation,
@@ -162,6 +166,7 @@ export type PardesError =
   | AgentSpawnConfigurationError
   | WorkerProcessError
   | WorkerRpcError
+  | WorktreeUpdateError
   | GitHubCommandError
   | GitHubResponseError
   | GitHubPublicationInputError
@@ -260,6 +265,9 @@ export function formatPardesError(error: unknown): string {
     }
     if (tagged._tag === 'AgentSpawnConfigurationError' && tagged.message) {
       return tagged.message;
+    }
+    if (tagged._tag === 'WorktreeUpdateError' && 'reason' in tagged) {
+      return `Repository script/update failed during fresh worktree bootstrap [${String(tagged.reason)}]; no child worker was launched.`;
     }
     if (
       (tagged._tag === 'WorkerProcessError' || tagged._tag === 'WorkerRpcError') &&

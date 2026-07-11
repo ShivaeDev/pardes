@@ -138,6 +138,28 @@ describe('manager namespace', () => {
       reason: 'repository namespace does not match its activation',
     });
 
+    const intentMismatch = fixture();
+    const mismatchedIntentState = {
+      ...initialManagerState(intentMismatch.context.managerId, intentMismatch.context.repo),
+      workstreamCompletionIntents: {
+        'ws-key': {
+          pendingAgents: [{ agentId: 'agent-one', lifecycleGeneration: 1, reportId: 'report-one' }],
+          requestedAt: '2026-01-01T00:00:00.000Z',
+          workstreamId: 'ws-other',
+        },
+      },
+    };
+    expect(
+      await Effect.runPromise(
+        validateManagerStateNamespace(intentMismatch.context, mismatchedIntentState).pipe(
+          Effect.flip,
+        ),
+      ),
+    ).toMatchObject({
+      _tag: 'InvalidManagedStateError',
+      reason: 'workstream completion intent namespace does not match its owner',
+    });
+
     const stateDirectoryMismatch = fixture();
     const mismatchedContext = {
       ...stateDirectoryMismatch.context,

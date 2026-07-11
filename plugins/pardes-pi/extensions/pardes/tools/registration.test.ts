@@ -103,11 +103,11 @@ describe('Pardes interactive tool-call previews', () => {
     } as unknown as ExtensionAPI;
     const manager = {} as ManagerController;
 
-    registerQuestionTool(pi);
+    registerQuestionTool(pi, manager);
     registerWorkstreamTools(pi, manager);
     registerAgentTools(pi, manager);
 
-    expect(tools).toHaveLength(27);
+    expect(tools).toHaveLength(26);
     expect(tools.map((tool) => tool.name)).toContain('feedback');
     const feedback = requiredValue(tools.find((tool) => tool.name === 'feedback'));
     expect((feedback.parameters as unknown as { required: string[] }).required).toEqual(['text']);

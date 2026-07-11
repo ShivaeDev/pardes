@@ -9,6 +9,12 @@ import type { ManagerController, PullRequestCreateResult } from '../manager/inde
 import { MANAGER_INPUT_PULL_REQUEST_BRANCH_PATTERN } from '../manager/index.ts';
 import { managerId, registerPardesTool, runTool, textResult } from './registration.ts';
 
+function localTrackingText(tracking: PullRequestCreateResult['localTracking']): string {
+  if (tracking.status === 'failed')
+    return ` Local tracking: origin/${tracking.remoteBranch} failed safely; remote publication remains verified.`;
+  return ` Local tracking: ${tracking.localBranch} -> ${tracking.remote}/${tracking.remoteBranch}${tracking.status === 'already_configured' ? ' (already configured)' : ''}.`;
+}
+
 function browserHandoffText(handoff: PullRequestCreateResult['browserHandoff']): string {
   if (handoff.status === 'not_requested') return ' Browser handoff: none.';
   if (handoff.status === 'failed')
@@ -21,13 +27,13 @@ function browserHandoffText(handoff: PullRequestCreateResult['browserHandoff']):
 export function registerPullRequestTools(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
     description:
-      "Audit an active-workstream managed worker's committed changes, push its managed branch to origin, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
+      "Audit an active-workstream managed worker's committed changes, push its exact SHA to a managed remote review branch, verify the hosted head, configure the retained local branch to track that remote branch, and create or update a GitHub review gate. Browser handoff is explicit: none, background, or foreground. Rejects completed or otherwise non-active workstreams. Never merges.",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.createPullRequest(params, ctx));
       if (!result.ok) return textResult(`Error: ${result.error}`);
       const published = result.value;
       return textResult(
-        `${published.action === 'created' ? 'Created' : 'Updated'} PR #${published.pullRequest.number}: ${published.pullRequest.url}.${browserHandoffText(published.browserHandoff)}`,
+        `${published.action === 'created' ? 'Created' : 'Updated'} PR #${published.pullRequest.number}: ${published.pullRequest.url}.${localTrackingText(published.localTracking)}${browserHandoffText(published.browserHandoff)}`,
         published,
       );
     },

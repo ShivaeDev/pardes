@@ -85,10 +85,12 @@ anomalies and post-merge activation separate unless they block safe publication.
 When explicit `workstream_complete` lands after a terminal report is durable but
 before that child emits its authoritative idle edge, Pardes may return a bounded
 generation-owned deferred intent. Do not retry or infer idle from the report;
-Pardes consumes the intent automatically after fresh idle safety checks. Inspect
-`pardes_status()` only when later orientation is needed. Busy or nonterminal
-children, queued work, changed lifecycle ownership, and unresolved open review
-gates continue to fail closed.
+Pardes consumes the intent automatically after an authoritative idle or terminal
+edge and fresh safety checks. Accepted follow-ups, new workstream activity, later
+running/report edges, and lifecycle advancement revoke the prior authorization.
+Inspect `pardes_status()` only when later orientation is needed. Busy or
+nonterminal children, queued work, changed lifecycle ownership, and unresolved
+open review gates continue to fail closed.
 
 ## Durable attention
 

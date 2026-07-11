@@ -58,6 +58,11 @@ interface WorkerEventProjection {
 }
 
 interface WorkerEventFollowUp {
+  readonly cancelWorkstreamCompletionIntent?: {
+    readonly agentId: string;
+    readonly lifecycleGeneration: number | undefined;
+    readonly reason: string;
+  };
   readonly consumeWorkstreamCompletionIntent?: {
     readonly agentId: string;
     readonly lifecycleGeneration: number | undefined;
@@ -125,6 +130,11 @@ export interface WorkerSupervisorEventCoordinatorCallbacks {
   readonly retryResolvedVerificationRetirementForIdleVerifier: (
     agentId: string,
   ) => Effect.Effect<boolean, unknown>;
+  readonly cancelWorkstreamCompletionIntent?: (
+    agentId: string,
+    lifecycleGeneration: number | undefined,
+    reason: string,
+  ) => Effect.Effect<void, unknown>;
   readonly consumeWorkstreamCompletionIntent?: (
     agentId: string,
     lifecycleGeneration: number | undefined,
@@ -410,12 +420,34 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
     yield* callbacks.refresh();
     const safelyRetiredAfterIdle =
       becameIdle && namespace.state.agents[workerEvent.agentId]?.status === 'stopped';
+    const terminalCompletionEdge =
+      (workerEvent.type === 'status' &&
+        (workerEvent.status === 'idle' ||
+          workerEvent.status === 'stopped' ||
+          workerEvent.status === 'crashed')) ||
+      workerEvent.type === 'unexpected_exit';
+    const invalidatesCompletionIntent =
+      workerEvent.type === 'report' ||
+      (workerEvent.type === 'status' &&
+        (workerEvent.status === 'starting' || workerEvent.status === 'running'));
     return {
-      ...(workerEvent.type === 'status' && workerEvent.status === 'idle'
+      ...(terminalCompletionEdge
         ? {
             consumeWorkstreamCompletionIntent: {
               agentId: persistedAgent.id,
               lifecycleGeneration: workerEvent.lifecycleGeneration,
+            },
+          }
+        : {}),
+      ...(invalidatesCompletionIntent
+        ? {
+            cancelWorkstreamCompletionIntent: {
+              agentId: persistedAgent.id,
+              lifecycleGeneration: workerEvent.lifecycleGeneration,
+              reason:
+                workerEvent.type === 'report'
+                  ? 'a later report replaced prior terminal-report authorization'
+                  : `authoritative ${workerEvent.status} status advanced beyond the terminal-report-to-idle window`,
             },
           }
         : {}),
@@ -453,6 +485,12 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
 
   const runFollowUp = Effect.fnUntraced(function* (followUp: WorkerEventFollowUp | undefined) {
     if (!followUp) return;
+    if (followUp.cancelWorkstreamCompletionIntent && callbacks.cancelWorkstreamCompletionIntent)
+      yield* callbacks.cancelWorkstreamCompletionIntent(
+        followUp.cancelWorkstreamCompletionIntent.agentId,
+        followUp.cancelWorkstreamCompletionIntent.lifecycleGeneration,
+        followUp.cancelWorkstreamCompletionIntent.reason,
+      );
     if (followUp.consumeWorkstreamCompletionIntent && callbacks.consumeWorkstreamCompletionIntent)
       yield* callbacks.consumeWorkstreamCompletionIntent(
         followUp.consumeWorkstreamCompletionIntent.agentId,

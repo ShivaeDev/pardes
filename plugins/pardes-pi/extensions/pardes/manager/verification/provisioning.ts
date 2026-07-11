@@ -406,8 +406,13 @@ export function makeVerificationProvisioner(
             terminalReportAwaitingIdle: _terminalReportAwaitingIdle,
             ...withoutOldAgentEvidence
           } = agent;
+          const workstreamCompletionIntents = { ...state.workstreamCompletionIntents };
+          const cancelledIntent = workstreamCompletionIntents[
+            verification.workstreamId
+          ]?.pendingAgents.some((pending) => pending.agentId === verifierAgent.id);
+          if (cancelledIntent) delete workstreamCompletionIntents[verification.workstreamId];
           return Effect.succeed([
-            undefined,
+            cancelledIntent === true,
             {
               ...state,
               agents: {
@@ -420,6 +425,7 @@ export function makeVerificationProvisioner(
                 },
               },
               verifications: { ...state.verifications, [verificationId]: next },
+              workstreamCompletionIntents,
             },
           ] as const);
         })
@@ -432,6 +438,19 @@ export function makeVerificationProvisioner(
         );
         return yield* Effect.failCause(persistAttemptResult.cause);
       }
+      if (persistAttemptResult.value)
+        yield* callbacks.appendEventSafely(
+          makeVerificationEvent(
+            'workstream_completion_intent_cancelled',
+            `Cancelled deferred completion for ${verification.workstreamId}: verifier ${verifierAgent.id} advanced to advisory attempt ${attempt}.`,
+            refreshedAt,
+            {
+              agentId: verifierAgent.id,
+              verificationId,
+              workstreamId: verification.workstreamId,
+            },
+          ),
+        );
       yield* callbacks.appendEventSafely(
         makeVerificationEvent(
           'verification_refresh_started',

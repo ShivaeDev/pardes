@@ -1027,6 +1027,12 @@ export class ManagerController {
       attachments,
       callbacks: {
         appendEventSafely: (event) => this.appendEventSafely(active.store, event),
+        cancelWorkstreamCompletionIntent: (agentId, lifecycleGeneration, reason) =>
+          this.cancelWorkstreamCompletionIntentForLifecycleEdge(
+            agentId,
+            lifecycleGeneration,
+            reason,
+          ),
         consumeWorkstreamCompletionIntent: (agentId, lifecycleGeneration) =>
           this.consumeWorkstreamCompletionIntent(agentId, lifecycleGeneration),
         isSuppressed: (agentId) => this.ignoredWorkerEvents.has(agentId),
@@ -1765,27 +1771,91 @@ export class ManagerController {
     return completed;
   });
 
+  private completionIntentForAgent(
+    active: ActiveManager,
+    agentId: string,
+    lifecycleGeneration?: number,
+  ): WorkstreamCompletionIntent | undefined {
+    return Object.values(active.state.workstreamCompletionIntents).find((candidate) =>
+      candidate.pendingAgents.some(
+        (pending) =>
+          pending.agentId === agentId &&
+          (lifecycleGeneration === undefined ||
+            pending.lifecycleGeneration === lifecycleGeneration),
+      ),
+    );
+  }
+
+  private readonly cancelWorkstreamCompletionIntentForAgent = Effect.fnUntraced(function* (
+    this: ManagerController,
+    active: ActiveManager,
+    agentId: string,
+    reason: string,
+    ctx?: ExtensionContext,
+    lifecycleGeneration?: number,
+  ) {
+    const intent = this.completionIntentForAgent(active, agentId, lifecycleGeneration);
+    if (!intent) return false;
+    yield* this.cancelWorkstreamCompletionIntent(active, intent, reason, ctx);
+    return true;
+  });
+
+  private readonly settleWorkstreamCompletionIntentForAgent = Effect.fnUntraced(function* (
+    this: ManagerController,
+    active: ActiveManager,
+    agentId: string,
+    lifecycleGeneration: number | undefined,
+    ctx?: ExtensionContext,
+  ) {
+    if (lifecycleGeneration === undefined) return;
+    const intent = this.completionIntentForAgent(active, agentId, lifecycleGeneration);
+    if (!intent || !this.completionIntentReady(active.state, intent)) return;
+    yield* this.completeWorkstreamUnlocked(intent.workstreamId, ctx, false).pipe(
+      Effect.asVoid,
+      Effect.catchTag('WorkstreamCompletionRejectedError', (error) =>
+        this.cancelWorkstreamCompletionIntent(active, intent, error.reason, ctx),
+      ),
+    );
+  });
+
+  private readonly cancelWorkstreamCompletionIntentForLifecycleEdge = (
+    agentId: string,
+    lifecycleGeneration: number | undefined,
+    reason: string,
+  ): Effect.Effect<void, unknown> =>
+    Effect.suspend(() => {
+      const active = this.active;
+      if (
+        !active ||
+        lifecycleGeneration === undefined ||
+        !this.completionIntentForAgent(active, agentId, lifecycleGeneration)
+      )
+        return Effect.void;
+      return this.withActiveLifecyclePermit(() =>
+        this.cancelWorkstreamCompletionIntentForAgent(
+          active,
+          agentId,
+          reason,
+          undefined,
+          lifecycleGeneration,
+        ),
+      ).pipe(Effect.asVoid);
+    });
+
   private readonly consumeWorkstreamCompletionIntent = (
     agentId: string,
     lifecycleGeneration: number | undefined,
   ): Effect.Effect<void, unknown> =>
     Effect.suspend(() => {
       const active = this.active;
-      if (!active) return Effect.void;
-      const intent = Object.values(active.state.workstreamCompletionIntents).find((candidate) =>
-        candidate.pendingAgents.some(
-          (pending) =>
-            pending.agentId === agentId && pending.lifecycleGeneration === lifecycleGeneration,
-        ),
-      );
-      if (!intent || !this.completionIntentReady(active.state, intent)) return Effect.void;
+      if (
+        !active ||
+        lifecycleGeneration === undefined ||
+        !this.completionIntentForAgent(active, agentId, lifecycleGeneration)
+      )
+        return Effect.void;
       return this.withActiveLifecyclePermit(() =>
-        this.completeWorkstreamUnlocked(intent.workstreamId, undefined, false),
-      ).pipe(
-        Effect.asVoid,
-        Effect.catchTag('WorkstreamCompletionRejectedError', (error) =>
-          this.cancelWorkstreamCompletionIntent(active, intent, error.reason),
-        ),
+        this.settleWorkstreamCompletionIntentForAgent(active, agentId, lifecycleGeneration),
       );
     });
 
@@ -2040,7 +2110,16 @@ export class ManagerController {
   ) {
     const input = yield* decodePullRequestCreateInput(rawInput);
     const active = yield* this.requireActive();
-    return yield* active.pullRequests.publish(input, ctx);
+    const published = yield* active.pullRequests.publish(input, ctx);
+    const intent = active.state.workstreamCompletionIntents[published.pullRequest.workstreamId];
+    if (intent)
+      yield* this.cancelWorkstreamCompletionIntent(
+        active,
+        intent,
+        `open review gate ${published.pullRequest.id} acquired retained ownership`,
+        ctx,
+      );
+    return published;
   });
 
   readonly createPullRequest = (rawInput: PullRequestCreateInput, ctx?: ExtensionContext) =>
@@ -2053,7 +2132,16 @@ export class ManagerController {
   ) {
     const input = yield* decodeVerificationRequestInput(rawInput);
     const active = yield* this.requireActive();
-    return yield* active.verifications.request(input, ctx);
+    const verification = yield* active.verifications.request(input, ctx);
+    const intent = active.state.workstreamCompletionIntents[verification.workstreamId];
+    if (intent)
+      yield* this.cancelWorkstreamCompletionIntent(
+        active,
+        intent,
+        `new advisory verification ${verification.id} acquired workstream activity`,
+        ctx,
+      );
+    return verification;
   });
 
   readonly requestVerification = (rawInput: unknown, ctx?: ExtensionContext) =>
@@ -2090,7 +2178,16 @@ export class ManagerController {
     const input = yield* decodeAgentSpawnInput(rawInput);
     const active = yield* this.requireActive();
     const snapshot = yield* this.requirePinnedChildRuntime('agent_spawn');
-    return yield* active.attachments.spawn(input, snapshot.workerExtensionPath, ctx);
+    const agent = yield* active.attachments.spawn(input, snapshot.workerExtensionPath, ctx);
+    const intent = active.state.workstreamCompletionIntents[agent.workstreamId];
+    if (intent)
+      yield* this.cancelWorkstreamCompletionIntent(
+        active,
+        intent,
+        `new child ${agent.id} acquired workstream activity`,
+        ctx,
+      );
+    return agent;
   });
 
   readonly spawnAgent = (rawInput: AgentSpawnInput, ctx?: ExtensionContext) =>
@@ -2154,6 +2251,12 @@ export class ManagerController {
     const state = yield* this.refresh(ctx);
     if (!state.agents[agentId]) return yield* new AgentNotFoundError({ agentId });
     const delivery = yield* this.workers.send(agentId, message, behavior);
+    yield* this.cancelWorkstreamCompletionIntentForAgent(
+      active,
+      agentId,
+      `accepted ${delivery.deliveredAs} message revoked prior terminal-report authorization`,
+      ctx,
+    );
     const timestamp = yield* nowIso;
     const routing =
       delivery.requestedBehavior === delivery.deliveredAs
@@ -2225,6 +2328,12 @@ export class ManagerController {
             : error,
         ),
       );
+    yield* this.cancelWorkstreamCompletionIntentForAgent(
+      active,
+      input.agentId,
+      'accepted report handoff revoked prior terminal-report authorization',
+      ctx,
+    );
     const timestamp = yield* nowIso;
     yield* this.appendEventSafely(
       active.store,
@@ -2541,6 +2650,12 @@ export class ManagerController {
     const { agentId } = yield* decodeAgentIdInput({ agentId: rawAgentId });
     const active = yield* this.requireActive();
     const stopped = yield* active.attachments.stop(agentId, ctx);
+    yield* this.settleWorkstreamCompletionIntentForAgent(
+      active,
+      stopped.id,
+      stopped.lifecycleGeneration,
+      ctx,
+    );
     // A merge can race a deliberately retained owner that was briefly revived
     // for bounded diagnosis. Stopping that owner is a safe retry edge for the
     // already-terminal stream; open gates and other blockers still fail closed.

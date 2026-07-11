@@ -107,7 +107,7 @@ export function registerWorkstreamDomainTools(pi: ExtensionAPI, manager: Manager
 
   registerPardesTool(pi, {
     description:
-      'Complete a Pardes workstream and safely stop its idle attached children while preserving worktrees, branch history, sessions, reports, and review gates. In the narrow terminal-report-to-idle race, stores one bounded generation-owned intent and completes automatically only after authoritative idle edges. Fails closed without interrupting genuinely busy/nonterminal children or unresolved open-review owners.',
+      'Complete a Pardes workstream and safely stop its idle attached children while preserving worktrees, branch history, sessions, reports, and review gates. In the narrow terminal-report-to-idle race, stores one bounded generation-owned intent and completes automatically only after authoritative idle or terminal edges; accepted follow-up work revokes it. Fails closed without interrupting genuinely busy/nonterminal children or unresolved open-review owners.',
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runTool(manager.completeWorkstream(params.workstreamId, ctx));
       if (!result.ok) return textResult(`Error: ${result.error}`);

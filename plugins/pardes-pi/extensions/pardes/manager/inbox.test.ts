@@ -4,11 +4,11 @@ import { type InboxWake, initialManagerState, type ManagerEvent } from './domain
 import {
   inboxWakeAgeMs,
   inboxWakeToken,
-  isManagerInboxWakeMessage,
   MANAGER_INBOX_WAKE_MAX_CHARS,
   MANAGER_INBOX_WAKE_MAX_ROW_CHARS,
   MANAGER_INBOX_WAKE_MAX_ROWS,
   makeInboxWake,
+  managerInboxWakeMessageIdentity,
   projectInboxAttention,
   renderInboxWakeMessage,
   retainCurrentInboxWake,
@@ -45,14 +45,27 @@ function render(inbox: ReadonlyArray<ManagerEvent>) {
 }
 
 describe('manager inbox notification projection', () => {
-  test('recognizes only the exact Pi custom-message shape owned by inbox presentation', () => {
+  test('identifies only complete bounded renderer output and changes identity with wake content', () => {
     const inbox = [event('event-1')];
-    const message = { ...render(inbox), role: 'custom' as const };
+    const outbound = render(inbox);
+    const message = { ...outbound, role: 'custom' as const, timestamp: 0 };
+    const identity = managerInboxWakeMessageIdentity(outbound);
 
-    expect(isManagerInboxWakeMessage(message)).toBe(true);
-    expect(isManagerInboxWakeMessage({ ...message, role: 'user' })).toBe(false);
-    expect(isManagerInboxWakeMessage({ ...message, details: { type: 'other' } })).toBe(false);
-    expect(isManagerInboxWakeMessage({ ...message, customType: 'other' })).toBe(false);
+    expect(identity).toMatch(/^[a-f0-9]{64}$/);
+    expect(managerInboxWakeMessageIdentity(message)).toBe(identity);
+    expect(managerInboxWakeMessageIdentity({ ...message, role: 'user' })).toBeUndefined();
+    expect(
+      managerInboxWakeMessageIdentity({
+        ...message,
+        details: { ...message.details, wakeToken: 'wake-0000000000000000' },
+      }),
+    ).not.toBe(identity);
+    for (const details of [
+      { type: 'manager_inbox_wake' },
+      { ...message.details, cursor: undefined },
+      { ...message.details, extra: true },
+    ])
+      expect(managerInboxWakeMessageIdentity({ ...message, details })).toBeUndefined();
   });
 
   test('creates a stable wake token through at most one inspectable durable inbox batch', () => {

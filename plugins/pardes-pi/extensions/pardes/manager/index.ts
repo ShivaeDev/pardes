@@ -175,9 +175,9 @@ export {
 } from './idle-disposition.ts';
 export {
   type InboxAttentionProjection,
-  isManagerInboxWakeMessage,
   type ManagerInboxWakeMessage,
   makeInboxWake,
+  managerInboxWakeMessageIdentity,
   projectInboxAttention,
   renderInboxWakeMessage,
 } from './inbox.ts';

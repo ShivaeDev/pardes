@@ -11,6 +11,7 @@ import { type CanonicalReport, REPORT_DETAILS_MAX_CHARS } from '../reporting/ind
 import { requiredValue } from '../test-support.ts';
 import {
   REPORT_DELIVERY_COMPACTION_TIMEOUT_MS,
+  REPORT_DELIVERY_OWNED_WAKE_TIMEOUT_MS,
   ReportDeliveryCoordinator,
   type ReportDeliveryScheduler,
   registerReportDelivery,
@@ -117,6 +118,22 @@ function deliveredMessage(sent: { readonly message: unknown }) {
   };
 }
 
+function ownedWakeMessage(id: string, suffixCount = 0) {
+  const createdAt = new Date(0).toISOString();
+  const inbox: ManagerEvent[] = Array.from({ length: suffixCount + 1 }, (_, index) => ({
+    createdAt,
+    id: index === 0 ? id : `${id}-suffix-${index}`,
+    summary: `Durable attention ${index + 1}`,
+    type: 'agent_question',
+  }));
+  const wake = requiredValue(makeInboxWake('manager-owned-wake', inbox, createdAt));
+  return {
+    ...renderInboxWakeMessage({ inbox, wake }),
+    role: 'custom' as const,
+    timestamp: 0,
+  };
+}
+
 const stoppedRun = [{ role: 'assistant', stopReason: 'stop' }];
 const abortedRun = [{ role: 'assistant', stopReason: 'aborted' }];
 
@@ -215,6 +232,7 @@ describe('canonical report delivery', () => {
     const wakeMessage = {
       ...renderInboxWakeMessage({ inbox, wake }),
       role: 'custom' as const,
+      timestamp: 0,
     };
     expect(wakeMessage.details).toMatchObject({
       cursor: 'event-4',
@@ -223,9 +241,11 @@ describe('canonical report delivery', () => {
       type: 'manager_inbox_wake',
     });
 
+    expect(delivery.registerOwnedWake(wakeMessage, ctx)).toBe(true);
     delivery.observeCompactionStart(ctx);
     delivery.observeMessageStart(wakeMessage, ctx);
     delivery.observeMessageEnd(wakeMessage);
+    delivery.observeAgentEnd(stoppedRun, ctx);
     expect(delivery.activeReportId).toBe('report-one');
     expect(released).toEqual([]);
     delivery.observeCompactionFailure(ctx);
@@ -247,6 +267,86 @@ describe('canonical report delivery', () => {
           (message as { customType?: unknown }).customType === REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
       ),
     ).toEqual([]);
+
+    const compacted = harness();
+    startDelivery(compacted.delivery, report('x'.repeat(80_000)), 'tool-wake-compact-success');
+    compacted.delivery.observeAgentEnd(stoppedRun, compacted.ctx);
+    const compactedWake = ownedWakeMessage('event-compact-success');
+    expect(compacted.delivery.registerOwnedWake(compactedWake, compacted.ctx)).toBe(true);
+    compacted.delivery.observeCompactionStart(compacted.ctx);
+    compacted.delivery.observeMessageStart(compactedWake, compacted.ctx);
+    compacted.delivery.observeMessageEnd(compactedWake);
+    compacted.delivery.observeCompactionComplete(compacted.ctx);
+    expect(compacted.tasks.filter((task) => !task.cancelled).map(({ delayMs }) => delayMs)).toEqual(
+      [REPORT_DELIVERY_OWNED_WAKE_TIMEOUT_MS],
+    );
+    compacted.delivery.observeAgentEnd(stoppedRun, compacted.ctx);
+    compacted.runNext();
+    expect(compacted.sent[0]?.message).toMatchObject({ details: { part: 1 } });
+  });
+
+  test('settles one exact owned wake run without truncation in every report phase', () => {
+    const cancellationCount = (sent: ReadonlyArray<{ readonly message: unknown }>) =>
+      sent.filter(
+        ({ message }) =>
+          (message as { customType?: unknown }).customType === REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+      ).length;
+
+    const initial = harness();
+    startDelivery(initial.delivery, report('x'.repeat(80_000)), 'tool-initial-interlude');
+    const initialWake = ownedWakeMessage('event-initial');
+    expect(initial.delivery.registerOwnedWake(initialWake, initial.ctx)).toBe(true);
+    initial.delivery.observeMessageStart(initialWake, initial.ctx);
+    initial.delivery.observeMessageEnd(initialWake);
+    initial.delivery.observeAgentEnd(stoppedRun, initial.ctx);
+    initial.runNext();
+    expect(initial.sent[0]?.message).toMatchObject({ details: { part: 1 } });
+    expect(cancellationCount(initial.sent)).toBe(0);
+
+    const waiting = harness();
+    startDelivery(waiting.delivery, report('x'.repeat(80_000)), 'tool-waiting-interlude');
+    waiting.delivery.observeAgentEnd(stoppedRun, waiting.ctx);
+    const waitingWake = ownedWakeMessage('event-waiting');
+    expect(waiting.delivery.registerOwnedWake(waitingWake, waiting.ctx)).toBe(true);
+    waiting.delivery.observeMessageStart(waitingWake, waiting.ctx);
+    waiting.delivery.observeMessageEnd(waitingWake);
+    waiting.delivery.observeAgentEnd(stoppedRun, waiting.ctx);
+    waiting.runNext();
+    expect(waiting.sent[0]?.message).toMatchObject({ details: { part: 1 } });
+    expect(cancellationCount(waiting.sent)).toBe(0);
+
+    const dispatching = harness();
+    startDelivery(dispatching.delivery, report('x'.repeat(80_000)), 'tool-dispatching-interlude');
+    dispatching.delivery.observeAgentEnd(stoppedRun, dispatching.ctx);
+    dispatching.runNext();
+    const dispatchingWake = ownedWakeMessage('event-dispatching');
+    expect(dispatching.delivery.registerOwnedWake(dispatchingWake, dispatching.ctx)).toBe(true);
+    dispatching.delivery.observeMessageStart(dispatchingWake, dispatching.ctx);
+    dispatching.delivery.observeMessageEnd(dispatchingWake);
+    dispatching.delivery.observeAgentEnd(stoppedRun, dispatching.ctx);
+    const dispatchedPart = deliveredMessage(requiredValue(dispatching.sent[0]));
+    dispatching.delivery.observeMessageStart(dispatchedPart, dispatching.ctx);
+    dispatching.delivery.observeMessageEnd(dispatchedPart);
+    dispatching.delivery.observeAgentEnd(stoppedRun, dispatching.ctx);
+    dispatching.runNext();
+    expect(dispatching.sent[1]?.message).toMatchObject({ details: { part: 2 } });
+    expect(cancellationCount(dispatching.sent)).toBe(0);
+
+    const partRun = harness();
+    startDelivery(partRun.delivery, report('x'.repeat(80_000)), 'tool-part-interlude');
+    partRun.delivery.observeAgentEnd(stoppedRun, partRun.ctx);
+    partRun.runNext();
+    const acknowledgedPart = deliveredMessage(requiredValue(partRun.sent[0]));
+    partRun.delivery.observeMessageStart(acknowledgedPart, partRun.ctx);
+    partRun.delivery.observeMessageEnd(acknowledgedPart);
+    const partWake = ownedWakeMessage('event-part');
+    expect(partRun.delivery.registerOwnedWake(partWake, partRun.ctx)).toBe(true);
+    partRun.delivery.observeMessageStart(partWake, partRun.ctx);
+    partRun.delivery.observeMessageEnd(partWake);
+    partRun.delivery.observeAgentEnd(stoppedRun, partRun.ctx);
+    partRun.runNext();
+    expect(partRun.sent[1]?.message).toMatchObject({ details: { part: 2 } });
+    expect(cancellationCount(partRun.sent)).toBe(0);
   });
 
   test('keeps aggregate report contribution bounded while spanning a maximum-size report across runs', () => {
@@ -424,6 +524,83 @@ describe('canonical report delivery', () => {
     reloaded.delivery.observeAgentEnd(abortedRun, reloaded.ctx);
     expect(reloaded.delivery.activeReportId).toBeUndefined();
     expect(reloaded.tasks.filter((task) => !task.cancelled)).toEqual([]);
+  });
+
+  test('cancels unregistered, mismatched, duplicate, and replayed owned-wake lookalikes', () => {
+    const unregistered = harness();
+    startDelivery(unregistered.delivery, report('x'.repeat(80_000)), 'tool-unregistered');
+    unregistered.delivery.observeMessageStart(
+      ownedWakeMessage('event-unregistered'),
+      unregistered.ctx,
+    );
+    expect(unregistered.delivery.activeReportId).toBeUndefined();
+    expect(unregistered.sent[0]?.message).toMatchObject({
+      details: { reason: 'unrelated_input' },
+    });
+    const mismatched = harness();
+    startDelivery(mismatched.delivery, report('x'.repeat(80_000)), 'tool-mismatched');
+    const expected = ownedWakeMessage('event-expected');
+    expect(mismatched.delivery.registerOwnedWake(expected, mismatched.ctx)).toBe(true);
+    const wrongToken = {
+      ...expected,
+      details: { ...expected.details, wakeToken: 'wake-0000000000000000' },
+    };
+    mismatched.delivery.observeMessageStart(wrongToken, mismatched.ctx);
+    expect(mismatched.delivery.activeReportId).toBeUndefined();
+    expect(mismatched.sent[0]?.message).toMatchObject({
+      details: { reason: 'unrelated_input' },
+    });
+
+    const duplicate = harness();
+    startDelivery(duplicate.delivery, report('x'.repeat(80_000)), 'tool-duplicate');
+    const duplicateWake = ownedWakeMessage('event-duplicate');
+    expect(duplicate.delivery.registerOwnedWake(duplicateWake, duplicate.ctx)).toBe(true);
+    expect(duplicate.delivery.registerOwnedWake(duplicateWake, duplicate.ctx)).toBe(false);
+    duplicate.delivery.observeMessageStart(duplicateWake, duplicate.ctx);
+    duplicate.delivery.observeMessageEnd(duplicateWake);
+    duplicate.delivery.observeMessageStart(duplicateWake, duplicate.ctx);
+    expect(duplicate.delivery.activeReportId).toBeUndefined();
+
+    const incomplete = harness();
+    startDelivery(incomplete.delivery, report('x'.repeat(80_000)), 'tool-incomplete');
+    const incompleteWake = ownedWakeMessage('event-incomplete');
+    expect(incomplete.delivery.registerOwnedWake(incompleteWake, incomplete.ctx)).toBe(true);
+    incomplete.delivery.observeMessageStart(incompleteWake, incomplete.ctx);
+    incomplete.delivery.observeAgentEnd(stoppedRun, incomplete.ctx);
+    expect(incomplete.delivery.activeReportId).toBeUndefined();
+    expect(incomplete.sent[0]?.message).toMatchObject({
+      details: { reason: 'settlement_mismatch' },
+    });
+
+    const timedOut = harness();
+    startDelivery(timedOut.delivery, report('x'.repeat(80_000)), 'tool-wake-timeout');
+    timedOut.delivery.observeAgentEnd(stoppedRun, timedOut.ctx);
+    const timedOutWake = ownedWakeMessage('event-timeout');
+    expect(timedOut.delivery.registerOwnedWake(timedOutWake, timedOut.ctx)).toBe(true);
+    expect(timedOut.tasks.findLast((task) => !task.cancelled)?.delayMs).toBe(
+      REPORT_DELIVERY_OWNED_WAKE_TIMEOUT_MS,
+    );
+    timedOut.runNext();
+    expect(timedOut.delivery.activeReportId).toBeUndefined();
+    expect(timedOut.sent[0]?.message).toMatchObject({
+      details: { reason: 'owned_wake_timeout' },
+    });
+    expect(timedOut.released).toEqual([timedOut.ctx]);
+
+    const replay = harness();
+    startDelivery(replay.delivery, report('x'.repeat(80_000)), 'tool-replay');
+    replay.delivery.observeAgentEnd(stoppedRun, replay.ctx);
+    const replayWake = ownedWakeMessage('event-replay');
+    expect(replay.delivery.registerOwnedWake(replayWake, replay.ctx)).toBe(true);
+    replay.delivery.observeMessageStart(replayWake, replay.ctx);
+    replay.delivery.observeMessageEnd(replayWake);
+    replay.delivery.observeAgentEnd(stoppedRun, replay.ctx);
+    expect(replay.delivery.activeReportId).toBe('report-one');
+    replay.delivery.observeMessageStart(replayWake, replay.ctx);
+    expect(replay.delivery.activeReportId).toBeUndefined();
+    expect(replay.sent[0]?.message).toMatchObject({
+      details: { reason: 'unrelated_input' },
+    });
   });
 
   test('fails closed on unrelated interleaving and resumes known failed compaction', () => {

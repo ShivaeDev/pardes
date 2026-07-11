@@ -4621,9 +4621,14 @@ describe('manager controller', () => {
     const fixture = harness(repo);
     const workers = stubWorkers();
     let held = true;
+    const registeredWakes: unknown[] = [];
     const inboxWakeHold = {
       get isHoldingOwnedWakes() {
         return held;
+      },
+      registerOwnedWake(message: unknown) {
+        registeredWakes.push(message);
+        return false;
       },
     };
     const controller = new ManagerController(fixture.pi, {
@@ -4663,6 +4668,7 @@ describe('manager controller', () => {
 
     expect(controller.snapshot()?.inbox).toHaveLength(1);
     expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    expect(registeredWakes).toEqual([]);
     expect(fixture.messages).toEqual([]);
     await Effect.runPromise(controller.shutdown(fixture.ctx));
 
@@ -4677,6 +4683,14 @@ describe('manager controller', () => {
 
     expect(restored.snapshot()?.inbox.map(({ id }) => id)).toEqual([cursor]);
     expect(restored.snapshot()?.inboxWake?.cursor).toBe(cursor);
+    expect(registeredWakes).toHaveLength(1);
+    expect(registeredWakes[0]).toEqual(fixture.messages[0]?.message);
+    expect(registeredWakes[0]).toMatchObject({
+      details: {
+        cursor: restored.snapshot()?.inboxWake?.cursor,
+        wakeToken: restored.snapshot()?.inboxWake?.token,
+      },
+    });
     expect(fixture.messages[0]?.message).toMatchObject({
       customType: 'pardes-worker-event',
       details: { cursor, pendingCount: 1, queuedSuffixCount: 0, type: 'manager_inbox_wake' },

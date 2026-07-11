@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { isManagerInboxWakeMessage } from '../manager/index.ts';
+import { type ManagerInboxWakeMessage, managerInboxWakeMessageIdentity } from '../manager/index.ts';
 import type { CanonicalReport, CanonicalReportMetadata } from '../reporting/index.ts';
 import { sanitizeReportDeliveryCompactionPreparation } from './report-delivery-compaction.ts';
 import {
@@ -8,7 +8,6 @@ import {
   type DeliveryMessageDetails,
   isReportDeliveryCustomMessage,
   isReportDeliveryMessage,
-  isReportDeliveryOutcomeMessage,
   partitionCanonicalReport,
   REPORT_DELIVERY_DETAIL_TYPE,
   REPORT_DELIVERY_MESSAGE_TYPE,
@@ -19,6 +18,7 @@ import {
 } from './report-delivery-content.ts';
 
 export const REPORT_DELIVERY_COMPACTION_TIMEOUT_MS = 5 * 60 * 1_000;
+export const REPORT_DELIVERY_OWNED_WAKE_TIMEOUT_MS = 5 * 60 * 1_000;
 const REPORT_DELIVERY_SETTLEMENT_RETRY_MS = 10;
 
 export interface ReportDeliveryStartMetadata extends CanonicalReportMetadata {
@@ -38,6 +38,12 @@ interface ActiveReportDelivery extends CanonicalReportDelivery {
   acknowledgedPart?: number;
   nextPart: number;
   phase: DeliveryPhase;
+}
+
+interface OwnedWakeInterlude {
+  ended: boolean;
+  readonly identity: string;
+  started: boolean;
 }
 
 export interface ReportDeliveryScheduler {
@@ -88,9 +94,11 @@ export class ReportDeliveryCoordinator {
   private active: ActiveReportDelivery | undefined;
   private cancelDispatch: (() => void) | undefined;
   private cancelCompactionTimeout: (() => void) | undefined;
+  private cancelOwnedWakeTimeout: (() => void) | undefined;
   private compactionInProgress = false;
   private acceptingDeliveries = true;
   private deliveryEpoch = 0;
+  private ownedWakeInterlude: OwnedWakeInterlude | undefined;
   private releaseOwnedWake: ReportDeliveryHoldRelease | undefined;
 
   constructor(
@@ -113,6 +121,22 @@ export class ReportDeliveryCoordinator {
 
   onOwnedWakeRelease(release: ReportDeliveryHoldRelease): void {
     this.releaseOwnedWake = release;
+  }
+
+  registerOwnedWake(message: ManagerInboxWakeMessage, ctx: ExtensionContext): boolean {
+    const identity = managerInboxWakeMessageIdentity(message);
+    if (!identity || !this.active || this.ownedWakeInterlude) return false;
+    this.ownedWakeInterlude = { ended: false, identity, started: false };
+    if (this.active.phase === 'waiting_for_settlement') this.cancelScheduledDispatch();
+    this.cancelOwnedWakeTimeout?.();
+    this.cancelOwnedWakeTimeout = this.scheduler.schedule(
+      REPORT_DELIVERY_OWNED_WAKE_TIMEOUT_MS,
+      () => {
+        if (this.active && this.ownedWakeInterlude?.identity === identity)
+          this.cancelActive('owned_wake_timeout', ctx);
+      },
+    );
+    return true;
   }
 
   capturePermit(): ReportDeliveryPermit | undefined {
@@ -177,10 +201,19 @@ export class ReportDeliveryCoordinator {
       active.phase = 'part_run';
       return;
     }
-    // Manager inbox wakes are the other half of this owned coordination. The
-    // scheduler normally defers them, but tolerating an already-released exact
-    // shape closes the mint/send race without weakening foreign-input failure.
-    if (isManagerInboxWakeMessage(message) || isReportDeliveryOutcomeMessage(message)) return;
+    const wakeIdentity = managerInboxWakeMessageIdentity(message);
+    const interlude = this.ownedWakeInterlude;
+    if (
+      (message as { readonly role?: unknown })?.role === 'custom' &&
+      wakeIdentity !== undefined &&
+      interlude !== undefined &&
+      !interlude.started &&
+      wakeIdentity === interlude.identity
+    ) {
+      this.cancelScheduledDispatch();
+      interlude.started = true;
+      return;
+    }
     if (
       message &&
       typeof message === 'object' &&
@@ -192,11 +225,17 @@ export class ReportDeliveryCoordinator {
 
   observeMessageEnd(message: unknown): void {
     const active = this.active;
+    if (!active) return;
+    const interlude = this.ownedWakeInterlude;
     if (
-      !active ||
-      !isReportDeliveryMessage(message) ||
-      !this.matchesExpectedPart(active, message.details)
-    )
+      interlude?.started &&
+      !interlude.ended &&
+      managerInboxWakeMessageIdentity(message) === interlude.identity
+    ) {
+      interlude.ended = true;
+      return;
+    }
+    if (!isReportDeliveryMessage(message) || !this.matchesExpectedPart(active, message.details))
       return;
     active.acknowledgedPart = active.nextPart;
   }
@@ -210,23 +249,24 @@ export class ReportDeliveryCoordinator {
       return;
     }
     if (stopReason !== 'stop' && stopReason !== 'length') return;
+    const interlude = this.ownedWakeInterlude;
+    if (interlude?.started) {
+      if (!interlude.ended) {
+        this.cancelActive('settlement_mismatch', ctx);
+        return;
+      }
+      this.cancelOwnedWakeTimeout?.();
+      this.cancelOwnedWakeTimeout = undefined;
+      this.ownedWakeInterlude = undefined;
+      this.settleOwnedWakeInterlude(active, ctx);
+      return;
+    }
     if (active.phase === 'initial_run') {
       active.phase = 'waiting_for_settlement';
       this.scheduleDispatch(ctx, 0);
       return;
     }
-    if (active.phase !== 'part_run' || active.acknowledgedPart !== active.nextPart) {
-      this.cancelActive('settlement_mismatch', ctx);
-      return;
-    }
-    if (active.nextPart + 1 === active.ranges.length) {
-      this.completeActive(ctx);
-      return;
-    }
-    active.nextPart += 1;
-    active.acknowledgedPart = undefined;
-    active.phase = 'waiting_for_settlement';
-    this.scheduleDispatch(ctx, 0);
+    this.settleReportPart(active, ctx);
   }
 
   observeCompactionStart(ctx?: ExtensionContext): void {
@@ -280,7 +320,10 @@ export class ReportDeliveryCoordinator {
     this.cancelScheduledDispatch();
     this.cancelCompactionTimeout?.();
     this.cancelCompactionTimeout = undefined;
+    this.cancelOwnedWakeTimeout?.();
+    this.cancelOwnedWakeTimeout = undefined;
     this.compactionInProgress = false;
+    this.ownedWakeInterlude = undefined;
     this.active = undefined;
     return active;
   }
@@ -288,14 +331,15 @@ export class ReportDeliveryCoordinator {
   private cancelActive(reason: ReportDeliveryCancellationReason, ctx?: ExtensionContext): void {
     const active = this.resetActive();
     if (!active) return;
+    const outcome = renderReportDeliveryCancellation({
+      deliveryId: active.deliveryId,
+      nextPart: active.nextPart + 1,
+      parts: active.ranges.length,
+      reason,
+      reportId: active.report.reportId,
+    });
     this.pi.sendMessage(
-      renderReportDeliveryCancellation({
-        deliveryId: active.deliveryId,
-        nextPart: active.nextPart + 1,
-        parts: active.ranges.length,
-        reason,
-        reportId: active.report.reportId,
-      }),
+      outcome,
       // While streaming this is a bounded steering record; while idle Pi
       // appends it without starting an unsolicited model run.
       { deliverAs: 'steer' },
@@ -306,6 +350,35 @@ export class ReportDeliveryCoordinator {
   private completeActive(ctx: ExtensionContext): void {
     if (!this.resetActive()) return;
     this.releaseOwnedWake?.(ctx);
+  }
+
+  private settleOwnedWakeInterlude(active: ActiveReportDelivery, ctx: ExtensionContext): void {
+    if (active.phase === 'initial_run') {
+      active.phase = 'waiting_for_settlement';
+      this.scheduleDispatch(ctx, 0);
+      return;
+    }
+    if (active.phase === 'waiting_for_settlement') {
+      this.scheduleDispatch(ctx, 0);
+      return;
+    }
+    if (active.phase === 'dispatching') return;
+    this.settleReportPart(active, ctx);
+  }
+
+  private settleReportPart(active: ActiveReportDelivery, ctx: ExtensionContext): void {
+    if (active.phase !== 'part_run' || active.acknowledgedPart !== active.nextPart) {
+      this.cancelActive('settlement_mismatch', ctx);
+      return;
+    }
+    if (active.nextPart + 1 === active.ranges.length) {
+      this.completeActive(ctx);
+      return;
+    }
+    active.nextPart += 1;
+    active.acknowledgedPart = undefined;
+    active.phase = 'waiting_for_settlement';
+    this.scheduleDispatch(ctx, 0);
   }
 
   private matchesExpectedPart(
@@ -322,7 +395,13 @@ export class ReportDeliveryCoordinator {
 
   private scheduleDispatch(ctx: ExtensionContext, delayMs: number): void {
     const active = this.active;
-    if (!active || active.phase !== 'waiting_for_settlement' || this.compactionInProgress) return;
+    if (
+      !active ||
+      active.phase !== 'waiting_for_settlement' ||
+      this.compactionInProgress ||
+      this.ownedWakeInterlude
+    )
+      return;
     this.cancelScheduledDispatch();
     const deliveryIdentity = active.deliveryId;
     const expectedPart = active.nextPart;
@@ -334,7 +413,8 @@ export class ReportDeliveryCoordinator {
         current.deliveryId !== deliveryIdentity ||
         current.nextPart !== expectedPart ||
         current.phase !== 'waiting_for_settlement' ||
-        this.compactionInProgress
+        this.compactionInProgress ||
+        this.ownedWakeInterlude
       )
         return;
       if (!ctx.isIdle()) {

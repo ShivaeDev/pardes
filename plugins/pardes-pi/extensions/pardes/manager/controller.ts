@@ -87,6 +87,7 @@ import {
 import {
   type InboxWakeRelease,
   inboxThroughCursor,
+  type ManagerInboxWakeMessage,
   makeInboxWake,
   projectInboxAttention,
   renderInboxWakeMessage,
@@ -297,6 +298,8 @@ export interface AgentReloadResult {
 export interface ManagerInboxWakeHold {
   /** Transient owned-delivery hold; durable inbox state remains the retry authority. */
   readonly isHoldingOwnedWakes: boolean;
+  /** Register the exact cursor message immediately before its irreversible Pi injection. */
+  readonly registerOwnedWake?: (message: ManagerInboxWakeMessage, ctx: ExtensionContext) => boolean;
 }
 
 export interface ManagerControllerOptions {
@@ -926,7 +929,9 @@ export class ManagerController {
         timestamp,
       ),
     );
-    this.pi.sendMessage(renderInboxWakeMessage(release), {
+    const message = renderInboxWakeMessage(release);
+    this.inboxWakeHold?.registerOwnedWake?.(message, ctx);
+    this.pi.sendMessage(message, {
       deliverAs: 'followUp',
       triggerTurn: true,
     });

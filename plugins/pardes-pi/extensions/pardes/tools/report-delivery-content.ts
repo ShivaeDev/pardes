@@ -51,6 +51,7 @@ export type ReportDeliveryCancellationReason =
   | 'delivery_marker_mismatch'
   | 'manager_lifecycle_change'
   | 'manager_stopped'
+  | 'owned_wake_timeout'
   | 'session_reload'
   | 'session_shutdown'
   | 'settlement_mismatch'
@@ -82,20 +83,6 @@ export function renderReportDeliveryCancellation(cancellation: ReportDeliveryCan
     },
     display: true,
   } as const;
-}
-
-export function isReportDeliveryOutcomeMessage(message: unknown): boolean {
-  if (!message || typeof message !== 'object') return false;
-  const candidate = message as {
-    readonly role?: unknown;
-    readonly customType?: unknown;
-    readonly details?: { readonly type?: unknown };
-  };
-  return (
-    candidate.role === 'custom' &&
-    candidate.customType === REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE &&
-    candidate.details?.type === REPORT_DELIVERY_CANCELLED_DETAIL_TYPE
-  );
 }
 
 export interface ReportDeliveryCustomMessage {

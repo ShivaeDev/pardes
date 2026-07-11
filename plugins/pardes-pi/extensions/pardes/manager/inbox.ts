@@ -55,26 +55,104 @@ export interface InboxWakeRelease {
 }
 
 export interface ManagerInboxWakeMessage {
-  readonly role: 'custom';
+  readonly content: string;
   readonly customType: typeof MANAGER_INBOX_WAKE_MESSAGE_TYPE;
   readonly details: {
+    readonly cursor: string;
+    readonly digestCount: number;
+    readonly omittedCount: number;
+    readonly pendingCount: number;
+    readonly queuedSuffixCount: number;
+    readonly staleCursor: boolean;
     readonly type: typeof MANAGER_INBOX_WAKE_DETAIL_TYPE;
+    readonly wakeToken: string;
   };
+  readonly display: true;
 }
 
-/** Match only Pardes-owned inbox presentation; malformed or unrelated custom input stays foreign. */
-export function isManagerInboxWakeMessage(message: unknown): message is ManagerInboxWakeMessage {
-  if (!message || typeof message !== 'object') return false;
-  const candidate = message as {
+const MANAGER_INBOX_WAKE_MESSAGE_KEYS = ['content', 'customType', 'details', 'display'] as const;
+const MANAGER_INBOX_WAKE_RUNTIME_MESSAGE_KEYS = [
+  ...MANAGER_INBOX_WAKE_MESSAGE_KEYS,
+  'role',
+  'timestamp',
+] as const;
+const MANAGER_INBOX_WAKE_DETAIL_KEYS = [
+  'cursor',
+  'digestCount',
+  'omittedCount',
+  'pendingCount',
+  'queuedSuffixCount',
+  'staleCursor',
+  'type',
+  'wakeToken',
+] as const;
+
+/**
+ * Produce a bounded identity for one complete renderer output. Registration of
+ * this identity, not shape recognition alone, grants one report-delivery interlude.
+ */
+export function managerInboxWakeMessageIdentity(message: unknown): string | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const candidate = message as Partial<ManagerInboxWakeMessage> & {
     readonly role?: unknown;
-    readonly customType?: unknown;
-    readonly details?: { readonly type?: unknown };
+    readonly timestamp?: unknown;
   };
-  return (
-    candidate.role === 'custom' &&
-    candidate.customType === MANAGER_INBOX_WAKE_MESSAGE_TYPE &&
-    candidate.details?.type === MANAGER_INBOX_WAKE_DETAIL_TYPE
-  );
+  const keys = Object.keys(candidate).sort().join('\0');
+  const outboundKeys = [...MANAGER_INBOX_WAKE_MESSAGE_KEYS].sort().join('\0');
+  const runtimeKeys = [...MANAGER_INBOX_WAKE_RUNTIME_MESSAGE_KEYS].sort().join('\0');
+  if (
+    (keys !== outboundKeys && keys !== runtimeKeys) ||
+    (candidate.role !== undefined && candidate.role !== 'custom') ||
+    (candidate.timestamp !== undefined && typeof candidate.timestamp !== 'number') ||
+    candidate.customType !== MANAGER_INBOX_WAKE_MESSAGE_TYPE ||
+    candidate.display !== true ||
+    typeof candidate.content !== 'string' ||
+    candidate.content.length > MANAGER_INBOX_WAKE_MAX_CHARS ||
+    !candidate.details ||
+    typeof candidate.details !== 'object'
+  )
+    return undefined;
+  const details = candidate.details as Partial<ManagerInboxWakeMessage['details']>;
+  if (
+    Object.keys(details).sort().join('\0') !==
+      [...MANAGER_INBOX_WAKE_DETAIL_KEYS].sort().join('\0') ||
+    details.type !== MANAGER_INBOX_WAKE_DETAIL_TYPE ||
+    typeof details.cursor !== 'string' ||
+    details.cursor.length === 0 ||
+    typeof details.wakeToken !== 'string' ||
+    !/^wake-[a-f0-9]{16}$/.test(details.wakeToken) ||
+    !Number.isInteger(details.pendingCount) ||
+    Number(details.pendingCount) < 1 ||
+    Number(details.pendingCount) > MANAGER_INBOX_WAKE_MAX_ROWS ||
+    !Number.isInteger(details.digestCount) ||
+    Number(details.digestCount) < 0 ||
+    Number(details.digestCount) > MANAGER_INBOX_WAKE_MAX_ROWS ||
+    !Number.isInteger(details.omittedCount) ||
+    Number(details.omittedCount) < 0 ||
+    !Number.isInteger(details.queuedSuffixCount) ||
+    Number(details.queuedSuffixCount) < 0 ||
+    typeof details.staleCursor !== 'boolean'
+  )
+    return undefined;
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        content: candidate.content,
+        customType: candidate.customType,
+        details: {
+          cursor: details.cursor,
+          digestCount: details.digestCount,
+          omittedCount: details.omittedCount,
+          pendingCount: details.pendingCount,
+          queuedSuffixCount: details.queuedSuffixCount,
+          staleCursor: details.staleCursor,
+          type: details.type,
+          wakeToken: details.wakeToken,
+        },
+        display: candidate.display,
+      }),
+    )
+    .digest('hex');
 }
 
 export interface InboxAttentionProjection {

@@ -5,6 +5,7 @@ import type { ManagerEvent, ManagerState } from '../manager/index.ts';
 import type { AgentReport, ReportArtifactError } from '../reporting/index.ts';
 import { decodeState, encodeEvent, encodeReport, encodeState, parseStateJson } from './codecs.ts';
 import type { StoreError } from './errors.ts';
+import { scanAndRepairEventIdentity } from './event-log.ts';
 import { ensureDirectory, fsPromise, writeJsonAtomically } from './filesystem.ts';
 import { inspectFileSystemStorage, type StorageInspection } from './inspection.ts';
 import {
@@ -31,6 +32,7 @@ export interface StateStoreShape {
     mutation: (state: ManagerState) => Effect.Effect<readonly [A, ManagerState], E>,
   ) => Effect.Effect<A, StoreError | E>;
   readonly appendEvent: (event: ManagerEvent) => Effect.Effect<void, StoreError>;
+  readonly appendEventOnce: (event: ManagerEvent) => Effect.Effect<void, StoreError>;
   readonly writeReport: (report: AgentReport) => Effect.Effect<string, StoreError>;
   readonly readReport: (reportId: string) => Effect.Effect<AgentReport, ReportArtifactError>;
   readonly inspectStorage: () => Effect.Effect<StorageInspection>;
@@ -82,14 +84,26 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
         return result;
       }),
     );
+  const appendEventUnlocked = Effect.fnUntraced(function* (event: ManagerEvent) {
+    yield* ensureManagerDirectory();
+    const encoded = yield* encodeEvent(eventPath, event);
+    const source = `${JSON.stringify(encoded)}\n`;
+    yield* validateSerializedEventWrite(eventPath, source);
+    yield* fsPromise('append event', eventPath, () => appendFile(eventPath, source, 'utf8'));
+  });
   const appendEventToLog = (event: ManagerEvent) =>
+    semaphore.withPermit(
+      scanAndRepairEventIdentity(eventPath, event.id).pipe(
+        Effect.andThen(appendEventUnlocked(event)),
+      ),
+    );
+  /** Serialize an event identity at most once so durable audit intents can repair after a crash. */
+  const appendEventOnce = (event: ManagerEvent) =>
     semaphore.withPermit(
       Effect.gen(function* () {
         yield* ensureManagerDirectory();
-        const encoded = yield* encodeEvent(eventPath, event);
-        const source = `${JSON.stringify(encoded)}\n`;
-        yield* validateSerializedEventWrite(eventPath, source);
-        yield* fsPromise('append event', eventPath, () => appendFile(eventPath, source, 'utf8'));
+        if ((yield* scanAndRepairEventIdentity(eventPath, event.id)).exists) return;
+        yield* appendEventUnlocked(event);
       }),
     );
   const writeReport = (report: AgentReport) =>
@@ -113,6 +127,7 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
 
   return StateStore.of({
     appendEvent: appendEventToLog,
+    appendEventOnce,
     directory,
     eventPath,
     initialize,

@@ -28,6 +28,8 @@ export function hasPullRequestWarningMetadata(pullRequest: PullRequestRecord): b
       pullRequest.discussionPaginationGaps?.length ||
       pullRequest.observation?.ci === 'failing' ||
       pullRequest.observation?.mergeable === 'conflicting' ||
+      (pullRequest.conflictAttention !== undefined &&
+        pullRequest.conflictAttention.phase !== 'resolved') ||
       pullRequest.observation?.reviewDecision === 'changes_requested',
   );
 }

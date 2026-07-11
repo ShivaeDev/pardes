@@ -73,7 +73,8 @@ describe('filesystem state store', () => {
       summary: 'test event',
       type: 'test_event',
     };
-    await Effect.runPromise(store.appendEvent(event));
+    await Effect.runPromise(store.appendEventOnce(event));
+    await Effect.runPromise(store.appendEventOnce(event));
     const report: AgentReport = {
       agentId: 'agent-1',
       createdAt: '2026-06-01T00:00:00.000Z',
@@ -87,6 +88,109 @@ describe('filesystem state store', () => {
     expect(await Effect.runPromise(store.load())).toEqual(initialState());
     expect(await readFile(store.eventPath, 'utf8')).toBe(`${JSON.stringify(event)}\n`);
     expect(JSON.parse(await readFile(reportPath, 'utf8'))).toEqual(report);
+  });
+
+  test('repairs a malformed trailing event fragment losslessly and settles one identity across repeated restart', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    const prior: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-prior',
+      summary: 'prior valid event',
+      type: 'test_event',
+    };
+    const repair: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:01.000Z',
+      id: 'event-repair',
+      summary: 'repair intent',
+      type: 'test_repair',
+    };
+    const damaged = `${JSON.stringify(prior)}\n{"id":"torn"`;
+    await writeFile(store.eventPath, damaged, 'utf8');
+
+    await Effect.runPromise(store.appendEventOnce(repair));
+    const restarted = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(restarted.appendEventOnce(repair));
+
+    const active = (await readFile(store.eventPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as ManagerEvent);
+    expect(active.map(({ id }) => id)).toEqual([prior.id, repair.id]);
+    const entries = await readdir(directory);
+    const preserved = entries.filter(
+      (entry) => entry.startsWith('events.jsonl.corrupt-') && !entry.endsWith('.json'),
+    );
+    expect(preserved).toHaveLength(1);
+    expect(await readFile(join(directory, preserved[0] ?? ''), 'utf8')).toBe(damaged);
+    expect(await Effect.runPromise(store.inspectStorage())).toMatchObject({
+      events: {
+        corruptionKind: 'malformed_trailing_fragment',
+        corruptionMalformedLines: 1,
+        corruptionPreservedBytes: Buffer.byteLength(damaged),
+        corruptionRetainedValidLines: 1,
+        corruptionStatus: 'repaired',
+        eventLines: 2,
+      },
+    });
+  });
+
+  test('surfaces bounded pending event-corruption preservation state', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    await writeFile(`${store.eventPath}.corrupt-pending`, 'preserved-damaged-bytes', 'utf8');
+
+    expect(await Effect.runPromise(store.inspectStorage())).toMatchObject({
+      events: {
+        corruptionPreservedBytes: 23,
+        corruptionStatus: 'pending',
+      },
+    });
+  });
+
+  test('quarantines interior event corruption while retaining valid records on both sides', async () => {
+    const directory = await temporaryDirectory();
+    const store = await Effect.runPromise(makeFileSystemStateStore(directory));
+    await Effect.runPromise(store.initialize(initialState()));
+    const first: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:00.000Z',
+      id: 'event-first',
+      summary: 'first valid event',
+      type: 'test_event',
+    };
+    const second: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:01.000Z',
+      id: 'event-second',
+      summary: 'second valid event',
+      type: 'test_event',
+    };
+    const repair: ManagerEvent = {
+      createdAt: '2026-06-01T00:00:02.000Z',
+      id: 'event-interior-repair',
+      summary: 'repair interior corruption',
+      type: 'test_repair',
+    };
+    const damaged = `${JSON.stringify(first)}\nnot-json\n${JSON.stringify(second)}\n`;
+    await writeFile(store.eventPath, damaged, 'utf8');
+
+    await Effect.runPromise(store.appendEvent(repair));
+
+    const active = (await readFile(store.eventPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as ManagerEvent);
+    expect(active.map(({ id }) => id)).toEqual([first.id, second.id, repair.id]);
+    expect(await Effect.runPromise(store.inspectStorage())).toMatchObject({
+      events: {
+        corruptionKind: 'interior_corruption',
+        corruptionMalformedLines: 1,
+        corruptionRetainedValidLines: 2,
+        corruptionStatus: 'repaired',
+        eventLines: 3,
+      },
+    });
   });
 
   test('restores lossless inbox prose and bounded presentation-barrier reasons through schema-v1 storage', async () => {

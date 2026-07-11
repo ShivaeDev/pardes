@@ -85,8 +85,9 @@ function inboxIndexEventLines(event: ManagerEvent): ReadonlyArray<string> {
   const preview = compactText(event.summary, INBOX_REPORT_PREVIEW_LENGTH);
   const previewTruncated =
     event.reportPreviewTruncated === true || preview !== event.summary.replace(/\s+/g, ' ').trim();
+  const coalesced = event.coalescedVerificationEvidence?.length ?? 0;
   return [
-    `reportId:${event.reportId} · previewTruncated:${previewTruncated} · artifact: report_get({ reportId })`,
+    `reportId:${event.reportId} · previewTruncated:${previewTruncated}${coalesced === 0 ? '' : ` · derived-stale-verifications:${coalesced}`} · artifact: report_get({ reportId })`,
     `↳ ${event.id} [${event.type}] · ${childAuthoredPreviewLabel(event)}${refinement} · ${pointer}`,
   ];
 }
@@ -129,11 +130,12 @@ function inboxIndexOmissionLine(omittedCount: number): string {
 
 /** Keep authored judgment guidance intact; maxRows targets total rows but never clips fixed guidance or omission metadata. */
 export function inboxLines(
-  state: Pick<ManagerState, 'inbox' | 'inboxWake' | 'inboxHandoff'>,
+  state: Pick<ManagerState, 'auditIntents' | 'inbox' | 'inboxWake' | 'inboxHandoff'>,
   maxRows?: number,
 ): string {
+  const auditRepairCount = Object.keys(state.auditIntents ?? {}).length;
   const authoredLines = [
-    `inbox: ${plural(state.inbox.length, 'pending event')} · read and judge one: inbox_get({ eventId })`,
+    `inbox: ${plural(state.inbox.length, 'pending event')} · audit repair pending:${auditRepairCount} · read and judge one: inbox_get({ eventId })`,
     inboxDeliveryLine(state),
     `path autonomous: ${AUTONOMOUS_INBOX_PATH}`,
     `path judgment: ${USER_JUDGMENT_INBOX_PATH}`,
@@ -193,6 +195,7 @@ export interface InboxEventDetailMetadata {
   readonly verificationId?: string;
   readonly reportId?: string;
   readonly reportPreviewTruncated?: boolean;
+  readonly coalescedVerificationEvidenceCount?: number;
 }
 
 function inboxEventTrust(event: ManagerEvent): InboxEventTrust {
@@ -285,6 +288,9 @@ export function inboxEventDetailMetadata(
     ...(event.reportPreviewTruncated === undefined
       ? {}
       : { reportPreviewTruncated: event.reportPreviewTruncated }),
+    ...(event.coalescedVerificationEvidence === undefined
+      ? {}
+      : { coalescedVerificationEvidenceCount: event.coalescedVerificationEvidence.length }),
   };
 }
 
@@ -329,6 +335,17 @@ export function inboxEventDetailLines(
     ...(metadata.hasMore
       ? [
           `next: inbox_get({ eventId: ${JSON.stringify(metadata.eventId)}, offset: ${metadata.offset + metadata.returnedChars}, maxChars: ${metadata.maxChars} })`,
+        ]
+      : []),
+    ...(event.coalescedVerificationEvidence
+      ?.slice(0, 6)
+      .map(
+        (evidence) =>
+          `Pardes-derived verification context: verificationId:${JSON.stringify(evidence.verificationId)} · attempt:${evidence.attempt} · evidence:stale · reasonCode:${evidence.staleReasonCode} · reason:${JSON.stringify(evidence.staleReason)}`,
+      ) ?? []),
+    ...((event.coalescedVerificationEvidence?.length ?? 0) > 6
+      ? [
+          `… +${(event.coalescedVerificationEvidence?.length ?? 0) - 6} more coalesced stale verification contexts omitted; inspect pardes_status(view="verifications").`,
         ]
       : []),
     ...(metadata.reportId === undefined

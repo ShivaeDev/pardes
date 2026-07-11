@@ -8,6 +8,7 @@ import {
   pullRequestNeedsAttention,
 } from './attention.ts';
 import type { AgentRecord, PullRequestObservation, PullRequestRecord } from './domain.ts';
+import { conflictAttentionTransition } from './review-gate-lifecycle.ts';
 
 const createdAt = '2026-06-01T00:00:00.000Z';
 
@@ -150,6 +151,56 @@ describe('manager attention predicates', () => {
     const healthy = pullRequest('open', { observation: observation() });
     expect(hasPullRequestWarningMetadata(healthy)).toBe(false);
     expect(pullRequestNeedsAttention(healthy)).toBe(false);
+  });
+
+  test('supersedes an older conflict key after complete mergeability and rearms on later conflict', () => {
+    const headA = 'a'.repeat(40);
+    const headB = 'b'.repeat(40);
+    for (const current of [
+      { headSha: headB, lifecycleGeneration: 1 },
+      { headSha: headA, lifecycleGeneration: 2 },
+    ]) {
+      const owner = agent({ lifecycleGeneration: current.lifecycleGeneration });
+      const gate = pullRequest('open', {
+        conflictAttention: {
+          attentionObservedForKey: true,
+          auditedHeadSha: headA,
+          generation: 1,
+          ownerLifecycleGeneration: 1,
+          phase: 'conflicting',
+        },
+        lastPushedHeadSha: current.headSha,
+      });
+
+      const first = conflictAttentionTransition(gate, owner, observation(), true);
+      expect(first).toMatchObject({
+        attention: false,
+        next: {
+          attentionObservedForKey: false,
+          auditedHeadSha: current.headSha,
+          generation: 1,
+          ownerLifecycleGeneration: current.lifecycleGeneration,
+          phase: 'resolution_candidate',
+        },
+      });
+      const second = conflictAttentionTransition(
+        { ...gate, conflictAttention: first.next },
+        owner,
+        observation(),
+        true,
+      );
+      expect(second).toMatchObject({ attention: false, next: { phase: 'resolved' } });
+      const reappeared = conflictAttentionTransition(
+        { ...gate, conflictAttention: second.next },
+        owner,
+        observation({ mergeable: 'conflicting' }),
+        true,
+      );
+      expect(reappeared).toMatchObject({
+        attention: true,
+        next: { attentionObservedForKey: true, generation: 2, phase: 'conflicting' },
+      });
+    }
   });
 
   test('does not count terminal pull-request metadata warnings as open-review attention', () => {

@@ -360,6 +360,7 @@ async function verificationFixture(options: VerificationFixtureOptions = {}) {
         resumeWorkerEvents: (agentId) => {
           ignoredEvents.delete(agentId);
         },
+        settleAuditIntent: () => Effect.succeed(true),
         suppressWorkerEvents: (agentId) => {
           ignoredEvents.add(agentId);
         },

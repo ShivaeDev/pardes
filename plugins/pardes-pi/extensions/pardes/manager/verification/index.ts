@@ -36,7 +36,10 @@ export interface VerificationLifecycleCoordinatorShape {
     verificationId: string,
     ctx?: ExtensionContext,
   ) => Effect.Effect<VerificationRecord, unknown>;
-  readonly reconcileForSource: (sourceAgentId: string) => Effect.Effect<void, unknown>;
+  readonly reconcileForSource: (
+    sourceAgentId: string,
+    options?: { readonly coalesceIntoEventId?: string },
+  ) => Effect.Effect<void, unknown>;
   readonly retireResolvedForSource: (sourceAgentId: string) => Effect.Effect<void, unknown>;
   readonly retryResolvedRetirementForIdleVerifier: (
     verifierAgentId: string,
@@ -86,14 +89,46 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
   );
 
   const reconcileForSourceUnlocked: VerificationLifecycleCoordinatorShape['reconcileForSource'] =
-    Effect.fnUntraced(function* (sourceAgentId) {
+    Effect.fnUntraced(function* (sourceAgentId, reconcileOptions) {
       yield* callbacks.refresh();
       const verifications = Object.values(namespace.state.verifications).filter(
         (verification) =>
           verification.sourceAgentId === sourceAgentId &&
           currentVerificationAttempt(verification).evidenceStatus === 'current',
       );
-      for (const verification of verifications) yield* evidence.reconcile(verification);
+      for (const verification of verifications)
+        yield* evidence.reconcile(verification, reconcileOptions);
+      if (reconcileOptions?.coalesceIntoEventId !== undefined) {
+        const refined = yield* namespace.store.mutate((state) => {
+          let changed = false;
+          const inbox = state.inbox.map((event) => {
+            if (
+              event.id !== reconcileOptions.coalesceIntoEventId ||
+              event.presentationBlockedReason !== 'verification_reconciliation'
+            )
+              return event;
+            const pendingAudit =
+              state.auditIntents?.[event.id] !== undefined ||
+              (event.coalescedVerificationEvidence ?? []).some((evidence) =>
+                Object.values(state.auditIntents ?? {}).some(
+                  (intent) =>
+                    intent.type === 'verification_evidence_stale' &&
+                    intent.verificationId === evidence.verificationId,
+                ),
+              );
+            if (pendingAudit) return event;
+            const {
+              presentationBlocked: _presentationBlocked,
+              presentationBlockedReason: _presentationBlockedReason,
+              ...ready
+            } = event;
+            changed = true;
+            return ready;
+          });
+          return Effect.succeed([changed, changed ? { ...state, inbox } : state] as const);
+        });
+        if (refined) yield* callbacks.refresh();
+      }
     });
 
   const retireResolvedForSourceUnlocked: VerificationLifecycleCoordinatorShape['retireResolvedForSource'] =
@@ -132,7 +167,8 @@ export const makeVerificationLifecycleCoordinator = Effect.fnUntraced(function* 
       serializeMutation(retirement.stopIdleForWorkstreamCompletion(verifierAgentId, ctx));
   const reconcileForSource: VerificationLifecycleCoordinatorShape['reconcileForSource'] = (
     sourceAgentId,
-  ) => serializeMutation(reconcileForSourceUnlocked(sourceAgentId));
+    reconcileOptions,
+  ) => serializeMutation(reconcileForSourceUnlocked(sourceAgentId, reconcileOptions));
   const retireResolvedForSource: VerificationLifecycleCoordinatorShape['retireResolvedForSource'] =
     (sourceAgentId) => serializeMutation(retireResolvedForSourceUnlocked(sourceAgentId));
 

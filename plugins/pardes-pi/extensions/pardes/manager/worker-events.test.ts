@@ -476,7 +476,9 @@ describe('manager handoff-audit policy', () => {
     );
     expect(projected?.summary).toContain('Total audited change set: 513 paths');
     expect(projected?.summary.length).toBeLessThanOrEqual(900);
-    expect(projected?.summary).toContain('canonical full report available');
+    expect(projected?.summary).toContain(
+      'canonical full report available via one report_get({ reportId }) call',
+    );
   });
 
   test('renders only failed report-persistence suffixes', () => {

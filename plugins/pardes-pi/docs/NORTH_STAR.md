@@ -268,10 +268,19 @@ append-only audit history
 Pi presentation delivery scheduled for the manager conversation
 ```
 
-Actionable events enter the durable inbox before presentation. Tokenized wake
-records are presentation cursors, not workflow state. Only one delivered cursor
-is active at a time; later durable rows remain queued as a suffix. User-judgment
-handoffs are explicit and cursor-scoped.
+Actionable events enter the durable inbox before presentation. Causally
+derivative software context may be coalesced onto its triggering row: a terminal
+worker report that invalidates advisory verification evidence carries that stale
+context without a second attention row, while both facts remain externally
+visible. Durable exact-event intents idempotently repair either audit append
+across failure or manager restart before presentation refinement is released.
+Malformed event-log bytes are preserved in a manager-scoped corruption artifact;
+all parseable records are retained in a repaired active stream, and bounded
+storage status distinguishes trailing fragments from interior corruption. Thus
+both facts remain append-only audited. Tokenized wake records are presentation cursors,
+not workflow state. Only one delivered cursor is active at a time; later durable
+rows remain queued as a suffix. User-judgment handoffs are explicit and
+cursor-scoped.
 
 ## Retained child model
 

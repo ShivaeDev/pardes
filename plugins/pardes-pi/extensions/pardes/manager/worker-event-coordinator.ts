@@ -72,7 +72,10 @@ interface WorkerEventFollowUp {
     readonly workstreamId: string;
   };
   readonly releaseInboxWake?: boolean;
-  readonly reconcileVerificationsForSource?: string;
+  readonly reconcileVerificationsForSource?: {
+    readonly sourceAgentId: string;
+    readonly coalesceIntoEventId?: string;
+  };
   readonly syncCompletedReport?: string;
 }
 
@@ -116,13 +119,17 @@ export class WorkerSupervisorEventCoordinator extends Context.Service<
 export interface WorkerSupervisorEventCoordinatorCallbacks {
   readonly refresh: () => Effect.Effect<void, unknown>;
   readonly appendEventSafely: (event: ManagerEvent) => Effect.Effect<void>;
+  readonly settleAuditIntent: (event: ManagerEvent) => Effect.Effect<boolean, unknown>;
   readonly releaseInboxWake: () => Effect.Effect<boolean, unknown>;
   readonly render: () => void;
   readonly isSuppressed: (agentId: string) => boolean;
   readonly serializeVerificationMutation: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E, R>;
-  readonly reconcileVerificationsForSource: (agentId: string) => Effect.Effect<void, unknown>;
+  readonly reconcileVerificationsForSource: (
+    agentId: string,
+    options?: { readonly coalesceIntoEventId?: string },
+  ) => Effect.Effect<void, unknown>;
   readonly retryResolvedVerificationRetirementForIdleVerifier: (
     agentId: string,
   ) => Effect.Effect<boolean, unknown>;
@@ -305,12 +312,31 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
           }
         : {}),
     };
+    const awaitsVerificationReconciliation =
+      workerEvent.type === 'report' &&
+      workerEvent.status !== 'progress' &&
+      persistedAgent.role === 'worker' &&
+      Object.values(namespace.state.verifications).some(
+        (verification) =>
+          verification.sourceAgentId === workerEvent.agentId &&
+          currentVerificationAttempt(verification).evidenceStatus === 'current',
+      );
     const attention = event?.actionable
       ? {
           ...makeEvent(event.type, event.summary, timestamp, association),
           ...(event.details === undefined ? {} : { details: event.details }),
+          ...(awaitsVerificationReconciliation
+            ? {
+                presentationBlocked: true,
+                presentationBlockedReason: 'verification_reconciliation',
+              }
+            : {}),
         }
       : undefined;
+    const reportAuditEvent =
+      workerEvent.type === 'report' && event !== undefined
+        ? (attention ?? makeEvent(event.type, event.summary, timestamp, association))
+        : undefined;
     const projection = yield* namespace.store.mutate<WorkerEventProjection, never>((state) => {
       const agent = state.agents[workerEvent.agentId];
       if (!agent)
@@ -416,6 +442,10 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         {
           ...state,
           agents: { ...state.agents, [agent.id]: nextAgent },
+          auditIntents:
+            event !== undefined && !duplicateAttention && reportAuditEvent !== undefined
+              ? { ...(state.auditIntents ?? {}), [reportAuditEvent.id]: reportAuditEvent }
+              : state.auditIntents,
           inbox: enqueue && attention ? [...state.inbox, attention] : state.inbox,
           verifications:
             nextVerification === undefined
@@ -426,10 +456,13 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
       ] as const);
     });
     if (!projection.changed) return;
-    if (event && projection.append)
-      yield* callbacks.appendEventSafely(
-        attention ?? makeEvent(event.type, event.summary, timestamp, association),
-      );
+    if (event && projection.append) {
+      if (reportAuditEvent) yield* callbacks.settleAuditIntent(reportAuditEvent);
+      else
+        yield* callbacks.appendEventSafely(
+          attention ?? makeEvent(event.type, event.summary, timestamp, association),
+        );
+    }
     if (projection.cancelledCompletionIntent)
       yield* callbacks.appendEventSafely(
         makeEvent(
@@ -481,11 +514,18 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         ? { releaseInboxWake: true }
         : {}),
       ...(workerEvent.type === 'report' &&
-      workerEvent.status === 'completed' &&
+      workerEvent.status !== 'progress' &&
       persistedAgent.role === 'worker'
         ? {
-            reconcileVerificationsForSource: workerEvent.agentId,
-            syncCompletedReport: workerEvent.agentId,
+            reconcileVerificationsForSource: {
+              sourceAgentId: workerEvent.agentId,
+              ...(projection.enqueued && attention !== undefined
+                ? { coalesceIntoEventId: attention.id }
+                : {}),
+            },
+            ...(workerEvent.status === 'completed'
+              ? { syncCompletedReport: workerEvent.agentId }
+              : {}),
           }
         : {}),
     } satisfies WorkerEventFollowUp;
@@ -510,9 +550,18 @@ export const makeWorkerSupervisorEventCoordinator = Effect.fnUntraced(function* 
         yield* callbacks.retryResolvedVerificationRetirementForIdleVerifier(agentId);
       if (retiredVerifier) yield* reviewGates.retryMergedRetirementForWorkstream(workstreamId);
     }
-    if (followUp.releaseInboxWake) yield* callbacks.releaseInboxWake();
     if (followUp.reconcileVerificationsForSource)
-      yield* callbacks.reconcileVerificationsForSource(followUp.reconcileVerificationsForSource);
+      yield* callbacks.reconcileVerificationsForSource(
+        followUp.reconcileVerificationsForSource.sourceAgentId,
+        followUp.reconcileVerificationsForSource.coalesceIntoEventId === undefined
+          ? undefined
+          : {
+              coalesceIntoEventId: followUp.reconcileVerificationsForSource.coalesceIntoEventId,
+            },
+      );
+    // Reconcile derivative verification state before releasing the causative
+    // report cursor so one wake covers the complete software-owned context.
+    if (followUp.releaseInboxWake) yield* callbacks.releaseInboxWake();
     if (followUp.syncCompletedReport)
       yield* pullRequests.syncCompletedReport(followUp.syncCompletedReport);
   });

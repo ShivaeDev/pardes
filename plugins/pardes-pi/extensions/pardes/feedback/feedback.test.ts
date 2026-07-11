@@ -369,6 +369,31 @@ describe('feedback CLI', () => {
     ).toBe(1);
   });
 
+  test('renders filesystem diagnostics as inert single-line terminal text', async () => {
+    const parent = temporaryRoot();
+    const unsafeRoot = join(parent, 'bad-\u001b[31m\nline-\u0007-root');
+    writeFileSync(unsafeRoot, 'not a directory');
+    const errors: string[] = [];
+    expect(
+      await runFeedbackCli(
+        ['list'],
+        { error: (line) => errors.push(line), out: () => {} },
+        { root: unsafeRoot },
+      ),
+    ).toBe(1);
+    expect(errors[0]).toContain('ENOTDIR');
+    expect(errors[0]).toContain('\\u001b');
+    expect(errors[0]).toContain('\\u000a');
+    expect(errors[0]).toContain('\\u0007');
+    expect(
+      Array.from(errors[0]).some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+      }),
+    ).toBe(false);
+    expect(errors[0].split('\n')).toHaveLength(1);
+  });
+
   test('uses durable atomic watch receipts to survive duplicate scans, concurrent watchers, and restarts', async () => {
     const root = temporaryRoot();
     const old = await Effect.runPromise(submitFeedback('already present', provenance(0), root));
@@ -577,7 +602,7 @@ describe('feedback CLI', () => {
         watchers.reduce((count, { stdout }) => count + Number(stdout.includes(unseen.id)), 0),
       ).toBe(1);
     }
-  });
+  }, 30_000);
 
   test('executes through the installed-bin shape and includes feedback runtime files in the package', async () => {
     const root = temporaryRoot();

@@ -17,7 +17,6 @@ import {
   pardesGlobalStateRoot,
 } from './store.ts';
 
-const UNSAFE_TERMINAL_CHARACTERS = /[\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 const ROLES = new Set<FeedbackRole>(['manager', 'writer', 'advisory_verifier']);
 const CANONICAL_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -87,10 +86,18 @@ function cliErrorMessage(error: unknown): string {
 }
 
 function terminalSafe(value: string): string {
-  return value.replace(
-    UNSAFE_TERMINAL_CHARACTERS,
-    (character) => `\\u${character.codePointAt(0)?.toString(16).padStart(4, '0')}`,
-  );
+  return Array.from(value, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const unsafe =
+      codePoint <= 0x1f ||
+      (codePoint >= 0x7f && codePoint <= 0x9f) ||
+      codePoint === 0x61c ||
+      codePoint === 0x200e ||
+      codePoint === 0x200f ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069);
+    return unsafe ? `\\u${codePoint.toString(16).padStart(4, '0')}` : character;
+  }).join('');
 }
 
 export function terminalSafeJson(value: unknown): string {

@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { Effect } from 'effect';
 import { afterEach, describe, expect, test } from 'vitest';
 import { copyLocalGitRepositoryFixture, runGitFixture } from '../test-support.ts';
@@ -31,6 +32,19 @@ afterEach(() => {
 
 function git(cwd: string, ...args: string[]): string {
   return runGitFixture(cwd, ...args);
+}
+
+function executableOnPath(name: string): string {
+  const executable = (process.env.PATH ?? '')
+    .split(delimiter)
+    .map((directory) => join(directory, name))
+    .find(existsSync);
+  if (!executable) throw new Error(`Could not resolve ${name} on PATH`);
+  return realpathSync(executable);
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function owner(
@@ -385,11 +399,11 @@ describe('managed worktree service', () => {
     });
   });
 
-  test('degrades honestly when the bounded total safety diff exceeds its timeout', async () => {
+  test('degrades deterministically when the bounded total safety diff exceeds its timeout', async () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
-    const service = makeManagedWorktreeService({ provenanceTotalDiffGitTimeoutMs: 1 });
+    const service = makeManagedWorktreeService({ provenanceTotalDiffGitTimeoutMs: 100 });
     const lease = await Effect.runPromise(
       service.create({
         agentId: 'agent-diff-timeout',
@@ -398,17 +412,35 @@ describe('managed worktree service', () => {
         repo,
       }),
     );
-    for (let index = 0; index < 200; index += 1) {
-      writeFileSync(join(lease.path, `path-${index}.txt`), `${index}\n`);
-    }
-    git(lease.path, 'add', '.');
+    writeFileSync(join(lease.path, 'changed.txt'), 'changed\n');
+    git(lease.path, 'add', 'changed.txt');
     git(lease.path, 'commit', '-m', 'timeout fixture');
 
-    expect(
-      await Effect.runPromise(
-        inspectProvenance(service, owner(repo, 'manager-1', 'agent-diff-timeout'), lease),
-      ),
-    ).toMatchObject({
+    const wrapperRoot = mkdtempSync(join(tmpdir(), 'pardes-slow-git-'));
+    temporaryDirectories.push(wrapperRoot);
+    const wrapper = join(wrapperRoot, 'git');
+    const marker = join(wrapperRoot, 'diff-started');
+    const realGit = executableOnPath('git');
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nif [ "$1" = "diff" ]; then\n  : > ${shellQuote(marker)}\n  sleep 1\nfi\nexec ${shellQuote(realGit)} "$@"\n`,
+    );
+    chmodSync(wrapper, 0o755);
+    const originalPath = process.env.PATH;
+    const inspection = await (async () => {
+      try {
+        process.env.PATH = `${wrapperRoot}${delimiter}${originalPath ?? ''}`;
+        return await Effect.runPromise(
+          inspectProvenance(service, owner(repo, 'manager-1', 'agent-diff-timeout'), lease),
+        );
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    })();
+
+    expect(existsSync(marker)).toBe(true);
+    expect(inspection).toMatchObject({
       changedPaths: [],
       dirty: false,
       provenance: {

@@ -821,6 +821,11 @@ describe('Pardes model-visible tools', () => {
       },
       events: {
         bytes: 131_072,
+        corruptionKind: 'interior_corruption',
+        corruptionMalformedLines: 1,
+        corruptionPreservedBytes: 132_000,
+        corruptionRetainedValidLines: 72,
+        corruptionStatus: 'repaired',
         eventLines: 73,
         eventLinesAccuracy: 'lower_bound',
         kind: 'regular_file',
@@ -871,7 +876,7 @@ describe('Pardes model-visible tools', () => {
     expect(text).toContain('storage: read-only bounded inspection · root directory');
     expect(text).toContain('state: regular file · 512 bytes');
     expect(text).toContain(
-      'events: regular file · 131072 bytes · ≥73 event lines · scan limited [event_scan_byte_limit]: original=131072 shown=65536 omitted=65536 bytes',
+      'events: regular file · 131072 bytes · ≥73 event lines · scan limited [event_scan_byte_limit]: original=131072 shown=65536 omitted=65536 bytes · corruption:repaired(interior_corruption, malformed:1, retained:72, preserved:132000 bytes)',
     );
     expect(text).toContain(
       'reports: directory · ≥128 reports · ≥4096 bytes · 2 other direct entries observed · scan limited [direct_entry_scan_limit]: shown=128 omitted>=1 direct entries',

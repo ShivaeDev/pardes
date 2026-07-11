@@ -1,12 +1,11 @@
-import { createReadStream } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
 import { Context, Effect, Layer, Semaphore } from 'effect';
 import type { ManagerEvent, ManagerState } from '../manager/index.ts';
 import type { AgentReport, ReportArtifactError } from '../reporting/index.ts';
 import { decodeState, encodeEvent, encodeReport, encodeState, parseStateJson } from './codecs.ts';
 import type { StoreError } from './errors.ts';
+import { scanAndRepairEventIdentity } from './event-log.ts';
 import { ensureDirectory, fsPromise, writeJsonAtomically } from './filesystem.ts';
 import { inspectFileSystemStorage, type StorageInspection } from './inspection.ts';
 import {
@@ -85,32 +84,6 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
         return result;
       }),
     );
-  const eventIdExists = (eventId: string) =>
-    fsPromise('scan event identities', eventPath, async () => {
-      const stream = createReadStream(eventPath, { encoding: 'utf8' });
-      const lines = createInterface({ crlfDelay: Number.POSITIVE_INFINITY, input: stream });
-      try {
-        for await (const line of lines) {
-          if (line.length === 0) continue;
-          const decoded = JSON.parse(line) as { readonly id?: unknown };
-          if (decoded.id === eventId) return true;
-        }
-        return false;
-      } catch (cause) {
-        if (
-          typeof cause === 'object' &&
-          cause !== null &&
-          'code' in cause &&
-          cause.code === 'ENOENT'
-        )
-          return false;
-        throw cause;
-      } finally {
-        lines.close();
-        stream.destroy();
-      }
-    });
-
   const appendEventUnlocked = Effect.fnUntraced(function* (event: ManagerEvent) {
     yield* ensureManagerDirectory();
     const encoded = yield* encodeEvent(eventPath, event);
@@ -119,13 +92,17 @@ export const makeFileSystemStateStore = Effect.fnUntraced(function* (directory: 
     yield* fsPromise('append event', eventPath, () => appendFile(eventPath, source, 'utf8'));
   });
   const appendEventToLog = (event: ManagerEvent) =>
-    semaphore.withPermit(appendEventUnlocked(event));
+    semaphore.withPermit(
+      scanAndRepairEventIdentity(eventPath, event.id).pipe(
+        Effect.andThen(appendEventUnlocked(event)),
+      ),
+    );
   /** Serialize an event identity at most once so durable audit intents can repair after a crash. */
   const appendEventOnce = (event: ManagerEvent) =>
     semaphore.withPermit(
       Effect.gen(function* () {
         yield* ensureManagerDirectory();
-        if (yield* eventIdExists(event.id)) return;
+        if ((yield* scanAndRepairEventIdentity(eventPath, event.id)).exists) return;
         yield* appendEventUnlocked(event);
       }),
     );

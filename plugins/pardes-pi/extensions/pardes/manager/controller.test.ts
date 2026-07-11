@@ -11176,7 +11176,7 @@ describe('manager controller', () => {
     // Both append attempts failed after state persistence. Repair the external
     // leaf, then restore must append each exact intent once before releasing the row.
     rmSync(eventPath, { force: true, recursive: true });
-    writeFileSync(eventPath, eventSourceBeforeFailure);
+    writeFileSync(eventPath, `${eventSourceBeforeFailure}{"id":"torn-audit`);
     const statePath = join(stateDirectory, 'state.json');
 
     const restored = new ManagerController(fixture.pi, {
@@ -11184,6 +11184,12 @@ describe('manager controller', () => {
     });
     await Effect.runPromise(restored.restore(fixture.ctx));
     expect(restored.snapshot()?.auditIntents).toEqual({});
+    expect(await Effect.runPromise(restored.inspectStorage())).toMatchObject({
+      events: {
+        corruptionKind: 'malformed_trailing_fragment',
+        corruptionStatus: 'repaired',
+      },
+    });
     expect(restored.snapshot()?.inboxWake).toEqual(deliveredQuestion);
     expect(restored.snapshot()?.inbox.find((event) => event.id === report.id)).not.toHaveProperty(
       'presentationBlocked',

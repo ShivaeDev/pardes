@@ -3,6 +3,7 @@ import { lstat, open, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Effect } from 'effect';
 import { storeError } from './errors.ts';
+import { EVENT_CORRUPTION_STATUS_SUFFIX, type EventLogCorruptionKind } from './event-log.ts';
 import { fsPromise } from './filesystem.ts';
 
 export const STORAGE_EVENT_SCAN_MAX_BYTES = 64 * 1_024;
@@ -29,6 +30,11 @@ export interface StorageLeafObservation {
 }
 
 export interface EventStorageObservation extends StorageLeafObservation {
+  readonly corruptionStatus?: 'clean' | 'pending' | 'repaired' | 'unavailable';
+  readonly corruptionKind?: EventLogCorruptionKind | 'interrupted_repair';
+  readonly corruptionMalformedLines?: number;
+  readonly corruptionPreservedBytes?: number;
+  readonly corruptionRetainedValidLines?: number;
   readonly eventLines: number;
   readonly eventLinesAccuracy: StorageMetricAccuracy;
   readonly scannedBytes: number;
@@ -165,6 +171,67 @@ const scanEventLines = Effect.fnUntraced(function* (path: string) {
     (handle) =>
       fsPromise('close events inspection', path, () => handle.close()).pipe(Effect.ignore),
   );
+});
+
+interface EventCorruptionStatus {
+  readonly corruptionStatus: 'clean' | 'pending' | 'repaired' | 'unavailable';
+  readonly corruptionKind?: EventLogCorruptionKind | 'interrupted_repair';
+  readonly corruptionMalformedLines?: number;
+  readonly corruptionPreservedBytes?: number;
+  readonly corruptionRetainedValidLines?: number;
+}
+
+const observeEventCorruption = Effect.fnUntraced(function* (eventPath: string) {
+  const pending = yield* observeLeaf(`${eventPath}.corrupt-pending`);
+  if (pending.kind !== 'missing')
+    return {
+      corruptionStatus: pending.kind === 'regular_file' ? 'pending' : 'unavailable',
+      ...(pending.kind === 'regular_file' ? { corruptionPreservedBytes: pending.bytes ?? 0 } : {}),
+    } satisfies EventCorruptionStatus;
+  const statusPath = `${eventPath}${EVENT_CORRUPTION_STATUS_SUFFIX}`;
+  const statusLeaf = yield* observeLeaf(statusPath);
+  if (statusLeaf.kind === 'missing') return { corruptionStatus: 'clean' } as const;
+  if (statusLeaf.kind !== 'regular_file' || (statusLeaf.bytes ?? 0) > 4_096)
+    return { corruptionStatus: 'unavailable' } as const;
+  return yield* Effect.acquireUseRelease(
+    fsPromise('open event corruption status', statusPath, () =>
+      open(statusPath, noFollowReadOnlyFlags()),
+    ),
+    (handle) =>
+      fsPromise('read event corruption status', statusPath, async () => {
+        const source = await handle.readFile('utf8');
+        const decoded = JSON.parse(source) as {
+          readonly classification?: unknown;
+          readonly malformedLines?: unknown;
+          readonly originalBytes?: unknown;
+          readonly retainedValidLines?: unknown;
+        };
+        const kind = decoded.classification;
+        if (
+          kind !== 'malformed_trailing_fragment' &&
+          kind !== 'interior_corruption' &&
+          kind !== 'interrupted_repair'
+        )
+          throw new Error('event corruption status classification is invalid');
+        if (
+          typeof decoded.malformedLines !== 'number' ||
+          typeof decoded.originalBytes !== 'number' ||
+          typeof decoded.retainedValidLines !== 'number'
+        )
+          throw new Error('event corruption status counts are invalid');
+        return {
+          corruptionKind: kind,
+          corruptionMalformedLines: decoded.malformedLines,
+          corruptionPreservedBytes: decoded.originalBytes,
+          corruptionRetainedValidLines: decoded.retainedValidLines,
+          corruptionStatus: 'repaired',
+        } satisfies EventCorruptionStatus;
+      }),
+    (handle) =>
+      fsPromise('close event corruption status', statusPath, () => handle.close()).pipe(
+        Effect.ignore,
+      ),
+  ).pipe(Effect.catch(() => Effect.succeed({ corruptionStatus: 'unavailable' as const })));
 });
 
 const observeEvents = Effect.fnUntraced(function* (path: string) {
@@ -408,6 +475,7 @@ export const inspectFileSystemStorage = Effect.fnUntraced(function* (
   }
   const state = yield* observeLeaf(paths.statePath);
   const events = yield* observeEvents(paths.eventPath);
+  const eventCorruption = yield* observeEventCorruption(paths.eventPath);
   const reports = yield* observeReports(paths.reportsPath);
-  return inspection(root, state, events, reports);
+  return inspection(root, state, { ...events, ...eventCorruption }, reports);
 });

@@ -78,8 +78,11 @@ detail. A terminal writer report that advances the reviewed head may carry a
 Pardes-derived stale-evidence context on that same inbox row; treat it as the
 software-owned signal to refresh, not as a second missing notification. An
 `audit repair pending` count is software-owned durable recovery state; leave its
-blocked row unacknowledged and let restore/retry settle the exact audit identity. After
-fixes, call `verification_refresh({ verificationId })` so the same retained
+blocked row unacknowledged and let restore/retry settle the exact audit identity.
+If storage status reports event corruption, Pardes preserves the damaged bytes,
+retains parseable audit records, and reports whether it repaired a trailing
+fragment or interior line; inspect the preserved artifact only for operator
+diagnosis. After fixes, call `verification_refresh({ verificationId })` so the same retained
 verifier checks the latest clean HEAD. Verification is advisory and
 separate from publication. Use it before publishing meaningful engineering
 slices and when a concrete review question remains. Skip trivial documentation

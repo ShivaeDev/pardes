@@ -148,6 +148,12 @@ export function storageLines(storage: StorageInspection, maxRows?: number): stri
     storage.events.issue
       ? ` (${storage.events.issue})`
       : '';
+  const eventCorruption =
+    storage.events.corruptionStatus === undefined || storage.events.corruptionStatus === 'clean'
+      ? ''
+      : storage.events.corruptionStatus === 'repaired'
+        ? ` · corruption:repaired(${storage.events.corruptionKind ?? 'unknown'}, malformed:${storage.events.corruptionMalformedLines ?? 'unknown'}, retained:${storage.events.corruptionRetainedValidLines ?? 'unknown'}, preserved:${storage.events.corruptionPreservedBytes ?? 'unknown'} bytes)`
+        : ` · corruption:${storage.events.corruptionStatus}${storage.events.corruptionPreservedBytes === undefined ? '' : `(${storage.events.corruptionPreservedBytes} bytes preserved)`}`;
   const reportIssue =
     storage.reports.kind === 'directory' &&
     storage.reports.metricsAccuracy === 'unavailable' &&
@@ -159,7 +165,7 @@ export function storageLines(storage: StorageInspection, maxRows?: number): stri
       authoredLines: [
         `storage: read-only bounded inspection · root ${storageLeafLabel(storage.root, 'directory')}`,
         `state: ${storageLeafLabel(storage.state, 'regular_file')} · ${storageBytes(storage.state)}`,
-        `events: ${storageLeafLabel(storage.events, 'regular_file')} · ${storageBytes(storage.events)} · ${storageMetric(storage.events.eventLines, storage.events.eventLinesAccuracy)} event lines${eventIssue}${eventScan}`,
+        `events: ${storageLeafLabel(storage.events, 'regular_file')} · ${storageBytes(storage.events)} · ${storageMetric(storage.events.eventLines, storage.events.eventLinesAccuracy)} event lines${eventIssue}${eventScan}${eventCorruption}`,
         `reports: ${storageLeafLabel(storage.reports, 'directory')} · ${storageMetric(storage.reports.reports, storage.reports.metricsAccuracy)} reports · ${storageMetric(storage.reports.reportBytes, storage.reports.metricsAccuracy)} bytes${reportIssue}${otherReports}${reportScan}`,
       ],
       retrievalHintLines: [

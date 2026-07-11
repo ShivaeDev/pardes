@@ -159,18 +159,22 @@ does not inspect or copy repository secret files, though repository-owned hooks
 may deliberately symlink or generate local configuration. Hook output is
 bounded in memory, only body-free counts are durable, and terminal-only tails
 support local diagnosis. Failure or timeout initiation at 15 minutes prevents
-child launch and enters conservative compensation. Writer failures retain a
-durable agent/lease whenever the checkout is dirty, cleanup is unverifiable, or
-process lifecycle/timeout leaves termination uncertain. Verifier uncertainty
-keeps retryable scratch ownership rather than immediately declaring disposal
-safe. Retained revive does not rerun bootstrap. After restoration, an observed in-flight
-bootstrap is marked interrupted, process completion/termination remains unknown,
-and repository code is never rerun automatically.
+child launch and enters conservative compensation. Writer failures—including
+runtime launch or launched-state persistence after successful bootstrap—classify
+cleanup before removing provisional ownership. They retain a durable agent/lease
+whenever the checkout is dirty, cleanup is unverifiable, or process
+lifecycle/timeout leaves termination uncertain. Verifier uncertainty keeps
+retryable scratch ownership rather than immediately declaring disposal safe. A
+crashed retained agent cannot remain durably marked as running bootstrap; a
+missing terminal record is normalized to interrupted with completion and
+termination unknown. Retained revive does not rerun bootstrap. After
+restoration, an observed in-flight bootstrap is marked interrupted and
+repository code is never rerun automatically.
 
 The process adapter signals its directly spawned process group on POSIX (the
 direct child elsewhere) on timeout and Effect interruption, observes
-direct-child exit, and stops waiting after a
-bounded final drain or exit-confirmation window. This bounds manager
+direct-child exit, and stops waiting after a bounded final drain or
+exit-confirmation window. This bounds manager
 orchestration only. A zero-exit hook whose inherited output pipes remain open
 past the final drain fails closed as lifecycle-unsettled. Pardes still cannot
 observe or prove termination of a descendant that creates a new session and

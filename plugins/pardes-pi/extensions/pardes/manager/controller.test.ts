@@ -249,6 +249,16 @@ function corruptStatePath(stateDir: string) {
   mkdirSync(statePath);
 }
 
+function makeTransientStatePathFailure(stateDir: string) {
+  const statePath = join(stateDir, 'state.json');
+  const source = readFileSync(statePath, 'utf8');
+  corruptStatePath(stateDir);
+  return () => {
+    rmSync(statePath, { force: true, recursive: true });
+    writeFileSync(statePath, source);
+  };
+}
+
 function managerEvents(stateDir: string): ReadonlyArray<{
   readonly id: string;
   readonly type: string;
@@ -679,6 +689,8 @@ function stubGithub(
 function stubWorkers(
   options: {
     readonly onSpawn?: (input: WorkerSpawnInput) => void;
+    readonly onStop?: (agentId: string) => void;
+    readonly stopDefect?: boolean;
     readonly eventsOnSpawn?: (input: WorkerSpawnInput) => ReadonlyArray<WorkerSupervisorEvent>;
   } = {},
 ) {
@@ -795,6 +807,8 @@ function stubWorkers(
       },
       stop: (agentId) => {
         stops.push(agentId);
+        options.onStop?.(agentId);
+        if (options.stopDefect) return Effect.die('fixture stop defect');
         const runtime = runtimes.get(agentId);
         if (!runtime) return Effect.fail(new AgentNotFoundError({ agentId }));
         const stopped = {
@@ -2577,7 +2591,7 @@ describe('manager controller', () => {
       agents: Record<string, Record<string, unknown>>;
     };
     const persistedAgent = requiredValue(persisted.agents[agent.id]);
-    persistedAgent.status = 'starting';
+    persistedAgent.status = 'crashed';
     persistedAgent.worktreeBootstrap = {
       script: 'script/update',
       startedAt: '2026-07-01T00:00:00.000Z',
@@ -2686,7 +2700,7 @@ describe('manager controller', () => {
       >;
     };
     const verifier = requiredValue(persisted.agents[verification.verifierAgentId]);
-    verifier.status = 'starting';
+    verifier.status = 'crashed';
     verifier.worktreeBootstrap = {
       script: 'script/update',
       startedAt: '2026-07-01T00:00:00.000Z',
@@ -2821,6 +2835,100 @@ describe('manager controller', () => {
     }
   }, 15_000);
 
+  test('normalizes a retained bootstrap after transient failure-record persistence and restart', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const tracked = trackedWorktrees((path) => {
+      writeFileSync(join(path, 'bootstrap-dirty.txt'), 'retain after transient store failure\n');
+    });
+    let restoreStatePath = () => {};
+    const worktrees: ManagedWorktreeShape = {
+      ...tracked.worktrees,
+      removeIfClean: (owner, lease) =>
+        Effect.sync(() => restoreStatePath()).pipe(
+          Effect.flatMap(() => tracked.worktrees.removeIfClean(owner, lease)),
+        ),
+    };
+    let stateDir = '';
+    const worktreeBootstrap: WorktreeBootstrapShape = {
+      run: (cwd) => {
+        restoreStatePath = makeTransientStatePathFailure(stateDir);
+        return Effect.fail(
+          new WorktreeUpdateError({
+            cwd,
+            diagnostic: {
+              countAccuracy: 'exact',
+              stderrChars: 17,
+              stderrTail: 'transient fixture',
+              stdoutChars: 0,
+              stdoutTail: '',
+            },
+            directExitObserved: true,
+            exitCode: 9,
+            reason: 'nonzero_exit',
+          }),
+        );
+      },
+    };
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+      worktreeBootstrap,
+      worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    stateDir = activationStateDir(fixture.entries);
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retain truthful failed ownership', title: 'Transient bootstrap record' },
+        fixture.ctx,
+      ),
+    );
+
+    const failure = await withoutConsoleError(() =>
+      Effect.runPromise(
+        controller
+          .spawnAgent(
+            {
+              model: 'fixture/model',
+              task: 'Fail while recording bootstrap failure.',
+              thinkingLevel: 'low',
+              workstreamId: workstream.id,
+            },
+            fixture.ctx,
+          )
+          .pipe(Effect.flip),
+      ),
+    );
+
+    expect(failure).toBeInstanceOf(WorktreeUpdateError);
+    const lease = requiredValue(tracked.latestLease());
+    expect(controller.snapshot()?.agents[lease.agentId]).toMatchObject({
+      status: 'crashed',
+      worktree: lease,
+      worktreeBootstrap: {
+        failureSummary: expect.stringContaining('terminal outcome was not durably recorded'),
+        status: 'interrupted',
+      },
+    });
+    expect(existsSync(lease.path)).toBe(true);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+      worktrees,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.agents[lease.agentId]).toMatchObject({
+      status: 'crashed',
+      worktreeBootstrap: { status: 'interrupted' },
+    });
+    expect(existsSync(lease.path)).toBe(true);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  }, 15_000);
+
   test('removes a clean managed lease and leaves state unchanged when spawn bootstrap fails', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
@@ -2862,18 +2970,27 @@ describe('manager controller', () => {
     expect(existsSync(requiredValue(worktrees.latestLease()).path)).toBe(false);
   });
 
-  test('preserves a dirty managed lease when spawn bootstrap fails before runtime attach', async () => {
+  test('retains durable ownership when successful bootstrap dirties the lease and runtime spawn fails', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
     temporaryDirectories.push(stateRoot);
     process.env.PARDES_PI_STATE_DIR = stateRoot;
     const fixture = harness(repo);
-    const workers = failingWorkers((input) => {
-      writeFileSync(join(input.cwd, 'dirty-before-start.txt'), 'dirty fixture\n');
-    });
+    const workers = failingWorkers();
     const worktrees = trackedWorktrees();
+    const worktreeBootstrap: WorktreeBootstrapShape = {
+      run: (cwd) =>
+        Effect.sync(() => {
+          writeFileSync(join(cwd, 'dirty-before-start.txt'), 'dirty fixture\n');
+          return {
+            output: { stderrChars: 0, stdoutChars: 0 },
+            status: 'succeeded' as const,
+          };
+        }),
+    };
     const controller = new ManagerController(fixture.pi, {
       makeWorkers: workers.makeWorkers,
+      worktreeBootstrap,
       worktrees: worktrees.worktrees,
     });
     await Effect.runPromise(controller.activate(fixture.ctx));
@@ -2899,10 +3016,15 @@ describe('manager controller', () => {
     );
 
     expect(failure._tag).toBe('WorkerProcessError');
-    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('planned');
-    expect(controller.snapshot()?.agents).toEqual({});
-    expect(worktrees.latestLease()).toBeDefined();
-    expect(existsSync(requiredValue(worktrees.latestLease()).path)).toBe(true);
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    const lease = requiredValue(worktrees.latestLease());
+    expect(controller.snapshot()?.agents[lease.agentId]).toMatchObject({
+      lastError: expect.stringContaining('durable lease ownership'),
+      status: 'crashed',
+      worktree: lease,
+      worktreeBootstrap: { status: 'succeeded' },
+    });
+    expect(existsSync(lease.path)).toBe(true);
   });
 
   test('stops an unattached fresh runtime and removes a clean lease when spawned-state persistence fails', async () => {
@@ -2964,15 +3086,25 @@ describe('manager controller', () => {
     process.env.PARDES_PI_STATE_DIR = stateRoot;
     const fixture = harness(repo);
     let stateDir = '';
+    let restoreStatePath = () => {};
     const workers = stubWorkers({
       onSpawn: (input) => {
         writeFileSync(join(input.cwd, 'dirty-after-start.txt'), 'dirty fixture\n');
-        corruptStatePath(stateDir);
+        restoreStatePath = makeTransientStatePathFailure(stateDir);
       },
+      onStop: () => restoreStatePath(),
     });
     const worktrees = trackedWorktrees();
+    const worktreeBootstrap: WorktreeBootstrapShape = {
+      run: () =>
+        Effect.succeed({
+          output: { stderrChars: 0, stdoutChars: 0 },
+          status: 'succeeded',
+        }),
+    };
     const controller = new ManagerController(fixture.pi, {
       makeWorkers: workers.makeWorkers,
+      worktreeBootstrap,
       worktrees: worktrees.worktrees,
     });
     await Effect.runPromise(controller.activate(fixture.ctx));
@@ -3004,16 +3136,94 @@ describe('manager controller', () => {
     );
 
     expect(failure._tag).toBe('StoreError');
-    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('planned');
-    expect(controller.snapshot()?.agents).toEqual({});
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
     expect(controller.runtimeSnapshots().size).toBe(0);
     expect(workers.stops).toHaveLength(1);
-    expect(worktrees.latestLease()).toBeDefined();
-    expect(existsSync(requiredValue(worktrees.latestLease()).path)).toBe(true);
+    const lease = requiredValue(worktrees.latestLease());
+    expect(existsSync(lease.path)).toBe(true);
+    expect(controller.snapshot()?.agents[lease.agentId]).toMatchObject({
+      lastError: expect.stringContaining('attachment could not be persisted'),
+      status: 'crashed',
+      worktree: lease,
+      worktreeBootstrap: { status: 'succeeded' },
+    });
     const events = readFileSync(join(stateDir, 'events.jsonl'), 'utf8');
     expect(events).toContain('agent_spawn_persist_failed');
     expect(events).toContain('Preserved dirty managed worktree');
-  });
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+
+    const restored = new ManagerController(fixture.pi, {
+      makeWorkers: stubWorkers().makeWorkers,
+      worktrees: worktrees.worktrees,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    expect(restored.snapshot()?.agents[lease.agentId]).toMatchObject({
+      status: 'crashed',
+      worktree: lease,
+      worktreeBootstrap: { status: 'succeeded' },
+    });
+    expect(existsSync(lease.path)).toBe(true);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  }, 15_000);
+
+  test('retains launched-state ownership when runtime termination cannot be proven', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    let stateDir = '';
+    let restoreStatePath = () => {};
+    const workers = stubWorkers({
+      onSpawn: () => {
+        restoreStatePath = makeTransientStatePathFailure(stateDir);
+      },
+      onStop: () => restoreStatePath(),
+      stopDefect: true,
+    });
+    const worktrees = trackedWorktrees();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: worktrees.worktrees,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    stateDir = activationStateDir(fixture.entries);
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retain uncertain launched ownership', title: 'Uncertain persistence' },
+        fixture.ctx,
+      ),
+    );
+
+    const failure = await withoutConsoleError(() =>
+      Effect.runPromise(
+        controller
+          .spawnAgent(
+            {
+              model: 'fixture/model',
+              task: 'Start, then make termination unverifiable.',
+              thinkingLevel: 'low',
+              workstreamId: workstream.id,
+            },
+            fixture.ctx,
+          )
+          .pipe(Effect.flip),
+      ),
+    );
+
+    expect(failure._tag).toBe('StoreError');
+    const lease = requiredValue(worktrees.latestLease());
+    expect(controller.snapshot()?.agents[lease.agentId]).toMatchObject({
+      lastError: expect.stringContaining('process termination could not be established'),
+      status: 'crashed',
+      worktree: lease,
+      worktreeBootstrap: { status: 'absent' },
+    });
+    expect(controller.snapshot()?.workstreams[workstream.id]?.status).toBe('active');
+    expect(existsSync(lease.path)).toBe(true);
+    expect(controller.runtimeSnapshots().size).toBe(0);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+  }, 15_000);
 
   test('stops an unattached revived runtime and preserves the existing lease when persistence fails', async () => {
     const repo = fixtureRepository();

@@ -6,7 +6,25 @@ import {
   WorktreeUpdateError,
   worktreeUpdateFailureSummary,
 } from '../worker-runtime/index.ts';
-import type { AgentRecord, ManagerEvent, ManagerState } from './domain.ts';
+import type { AgentRecord, ManagerEvent, ManagerState, WorktreeBootstrapRecord } from './domain.ts';
+
+const UNRECORDED_BOOTSTRAP_SUMMARY =
+  '[state_persistence] script/update terminal outcome was not durably recorded; completion and process termination are unknown; automatic rerun is disabled.';
+
+/** Never leave retained crashed ownership claiming that repository bootstrap is still running. */
+export function settleUnrecordedWorktreeBootstrap(
+  record: AgentRecord['worktreeBootstrap'],
+  completedAt: string,
+): WorktreeBootstrapRecord | undefined {
+  if (record?.status !== 'running') return record;
+  return {
+    completedAt,
+    failureSummary: UNRECORDED_BOOTSTRAP_SUMMARY,
+    script: 'script/update',
+    startedAt: record.startedAt,
+    status: 'interrupted',
+  };
+}
 
 const nowIso = Clock.currentTimeMillis.pipe(Effect.map((millis) => new Date(millis).toISOString()));
 

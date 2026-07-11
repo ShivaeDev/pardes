@@ -608,6 +608,48 @@ describe('advisory verification lifecycle', () => {
     });
   });
 
+  test('normalizes retained verifier bootstrap when terminal failure persistence is transient', async () => {
+    const fixture = await verificationFixture({
+      failMutationAt: 2,
+      worktreeBootstrap: {
+        run: (cwd) =>
+          Effect.fail(
+            new WorktreeUpdateError({
+              cwd,
+              diagnostic: {
+                countAccuracy: 'lower_bound',
+                stderrChars: 0,
+                stderrTail: '',
+                stdoutChars: 0,
+                stdoutTail: '',
+              },
+              directExitObserved: false,
+              reason: 'timeout',
+            }),
+          ),
+      },
+    });
+
+    await expect(
+      withoutConsoleError(() =>
+        Effect.runPromise(
+          fixture.coordinator.request({ sourceAgentId: fixture.sourceAgentId }).pipe(Effect.flip),
+        ),
+      ),
+    ).resolves.toBeInstanceOf(WorktreeUpdateError);
+    const [verification] = Object.values(fixture.namespace.state.verifications);
+    expect(verification).toMatchObject({ scratchCleanupPending: true });
+    expect(
+      fixture.namespace.state.agents[requiredValue(verification).verifierAgentId],
+    ).toMatchObject({
+      status: 'crashed',
+      worktreeBootstrap: {
+        failureSummary: expect.stringContaining('terminal outcome was not durably recorded'),
+        status: 'interrupted',
+      },
+    });
+  });
+
   test('discards detached scratch and removes provisional records when request runtime provisioning fails without touching writer files', async () => {
     const fixture = await verificationFixture({
       failSpawnAt: 1,

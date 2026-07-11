@@ -44,17 +44,19 @@ bootstrap row rather than rerunning repository code manually. A verifier is
 launched only after its post-hook checkout is reverified clean at the captured
 head. Writer cleanup removes only a verified-clean failed lease and retains
 durable agent ownership for dirty, unverifiable, timeout-uncertain, or
-lifecycle-unsettled work; verifier process uncertainty retains retryable scratch
-ownership. A retained revive does not rerun preparation. Restoration marks an unobserved in-flight hook interrupted,
-leaves process completion/termination explicitly unknown, and never reruns it
-automatically; inspect retained ownership, then use conservative cleanup or make
-a deliberate fresh request/spawn.
+lifecycle-unsettled work. This applies to bootstrap, runtime launch, and
+launched-state persistence failures. Verifier process uncertainty retains
+retryable scratch ownership. A crashed owner never remains marked as running
+bootstrap: an unrecorded terminal outcome is normalized to interrupted with
+completion and termination unknown. A retained revive does not rerun
+preparation. Restoration performs the same normalization and never reruns the
+hook automatically; inspect retained ownership, then use conservative cleanup
+or make a deliberate fresh request/spawn.
 
 The 15-minute timeout bounds manager waiting through a short final drain and
 exit-confirmation window; it does not prove every OS descendant stopped. Pardes
 signals the managed process group on POSIX (the direct child elsewhere), but a
-same-user descendant can create a new
-session and escape that boundary. A later Pardes checkout inspection still does
+same-user descendant can create a new session and escape that boundary. A later Pardes checkout inspection still does
 not prove that escaped process stopped; when this risk is material, surface the
 limitation for user-led OS-process inspection before destructive cleanup.
 

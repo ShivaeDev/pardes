@@ -1,5 +1,6 @@
 import { Cause, Effect, Exit } from 'effect';
 import { currentVerificationAttempt, type VerificationRecord } from '../domain.ts';
+import { settleUnrecordedWorktreeBootstrap } from '../worktree-bootstrap.ts';
 import type { VerificationLifecycleCoordinatorOptions } from './contracts.ts';
 import {
   nowIso,
@@ -118,6 +119,10 @@ export function makeVerificationProvisioningCompensation(
                           : 'Verifier refresh provisioning failed; detached scratch cleanup remains retryable.',
                       status: 'crashed',
                       updatedAt: timestamp,
+                      worktreeBootstrap: settleUnrecordedWorktreeBootstrap(
+                        agent.worktreeBootstrap,
+                        timestamp,
+                      ),
                     },
                   },
             verifications: { ...state.verifications, [current.id]: failed },

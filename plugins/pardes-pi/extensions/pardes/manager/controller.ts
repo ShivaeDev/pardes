@@ -1312,8 +1312,9 @@ export class ManagerController {
       yield* validateManagerStateNamespace(namespace, state);
     }
     yield* this.activationSafety.materialize(activation.stateDir);
-    const detached = Object.values(state.agents).filter((agent) =>
-      ATTACHED_STATUSES.has(agent.status),
+    const detached = Object.values(state.agents).filter(
+      (agent) =>
+        ATTACHED_STATUSES.has(agent.status) || agent.worktreeBootstrap?.status === 'running',
     );
     if (detached.length > 0) {
       const timestamp = yield* nowIso;
@@ -1336,7 +1337,7 @@ export class ManagerController {
             agents: Object.fromEntries(
               Object.entries(current.agents).map(([id, agent]) => [
                 id,
-                ATTACHED_STATUSES.has(agent.status)
+                ATTACHED_STATUSES.has(agent.status) || agent.worktreeBootstrap?.status === 'running'
                   ? {
                       ...agent,
                       lastError:
@@ -1385,7 +1386,7 @@ export class ManagerController {
         store,
         makeEvent(
           'agents_detached',
-          `Marked ${detached.length} detached worker runtime${detached.length === 1 ? '' : 's'} as crashed.`,
+          `Reconciled ${detached.length} detached worker runtime or interrupted bootstrap record${detached.length === 1 ? '' : 's'} as crashed.`,
           timestamp,
         ),
       );

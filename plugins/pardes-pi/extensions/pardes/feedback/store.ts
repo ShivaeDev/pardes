@@ -360,6 +360,160 @@ async function releaseWatchLock(
   await syncDirectory(cursorDirectory);
 }
 
+interface RecoveryElectionRecord {
+  readonly createdAt: string;
+  readonly pid: number;
+  readonly ticket?: number;
+  readonly token: string;
+}
+
+function recoveryElectionRecord(input: unknown): RecoveryElectionRecord | undefined {
+  if (typeof input !== 'object' || input === null) return;
+  const record = input as Partial<RecoveryElectionRecord>;
+  if (
+    typeof record.createdAt !== 'string' ||
+    typeof record.pid !== 'number' ||
+    !Number.isInteger(record.pid) ||
+    typeof record.token !== 'string' ||
+    (record.ticket !== undefined && (!Number.isSafeInteger(record.ticket) || record.ticket < 1))
+  )
+    return;
+  return {
+    createdAt: record.createdAt,
+    pid: record.pid,
+    ...(record.ticket === undefined ? {} : { ticket: record.ticket }),
+    token: record.token,
+  };
+}
+
+async function writeEphemeralRecord(path: string, value: unknown): Promise<void> {
+  const handle = await open(path, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function liveRecoveryRecords(
+  cursorDirectory: string,
+  prefix: string,
+  kind: 'choosing' | 'ticket',
+): Promise<readonly RecoveryElectionRecord[] | undefined> {
+  const records: RecoveryElectionRecord[] = [];
+  for (const entry of await readdir(cursorDirectory, { withFileTypes: true })) {
+    if (!entry.name.startsWith(`${prefix}-${kind}-`) || !entry.name.endsWith('.lock')) continue;
+    if (!entry.isFile() || entry.isSymbolicLink())
+      throw new Error('feedback recovery election is redirected');
+    const path = join(cursorDirectory, entry.name);
+    const stats = await optionalStats(path);
+    if (!stats) continue;
+    let record: RecoveryElectionRecord | undefined;
+    try {
+      if (stats.size <= 16 * 1_024)
+        record = recoveryElectionRecord(JSON.parse(await readFile(path, 'utf8')) as unknown);
+    } catch {
+      record = undefined;
+    }
+    const young = Date.now() - stats.mtimeMs <= WATCH_LOCK_RECOVERY_GRACE_MS;
+    if ((!record && !young) || (record && !processIsAlive(record.pid))) {
+      await rm(path, { force: true });
+      continue;
+    }
+    if (!record) return undefined;
+    records.push(record);
+  }
+  return records;
+}
+
+async function acquireRecoveryElection(
+  cursorDirectory: string,
+  observedStats: { readonly dev: number; readonly ino: number },
+): Promise<(() => Promise<void>) | 'blocked' | 'lost'> {
+  const prefix = `recovery-${observedStats.dev}-${observedStats.ino}`;
+  const token = randomUUID();
+  const choosingPath = join(cursorDirectory, `${prefix}-choosing-${token}.lock`);
+  const ticketPath = join(cursorDirectory, `${prefix}-ticket-${token}.lock`);
+  const base = { createdAt: new Date().toISOString(), pid: process.pid, token };
+  let elected = false;
+  try {
+    await writeEphemeralRecord(choosingPath, base);
+    const existingTickets = await liveRecoveryRecords(cursorDirectory, prefix, 'ticket');
+    if (!existingTickets) return 'blocked';
+    const ticket =
+      existingTickets.reduce((maximum, record) => Math.max(maximum, record.ticket ?? 0), 0) + 1;
+    await writeEphemeralRecord(ticketPath, { ...base, ticket });
+    await rm(choosingPath, { force: true });
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const choosing = await liveRecoveryRecords(cursorDirectory, prefix, 'choosing');
+      if (choosing?.length === 0) break;
+      if (!choosing) return 'blocked';
+      await sleep(2);
+    }
+    const choosing = await liveRecoveryRecords(cursorDirectory, prefix, 'choosing');
+    if (!choosing) return 'blocked';
+    if (choosing.length > 0) return 'lost';
+    const tickets = await liveRecoveryRecords(cursorDirectory, prefix, 'ticket');
+    if (!tickets) return 'blocked';
+    const winner = [...tickets]
+      .filter((record) => record.ticket !== undefined)
+      .sort((left, right) =>
+        left.ticket === right.ticket
+          ? left.token < right.token
+            ? -1
+            : 1
+          : (left.ticket ?? 0) - (right.ticket ?? 0),
+      )[0];
+    if (!winner || winner.token !== token) return 'lost';
+    elected = true;
+    return async () => {
+      await rm(ticketPath, { force: true });
+      await syncDirectory(cursorDirectory);
+    };
+  } finally {
+    await rm(choosingPath, { force: true });
+    if (!elected) await rm(ticketPath, { force: true });
+  }
+}
+
+async function sweepOrphanWatchArtifacts(cursorDirectory: string): Promise<void> {
+  for (const entry of await readdir(cursorDirectory, { withFileTypes: true })) {
+    const managed =
+      /^owner-[a-f0-9-]+\.lock$/.test(entry.name) ||
+      /^observer-\d+-[a-f0-9-]+\.lock$/.test(entry.name) ||
+      /^recovery-\d+-\d+-(?:choosing|ticket)-[a-f0-9-]+\.lock$/.test(entry.name);
+    if (!managed) continue;
+    if (!entry.isFile() || entry.isSymbolicLink())
+      throw new Error('feedback watch artifact is redirected');
+    const path = join(cursorDirectory, entry.name);
+    const stats = await optionalStats(path);
+    if (!stats || (entry.name.startsWith('owner-') && stats.nlink > 1)) continue;
+    const observer = /^observer-(\d+)-/.exec(entry.name);
+    if (observer) {
+      const observerPid = Number(observer[1]);
+      if (Number.isInteger(observerPid) && processIsAlive(observerPid)) continue;
+      await rm(path, { force: true });
+      continue;
+    }
+    let owner: { readonly pid: number } | undefined;
+    try {
+      if (stats.size <= 16 * 1_024) {
+        const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+        const lock = watchLockRecord(parsed);
+        const election = recoveryElectionRecord(parsed);
+        owner = lock ?? election;
+      }
+    } catch {
+      owner = undefined;
+    }
+    const young = Date.now() - stats.mtimeMs <= WATCH_LOCK_RECOVERY_GRACE_MS;
+    if ((!owner && !young) || (owner && !processIsAlive(owner.pid)))
+      await rm(path, { force: true });
+  }
+}
+
 async function recoverObservedWatchLock(
   cursorDirectory: string,
   path: string,
@@ -383,7 +537,8 @@ async function recoverObservedWatchLock(
       observed = undefined;
     }
     const young = Date.now() - observedStats.mtimeMs <= WATCH_LOCK_RECOVERY_GRACE_MS;
-    if ((observed && processIsAlive(observed.pid)) || (!observed && young)) return 'busy';
+    if (observed && processIsAlive(observed.pid)) return 'busy';
+    if (!observed && young) return 'retry';
 
     for (const entry of await readdir(cursorDirectory, { withFileTypes: true })) {
       const match = /^observer-(\d+)-[a-f0-9-]+\.lock$/.exec(entry.name);
@@ -396,32 +551,29 @@ async function recoverObservedWatchLock(
         await rm(staleObserverPath, { force: true });
     }
 
-    let ownerPath: string | undefined;
-    let ownerStats: Awaited<ReturnType<typeof lstat>> | undefined;
-    if (observed?.ownerFile && /^owner-[a-f0-9-]+\.lock$/.test(observed.ownerFile)) {
-      ownerPath = join(cursorDirectory, observed.ownerFile);
-      ownerStats = await optionalStats(ownerPath);
-      if (ownerStats && !sameFile(observedStats, ownerStats)) ownerStats = undefined;
-    }
-    const expectedLinks = ownerStats ? 3 : 2;
-    const freshObservedStats = await optionalStats(observerPath);
-    if (!freshObservedStats || freshObservedStats.nlink !== expectedLinks) {
-      await sleep(Math.floor(Math.random() * 5) + 1);
-      return 'retry';
-    }
-
-    const currentStats = await optionalStats(path);
-    if (!currentStats || !sameFile(observedStats, currentStats)) return 'retry';
+    const election = await acquireRecoveryElection(cursorDirectory, observedStats);
+    if (election === 'lost') return 'busy';
+    if (election === 'blocked') return 'retry';
     try {
-      await rm(path);
-    } catch (error) {
-      if (!isCode(error, 'ENOENT')) throw error;
-      return 'retry';
-    }
+      const currentStats = await optionalStats(path);
+      if (!currentStats || !sameFile(observedStats, currentStats)) return 'retry';
+      try {
+        await rm(path);
+      } catch (error) {
+        if (!isCode(error, 'ENOENT')) throw error;
+        return 'retry';
+      }
 
-    if (ownerPath && ownerStats) await rm(ownerPath, { force: true });
-    await syncDirectory(cursorDirectory);
-    return 'retry';
+      if (observed?.ownerFile && /^owner-[a-f0-9-]+\.lock$/.test(observed.ownerFile)) {
+        const ownerPath = join(cursorDirectory, observed.ownerFile);
+        const ownerStats = await optionalStats(ownerPath);
+        if (ownerStats && sameFile(observedStats, ownerStats)) await rm(ownerPath, { force: true });
+      }
+      await syncDirectory(cursorDirectory);
+      return 'retry';
+    } finally {
+      await election();
+    }
   } finally {
     await rm(observerPath, { force: true });
   }
@@ -429,7 +581,8 @@ async function recoverObservedWatchLock(
 
 /**
  * Serialize one cursor scan across processes. Unique owner inodes and temporary
- * observer hard links fence stale recovery so it can never unlink a successor.
+ * observer hard links fence successors; a choosing/ticket election selects one
+ * deterministic stale-inode recovery winner.
  */
 export function acquireFeedbackWatchLock(
   cursor: string,
@@ -437,6 +590,7 @@ export function acquireFeedbackWatchLock(
 ): Effect.Effect<FeedbackWatchLock | undefined, FeedbackStoreError> {
   return effectPromise('acquire feedback watch lock', async () => {
     const cursorDirectory = await ensureCursorDirectory(feedbackRegistryPaths(root), cursor);
+    await sweepOrphanWatchArtifacts(cursorDirectory);
     const path = join(cursorDirectory, 'scan.lock');
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const token = randomUUID();
@@ -470,7 +624,7 @@ export function acquireFeedbackWatchLock(
       }
       if ((await recoverObservedWatchLock(cursorDirectory, path)) === 'busy') return undefined;
     }
-    return undefined;
+    throw new Error('feedback watch recovery remains contended; retry the scan');
   });
 }
 

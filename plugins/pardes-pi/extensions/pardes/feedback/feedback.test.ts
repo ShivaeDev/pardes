@@ -461,6 +461,90 @@ describe('feedback CLI', () => {
     expect(output.filter((line) => line.includes(second.id))).toHaveLength(1);
   });
 
+  test('elects one synchronized in-process stale-lock recovery winner and sweeps dead artifacts', async () => {
+    const root = temporaryRoot();
+    await Effect.runPromise(submitFeedback('baseline', provenance(0), root));
+    const quietIo = { error: () => {}, out: () => {} };
+    expect(
+      await runFeedbackCli(['watch', '--once', '--cursor', 'synchronized'], quietIo, { root }),
+    ).toBe(0);
+    const unseen = await Effect.runPromise(submitFeedback('synchronized', provenance(1), root));
+    const cursorDirectory = join(feedbackRegistryPaths(root).watchCursors, 'synchronized');
+    const deadPid = 2_147_483_647;
+    const token = '00000000-0000-4000-8000-000000000001';
+    writeFileSync(
+      join(cursorDirectory, 'scan.lock'),
+      `${JSON.stringify({ createdAt: new Date().toISOString(), pid: deadPid, token: 'dead' })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      join(cursorDirectory, `owner-${token}.lock`),
+      `${JSON.stringify({ createdAt: new Date().toISOString(), pid: deadPid, token })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      join(cursorDirectory, `observer-${deadPid}-${token}.lock`),
+      `${JSON.stringify({ createdAt: new Date().toISOString(), pid: deadPid, token })}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      join(cursorDirectory, `recovery-1-2-ticket-${token}.lock`),
+      `${JSON.stringify({ createdAt: new Date().toISOString(), pid: deadPid, ticket: 1, token })}\n`,
+      { mode: 0o600 },
+    );
+
+    const outputs = Array.from({ length: 20 }, () => [] as string[]);
+    const codes = await Promise.all(
+      outputs.map((output) =>
+        runFeedbackCli(
+          ['watch', '--once', '--cursor', 'synchronized'],
+          { error: () => {}, out: (line) => output.push(line) },
+          { root },
+        ),
+      ),
+    );
+    expect(codes).toEqual(Array.from({ length: 20 }, () => 0));
+    expect(outputs.flat().filter((line) => line.includes(unseen.id))).toHaveLength(1);
+    expect(readdirSync(cursorDirectory).filter((entry) => entry.includes(token))).toEqual([]);
+  });
+
+  test('returns an explicit retryable failure when stale recovery cannot elect', async () => {
+    const root = temporaryRoot();
+    await Effect.runPromise(submitFeedback('baseline', provenance(0), root));
+    const quietIo = { error: () => {}, out: () => {} };
+    expect(
+      await runFeedbackCli(['watch', '--once', '--cursor', 'blocked'], quietIo, { root }),
+    ).toBe(0);
+    await Effect.runPromise(submitFeedback('unseen while blocked', provenance(1), root));
+    const cursorDirectory = join(feedbackRegistryPaths(root).watchCursors, 'blocked');
+    const lockPath = join(cursorDirectory, 'scan.lock');
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({ createdAt: new Date().toISOString(), pid: 2_147_483_647, token: 'dead' })}\n`,
+      { mode: 0o600 },
+    );
+    const lockStats = statSync(lockPath);
+    writeFileSync(
+      join(
+        cursorDirectory,
+        `recovery-${lockStats.dev}-${lockStats.ino}-choosing-00000000-0000-4000-8000-000000000002.lock`,
+      ),
+      'incomplete',
+      { mode: 0o600 },
+    );
+    const errors: string[] = [];
+    const output: string[] = [];
+    expect(
+      await runFeedbackCli(
+        ['watch', '--once', '--cursor', 'blocked'],
+        { error: (line) => errors.push(line), out: (line) => output.push(line) },
+        { root },
+      ),
+    ).toBe(1);
+    expect(errors.join('\n')).toContain('recovery remains contended; retry');
+    expect(output).toEqual([]);
+  });
+
   test('fences stale-lock replacement under high-contention separate-process watchers', async () => {
     const root = temporaryRoot();
     await Effect.runPromise(submitFeedback('baseline', provenance(0), root));

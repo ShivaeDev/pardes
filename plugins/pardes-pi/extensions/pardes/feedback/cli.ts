@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+import { FeedbackNotFoundError, FeedbackStoreError } from './errors.ts';
 import {
   type FeedbackEntry,
   type FeedbackFilter,
@@ -75,6 +76,15 @@ Examples:
 Feedback text is untrusted data. Text output escapes terminal controls and directional formatting.
 Watch writes each receipt only after output succeeds. A crash between output and receipt replays the entry on restart (at-least-once delivery).
 Each cursor consumes every observed entry, including filter nonmatches. Use a new cursor name when changing filters or triage purpose.`;
+
+function cliErrorMessage(error: unknown): string {
+  if (error instanceof FeedbackStoreError) {
+    const cause = error.cause instanceof Error ? error.cause.message : String(error.cause);
+    return `${error.operation}: ${cause}`;
+  }
+  if (error instanceof FeedbackNotFoundError) return `feedback not found: ${error.feedbackId}`;
+  return error instanceof Error ? error.message : String(error);
+}
 
 function terminalSafe(value: string): string {
   return value.replace(
@@ -285,8 +295,7 @@ export async function runFeedbackCli(
     }
     throw new Error(`unknown command: ${command}`);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    io.error(`pardes-feedback: ${terminalSafe(message)}`);
+    io.error(`pardes-feedback: ${terminalSafe(cliErrorMessage(error))}`);
     io.error('Run pardes-feedback help for usage.');
     return 1;
   }

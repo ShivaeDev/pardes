@@ -102,7 +102,8 @@ agent_compact · agent_reload · agent_revive · agent_stop · agent_lease_clean
 ```
 
 `question` is the single user-judgment surface. Its options array may be empty
-for pure free-form input, and custom input is always available. If attention was
+for pure free-form input, and custom input is always available up to 4,000
+characters. If attention was
 delivered when the question opened, only that exact cursor is consumed after a
 submitted non-blank answer; cancellation, failure, blank input, and queued or
 later attention remain pending.

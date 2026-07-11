@@ -23,7 +23,7 @@ Restoration is a concise reconnect/check pass: durable state returned while prio
 Keep the two inbox paths explicit everywhere:
 
 1. Autonomous rows may be acknowledged once handled.
-2. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first. Surface it with `question`; use structured options or `options: []` for free-form feedback. The tool binds the currently delivered cursor and consumes only it after a non-blank answer.
+2. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first. Surface it with `question`; use structured options or `options: []` for free-form feedback (4,000-character maximum). The tool binds the currently delivered cursor and consumes only it after a valid non-blank answer; blank or oversized input preserves it.
 
 Do not encode semantic classification into software. The manager judges which path applies. Keep exact-cursor controller behavior unchanged: a delivered cursor covers only its inspectable batch and never a later queued suffix.
 

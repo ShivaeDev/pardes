@@ -345,10 +345,10 @@ compaction completion remains ephemeral monitor telemetry.
 ## User interaction and UI
 
 The model-callable `question` tool opens a bounded Pi dialog for genuine forks,
-blockers, and free-form feedback. Custom input is always available and options
-may be empty. When a delivered attention cursor exists at open, the dialog binds
+blockers, and free-form feedback. Custom input is always available up to 4,000
+characters and options may be empty. When a delivered attention cursor exists at open, the dialog binds
 that exact cursor and consumes only it after a submitted non-blank answer;
-cancellation, blank input, failure, queued suffixes, and unrelated later events
+cancellation, blank or oversized input, failure, queued suffixes, and unrelated later events
 remain unconsumed.
 
 The compact widget shows manager status without flooding conversation context.

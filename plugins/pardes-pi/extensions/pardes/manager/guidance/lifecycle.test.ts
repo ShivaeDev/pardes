@@ -178,7 +178,7 @@ Operating model:
 - Review: read the bounded worker report. For meaningful engineering work, request advisory \`verification_request({ sourceAgentId })\`, wait for durable inbox delivery without polling, route findings to the retained writer, and refresh verification after fixes.
 - Publication: use \`pull_request_create\` only for exact committed worker state, keep the owner attached for CI or review feedback, and leave merges under user control.
 - Published review feedback: tell the retained worker to make additive descendant commits only; do not amend, rebase, or rewrite published branch history. Pardes exact-SHA publication intentionally never force-pushes.
-- Inbox has exactly two paths: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` with choices or \`options: []\` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.
+- Inbox has exactly two paths: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` with choices or \`options: []\` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.
 - Communication: state facts, decision needed, blockers, and next action. Skip fluff, repeated narration, excess headings, pseudo-diagrams, gratuitous code fences, and vertical whitespace.
 First pass:
 - Inspect bounded \`pardes_status\` for current counts and warnings, then inspect \`pardes_status(view="inbox")\` if attention is pending.
@@ -192,7 +192,7 @@ Operating model:
 - Review: read the bounded worker report. For meaningful engineering work, request advisory \`verification_request({ sourceAgentId })\`, wait for durable inbox delivery without polling, route findings to the retained writer, and refresh verification after fixes.
 - Publication: use \`pull_request_create\` only for exact committed worker state, keep the owner attached for CI or review feedback, and leave merges under user control.
 - Published review feedback: tell the retained worker to make additive descendant commits only; do not amend, rebase, or rewrite published branch history. Pardes exact-SHA publication intentionally never force-pushes.
-- Inbox has exactly two paths: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` with choices or \`options: []\` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.
+- Inbox has exactly two paths: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` with choices or \`options: []\` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.
 - Communication: state facts, decision needed, blockers, and next action. Skip fluff, repeated narration, excess headings, pseudo-diagrams, gratuitous code fences, and vertical whitespace.
 Situational reset:
 - Persisted manager state and the coordinating suffix are authoritative. Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`, before deciding what changed.
@@ -207,7 +207,7 @@ Reload continuation:
   restored: `Pardes manager restored. Durable state was restored, but prior process-scoped child RPC attachment is not assumed to have survived. Reconnect and reinspect before continuing.
 Reconnect/check pass:
 - Inspect bounded \`pardes_status\`, then \`pardes_status(view="inbox")\`; account for open review gates and warnings before taking lifecycle actions.
-- Apply the inbox rule without shortcuts: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` with choices or \`options: []\` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.
+- Apply the inbox rule without shortcuts: Autonomous rows may be acknowledged once handled. When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it. Use \`question\` with choices or \`options: []\` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.
 - Revive only detached retained conversations that should continue. Keep open-review owners attached for CI or review feedback.
 - Resume published-review routing safely: require additive descendant commits only; never amend, rebase, or rewrite published branch history because exact-SHA publication never force-pushes.
 - Use \`pardes_status(view="cleanup")\` only for explicit resolved-artifact guidance.`,

@@ -7,10 +7,12 @@ import {
 import { describe, expect, test } from 'vitest';
 import {
   PardesQuestionDialog,
+  QUESTION_ANSWER_MAX_CHARS,
   QUESTION_CUSTOM_LABEL,
   QUESTION_PROMPT_MAX_CHARS,
   type QuestionDialogOption,
   type QuestionDialogPalette,
+  sanitizeQuestionAnswer,
 } from './question-dialog.ts';
 
 const plain = (text: string) => text;
@@ -23,6 +25,7 @@ const plainPalette: QuestionDialogPalette = {
   muted: plain,
   selected: plain,
   text: plain,
+  warning: plain,
 };
 
 const ansi = (code: number) => (text: string) => `\x1b[${code}m${text}\x1b[0m`;
@@ -35,6 +38,7 @@ const ansiPalette: QuestionDialogPalette = {
   muted: ansi(90),
   selected: ansi(44),
   text: ansi(37),
+  warning: ansi(33),
 };
 
 function createDialog({
@@ -129,6 +133,37 @@ describe('Pardes question decision dialog', () => {
 
     dialog.handleInput('\r');
     expect(choices).toEqual([{ kind: 'custom', value: 'release/next' }]);
+  });
+
+  test('neutralizes pasted terminal controls while preserving ordinary Unicode', () => {
+    const { choices, dialog } = createDialog({ options: [] });
+
+    dialog.handleInput('\x1b[200~安全🙂evil\x1b[3');
+    dialog.handleInput('1mRED\u009bTAIL\x1b[20');
+    dialog.handleInput('1~');
+    const editing = dialog.render(62).join('\n');
+    expect(editing).toContain('安全🙂evil [31mRED TAIL');
+    expect(editing).not.toContain('evil\x1b[31mRED');
+    dialog.handleInput('\r');
+    expect(choices).toEqual([{ kind: 'custom', value: '安全🙂evil [31mRED TAIL' }]);
+    expect(sanitizeQuestionAnswer('line\n安全🙂\x1b[31m\u009b\u0000')).toBe('line 安全🙂 [31m  ');
+  });
+
+  test('bounds inline custom input and marks an oversized answer for rejection', () => {
+    const { choices, dialog } = createDialog({ options: [] });
+
+    dialog.handleInput(`\x1b[200~${'x'.repeat(QUESTION_ANSWER_MAX_CHARS + 1)}\x1b[201~`);
+    const editing = dialog.render(62).join('\n');
+    expect(editing).toContain(`Answer exceeds ${QUESTION_ANSWER_MAX_CHARS} characters and will be`);
+    expect(editing).toContain('rejected.');
+    dialog.handleInput('\r');
+    expect(choices).toEqual([
+      {
+        exceededMaxChars: true,
+        kind: 'custom',
+        value: 'x'.repeat(QUESTION_ANSWER_MAX_CHARS),
+      },
+    ]);
   });
 
   test('starts a free-form-only question on the editable custom row', () => {

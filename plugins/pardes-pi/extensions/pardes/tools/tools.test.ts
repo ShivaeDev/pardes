@@ -412,7 +412,7 @@ describe('Pardes model-visible tools', () => {
       'Use only for the autonomous path after rows are handled',
     );
     expect(requiredValue(tools.get('question')).description).toContain(
-      'consumes only it after a non-blank answer',
+      'consumes only it after a valid non-blank answer',
     );
   });
 
@@ -2809,7 +2809,7 @@ describe('Pardes model-visible tools', () => {
       'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
     expect(external.content[0]?.text).toContain(
-      'judgment handoff: Use `question` with choices or `options: []` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.',
+      'judgment handoff: Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.',
     );
     expect(external.details).toEqual({
       agentId: 'agent-1',
@@ -3047,7 +3047,7 @@ describe('Pardes model-visible tools', () => {
       'path judgment: When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
     expect(hostile.content[0]?.text).toContain(
-      'judgment handoff: Use `question` with choices or `options: []` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.',
+      'judgment handoff: Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.',
     );
     expect(hostile.details).toMatchObject({
       eventId: 'event-hostile',

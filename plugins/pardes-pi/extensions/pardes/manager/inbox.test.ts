@@ -172,7 +172,7 @@ describe('manager inbox notification projection', () => {
         'Inspect `pardes_status(view="inbox")` for bounded rows; use `inbox_get({ eventId })` only for a known row; trust current inbox if stale.',
         'Autonomous rows may be acknowledged once handled.',
         'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
-        'Use `question` with choices or `options: []` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.',
+        'Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.',
       ].join('\n'),
     );
     expect(message.details).toEqual({
@@ -401,7 +401,7 @@ describe('manager inbox notification projection', () => {
     expect(message.content).toContain(
       'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
-    expect(message.content.endsWith('consumes only it after a non-blank answer.')).toBe(true);
+    expect(message.content.endsWith('consumes only it after a valid non-blank answer.')).toBe(true);
   });
 
   test('reserves intact authored hints and omission metadata before selecting complete legacy wake rows', () => {
@@ -443,6 +443,6 @@ describe('manager inbox notification projection', () => {
       '- queued suffix: +100 durable events await the next cursor release.',
     );
     expect(message.content).toContain('Autonomous rows may be acknowledged once handled.');
-    expect(message.content.endsWith('consumes only it after a non-blank answer.')).toBe(true);
+    expect(message.content.endsWith('consumes only it after a valid non-blank answer.')).toBe(true);
   });
 });

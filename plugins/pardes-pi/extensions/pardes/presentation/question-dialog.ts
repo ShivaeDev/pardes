@@ -13,12 +13,15 @@ import {
 export const QUESTION_CUSTOM_LABEL = 'Type a custom answer…';
 export const QUESTION_DIALOG_MAX_VISIBLE_OPTIONS = 5;
 export const QUESTION_PROMPT_MAX_CHARS = 1_000;
+export const QUESTION_ANSWER_MAX_CHARS = 4_000;
 export const QUESTION_OPTION_LABEL_MAX_CHARS = 256;
 export const QUESTION_OPTION_DESCRIPTION_MAX_CHARS = 1_000;
 export const QUESTION_OPTIONS_MAX_ITEMS = 12;
 
 const OPTION_LABEL_MAX_LINES = 2;
 const OPTION_DESCRIPTION_MAX_LINES = 2;
+const BRACKETED_PASTE_START = '\u001b[200~';
+const BRACKETED_PASTE_END = '\u001b[201~';
 // biome-ignore lint/suspicious/noControlCharactersInRegex: Terminal question sanitization intentionally strips control ranges.
 const TERMINAL_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 
@@ -29,7 +32,11 @@ export interface QuestionDialogOption {
 
 export type QuestionDialogChoice =
   | { readonly kind: 'option'; readonly index: number; readonly value: string }
-  | { readonly kind: 'custom'; readonly value?: string };
+  | {
+      readonly kind: 'custom';
+      readonly value?: string;
+      readonly exceededMaxChars?: boolean;
+    };
 
 export interface QuestionDialogPalette {
   readonly accent: (text: string) => string;
@@ -37,6 +44,7 @@ export interface QuestionDialogPalette {
   readonly text: (text: string) => string;
   readonly muted: (text: string) => string;
   readonly dim: (text: string) => string;
+  readonly warning: (text: string) => string;
   readonly border: (text: string) => string;
   readonly borderMuted: (text: string) => string;
   readonly selected: (text: string) => string;
@@ -66,6 +74,17 @@ function sanitizeQuestionPrompt(question: string): string {
 
 export function sanitizeQuestionOptionLabel(label: string): string {
   return boundedInertText(label, QUESTION_OPTION_LABEL_MAX_CHARS);
+}
+
+/** Keep user-authored answers terminal-inert without changing ordinary Unicode text. */
+export function sanitizeQuestionAnswer(answer: string): string {
+  return answer.replace(TERMINAL_CONTROL_CHARACTERS, ' ');
+}
+
+function truncateQuestionAnswer(answer: string, maxChars = QUESTION_ANSWER_MAX_CHARS): string {
+  const truncated = answer.slice(0, maxChars);
+  const finalCodeUnit = truncated.charCodeAt(truncated.length - 1);
+  return finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff ? truncated.slice(0, -1) : truncated;
 }
 
 function sanitizeQuestionOption(option: QuestionDialogOption): QuestionDialogOption {
@@ -112,6 +131,7 @@ function themePalette(theme: Theme): QuestionDialogPalette {
     muted: (text) => theme.fg('muted', text),
     selected: (text) => theme.bg('selectedBg', text),
     text: (text) => theme.fg('text', text),
+    warning: (text) => theme.fg('warning', text),
   };
 }
 
@@ -133,6 +153,9 @@ export class PardesQuestionDialog implements Component, Focusable {
   private readonly customInput = new Input();
   private selectedIndex = 0;
   private _focused = false;
+  private customInputExceededMaxChars = false;
+  private bracketedPasteBuffer: string | undefined;
+  private bracketedPasteContent = '';
 
   constructor(options: QuestionDialogOptions) {
     this.question = sanitizeQuestionPrompt(options.question);
@@ -144,7 +167,12 @@ export class PardesQuestionDialog implements Component, Focusable {
     this.keybindings = options.keybindings;
     this.requestRender = options.requestRender;
     this.onDone = options.onDone;
-    this.customInput.onSubmit = (value) => this.onDone({ kind: 'custom', value });
+    this.customInput.onSubmit = (value) =>
+      this.onDone({
+        ...(this.customInputExceededMaxChars ? { exceededMaxChars: true } : {}),
+        kind: 'custom',
+        value,
+      });
     this.customInput.onEscape = () => this.onDone(null);
     this.updateInputFocus();
   }
@@ -225,13 +253,17 @@ export class PardesQuestionDialog implements Component, Focusable {
       if (!selected) return;
       this.onDone(
         selected.custom
-          ? { kind: 'custom', value: this.customInput.getValue() }
+          ? {
+              ...(this.customInputExceededMaxChars ? { exceededMaxChars: true } : {}),
+              kind: 'custom',
+              value: this.customInput.getValue(),
+            }
           : { index: this.selectedIndex, kind: 'option', value: displayValue(selected) },
       );
       return;
     }
     if (this.options[this.selectedIndex]?.custom) {
-      this.customInput.handleInput(data);
+      this.handleCustomInput(data);
       this.requestRender();
     }
   }
@@ -268,6 +300,16 @@ export class PardesQuestionDialog implements Component, Focusable {
         lines.push(
           this.frame(this.palette.accent(`${continuation}${inputLine}`), renderWidth, true),
         );
+        if (this.customInputExceededMaxChars) {
+          for (const warning of wrapTextWithAnsi(
+            `Answer exceeds ${QUESTION_ANSWER_MAX_CHARS} characters and will be rejected.`,
+            available,
+          )) {
+            lines.push(
+              this.frame(this.palette.warning(`${continuation}${warning}`), renderWidth, true),
+            );
+          }
+        }
       } else if (this.customInput.getValue()) {
         for (const valueLine of boundedWrappedLines(
           this.customInput.getValue(),
@@ -294,6 +336,77 @@ export class PardesQuestionDialog implements Component, Focusable {
     }
 
     return lines;
+  }
+
+  private handleCustomInput(data: string): void {
+    if (this.bracketedPasteBuffer !== undefined) {
+      this.consumeBracketedPaste(data);
+      return;
+    }
+
+    const startIndex = data.indexOf(BRACKETED_PASTE_START);
+    if (startIndex < 0) {
+      this.handleUnpastedCustomInput(data);
+      return;
+    }
+
+    const beforePaste = data.slice(0, startIndex);
+    if (beforePaste) this.handleUnpastedCustomInput(beforePaste);
+    this.bracketedPasteBuffer = '';
+    this.bracketedPasteContent = '';
+    this.consumeBracketedPaste(data.slice(startIndex + BRACKETED_PASTE_START.length));
+  }
+
+  private handleUnpastedCustomInput(data: string): void {
+    const valueLength = this.customInput.getValue().length;
+    if (
+      data.search(TERMINAL_CONTROL_CHARACTERS) < 0 &&
+      valueLength + data.length > QUESTION_ANSWER_MAX_CHARS
+    ) {
+      this.customInputExceededMaxChars = true;
+      const available = Math.max(0, QUESTION_ANSWER_MAX_CHARS - valueLength);
+      if (available > 0) this.customInput.handleInput(truncateQuestionAnswer(data, available));
+      return;
+    }
+    this.customInput.handleInput(data);
+    this.enforceCustomInputBound();
+  }
+
+  private consumeBracketedPaste(data: string): void {
+    if (this.bracketedPasteBuffer === undefined) return;
+    const combined = this.bracketedPasteBuffer + data;
+    const endIndex = combined.indexOf(BRACKETED_PASTE_END);
+    if (endIndex >= 0) {
+      this.appendBracketedPasteContent(combined.slice(0, endIndex));
+      const remaining = combined.slice(endIndex + BRACKETED_PASTE_END.length);
+      const pasted = this.bracketedPasteContent;
+      this.bracketedPasteBuffer = undefined;
+      this.bracketedPasteContent = '';
+      this.customInput.handleInput(`${BRACKETED_PASTE_START}${pasted}${BRACKETED_PASTE_END}`);
+      this.enforceCustomInputBound();
+      if (remaining) this.handleCustomInput(remaining);
+      return;
+    }
+
+    const retainedChars = Math.min(BRACKETED_PASTE_END.length - 1, combined.length);
+    this.appendBracketedPasteContent(combined.slice(0, combined.length - retainedChars));
+    this.bracketedPasteBuffer = combined.slice(combined.length - retainedChars);
+  }
+
+  private appendBracketedPasteContent(content: string): void {
+    const sanitized = sanitizeQuestionAnswer(content);
+    const available = QUESTION_ANSWER_MAX_CHARS - this.bracketedPasteContent.length;
+    if (sanitized.length > available) this.customInputExceededMaxChars = true;
+    if (available > 0) this.bracketedPasteContent += truncateQuestionAnswer(sanitized, available);
+  }
+
+  private enforceCustomInputBound(): void {
+    const value = this.customInput.getValue();
+    const sanitized = sanitizeQuestionAnswer(value);
+    if (sanitized !== value) this.customInput.setValue(sanitized);
+    if (sanitized.length <= QUESTION_ANSWER_MAX_CHARS) return;
+    this.customInputExceededMaxChars = true;
+    this.customInput.setValue(truncateQuestionAnswer(sanitized));
   }
 
   private moveSelection(delta: number): void {

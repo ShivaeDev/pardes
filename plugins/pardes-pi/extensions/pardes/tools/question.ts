@@ -8,10 +8,12 @@ import {
   USER_JUDGMENT_INBOX_PATH,
 } from '../manager/index.ts';
 import {
+  QUESTION_ANSWER_MAX_CHARS,
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
   QUESTION_OPTIONS_MAX_ITEMS,
   QUESTION_PROMPT_MAX_CHARS,
+  sanitizeQuestionAnswer,
   sanitizeQuestionOptionLabel,
   selectPardesQuestionOption,
 } from '../presentation/index.ts';
@@ -41,7 +43,7 @@ const QuestionOption = Type.Object(
 
 export function registerQuestionTool(pi: ExtensionAPI, manager: ManagerController): void {
   registerPardesTool(pi, {
-    description: `Unified user-judgment path: ask one genuine decision or free-form question. Options may be empty and a custom answer is always available. If a delivered Pardes attention cursor exists when the dialog opens, question binds that exact cursor and consumes only it after a non-blank answer; cancellation, failure, or blank input preserves it, and queued suffix attention is never consumed. ${INBOX_TWO_PATH_GUIDANCE}`,
+    description: `Unified user-judgment path: ask one genuine decision or free-form question. Options may be empty and a custom answer is always available, with a ${QUESTION_ANSWER_MAX_CHARS}-character limit. If a delivered Pardes attention cursor exists when the dialog opens, question binds that exact cursor and consumes only it after a valid non-blank answer; cancellation, failure, blank input, or oversized input preserves it, and queued suffix attention is never consumed. ${INBOX_TWO_PATH_GUIDANCE}`,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       if (!ctx.hasUI) return textResult('Error: question requires an interactive UI.');
       if (signal?.aborted)
@@ -91,8 +93,10 @@ export function registerQuestionTool(pi: ExtensionAPI, manager: ManagerControlle
 
         let answer: string | undefined;
         let custom: boolean;
+        let exceededMaxChars = false;
         if (selection.kind === 'custom') {
           answer = selection.value;
+          exceededMaxChars = selection.exceededMaxChars === true;
           if (answer === undefined) {
             answer = await ctx.ui.input(
               params.options.length === 0 ? params.question : 'Custom answer',
@@ -107,6 +111,21 @@ export function registerQuestionTool(pi: ExtensionAPI, manager: ManagerControlle
           );
           custom = false;
         }
+
+        if (
+          custom &&
+          (exceededMaxChars || (answer !== undefined && answer.length > QUESTION_ANSWER_MAX_CHARS))
+        ) {
+          return await preserveCursor(
+            `User answer exceeded the ${QUESTION_ANSWER_MAX_CHARS}-character limit. The question remains unresolved.`,
+            {
+              answer: null,
+              maxChars: QUESTION_ANSWER_MAX_CHARS,
+              rejected: 'answer_too_long',
+            },
+          );
+        }
+        if (custom && answer !== undefined) answer = sanitizeQuestionAnswer(answer);
 
         if (!answer?.trim())
           return await preserveCursor(
@@ -196,7 +215,7 @@ export function registerQuestionTool(pi: ExtensionAPI, manager: ManagerControlle
       AUTONOMOUS_INBOX_PATH,
       USER_JUDGMENT_INBOX_PATH,
       USER_JUDGMENT_HANDOFF_PATH,
-      'Use question for structured or free-form user judgment. Pass options: [] for pure free-form input; custom input is always available.',
+      `Use question for structured or free-form user judgment. Pass options: [] for pure free-form input; custom input is always available and limited to ${QUESTION_ANSWER_MAX_CHARS} characters.`,
     ],
     promptSnippet:
       'Ask one structured or free-form user question and safely resolve any cursor delivered when it opens',

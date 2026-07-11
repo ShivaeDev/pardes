@@ -352,7 +352,7 @@ describe('Pardes coordinating-manager compaction', () => {
       'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.',
     );
     expect(operatingGuidance).toContain(
-      'Use `question` with choices or `options: []` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.',
+      'Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.',
     );
     expect(operatingGuidance).toContain(
       'Published review feedback: tell the retained worker to make additive descendant commits only; do not amend, rebase, or rewrite published branch history. Pardes exact-SHA publication intentionally never force-pushes.',

@@ -11,7 +11,7 @@ export const AUTONOMOUS_INBOX_PATH = 'Autonomous rows may be acknowledged once h
 export const USER_JUDGMENT_INBOX_PATH =
   'When a report, external observation, blocker, or attention needs user judgment, do not acknowledge the active cursor first; surface it.';
 export const USER_JUDGMENT_HANDOFF_PATH =
-  'Use `question` with choices or `options: []` for free-form feedback; it binds the current delivered cursor and consumes only it after a non-blank answer.';
+  'Use `question` with choices or `options: []` for free-form feedback (4000-char max); it binds the current cursor and consumes only it after a valid non-blank answer.';
 export const INBOX_TWO_PATH_GUIDANCE = [
   AUTONOMOUS_INBOX_PATH,
   USER_JUDGMENT_INBOX_PATH,

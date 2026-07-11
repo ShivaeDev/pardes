@@ -4,6 +4,7 @@ import { Effect } from 'effect';
 import { describe, expect, test } from 'vitest';
 import type { ManagerController } from '../manager/index.ts';
 import {
+  QUESTION_ANSWER_MAX_CHARS,
   QUESTION_CUSTOM_LABEL,
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
@@ -19,6 +20,7 @@ interface ToolResult {
 }
 
 interface RegisteredQuestionTool {
+  readonly description: string;
   readonly parameters: {
     readonly properties: {
       readonly question: { readonly minLength?: number; readonly maxLength?: number };
@@ -162,6 +164,7 @@ describe('question tool execution semantics', () => {
       maxLength: QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
     });
     expect(properties.allowCustom).toBeUndefined();
+    expect(tool.description).toContain(`${QUESTION_ANSWER_MAX_CHARS}-character limit`);
     expect(
       tool.prepareArguments?.({ allowCustom: false, options: [], question: 'Legacy call' }),
     ).toEqual({ options: [], question: 'Legacy call' });
@@ -192,7 +195,7 @@ describe('question tool execution semantics', () => {
   });
 
   test('edits and submits the custom row directly while preserving the full answer', async () => {
-    const answer = `  use release/next ${'x'.repeat(4_001)}  `;
+    const answer = `  use release/next ${'x'.repeat(QUESTION_ANSWER_MAX_CHARS - 40)}  `;
     const result = await questionTool().execute(
       'call-custom',
       { options: [{ label: 'Origin' }], question: 'Choose a baseline' },
@@ -205,6 +208,56 @@ describe('question tool execution semantics', () => {
       content: [{ text: `User answered: ${answer}`, type: 'text' }],
       details: { answer, custom: true, submitted: true },
     });
+  });
+
+  test('rejects oversized TUI and RPC answers without consuming the bound cursor', async () => {
+    const tuiFixture = managerFixture({ delivered: true });
+    const tuiResult = await questionTool(tuiFixture.manager).execute(
+      'call-tui-oversized',
+      { options: [], question: 'Add bounded context' },
+      signal,
+      onUpdate,
+      interactiveContext(['x'.repeat(QUESTION_ANSWER_MAX_CHARS + 1), '\r']),
+    );
+    expect(tuiResult.content[0]?.text).toContain(
+      `exceeded the ${QUESTION_ANSWER_MAX_CHARS}-character limit`,
+    );
+    expect(tuiResult.details).toMatchObject({
+      answer: null,
+      cursor: 'event-delivered',
+      cursorPreserved: true,
+      maxChars: QUESTION_ANSWER_MAX_CHARS,
+      rejected: 'answer_too_long',
+      submitted: false,
+    });
+    expect(JSON.stringify(tuiResult).length).toBeLessThan(1_000);
+    expect(JSON.stringify(tuiResult)).not.toContain('x'.repeat(100));
+    expect(tuiFixture.submitted).toEqual([]);
+    expect(tuiFixture.disarmed).toHaveLength(1);
+
+    const rpcFixture = managerFixture({ delivered: true });
+    const rpcResult = await questionTool(rpcFixture.manager).execute(
+      'call-rpc-oversized',
+      { options: [], question: 'Add bounded context' },
+      signal,
+      onUpdate,
+      {
+        hasUI: true,
+        ui: {
+          custom: async () => undefined,
+          input: async () => '界'.repeat(QUESTION_ANSWER_MAX_CHARS + 1),
+        },
+      } as unknown as ExtensionContext,
+    );
+    expect(rpcResult.details).toMatchObject({
+      cursor: 'event-delivered',
+      cursorPreserved: true,
+      rejected: 'answer_too_long',
+      submitted: false,
+    });
+    expect(JSON.stringify(rpcResult).length).toBeLessThan(1_000);
+    expect(rpcFixture.submitted).toEqual([]);
+    expect(rpcFixture.disarmed).toHaveLength(1);
   });
 
   test('supports a pure free-form prompt with an empty options array', async () => {
@@ -412,6 +465,30 @@ describe('question tool execution semantics', () => {
       ['Describe the desired outcome', 'Type your answer', { signal }],
       ['Custom answer', 'Choose a baseline', { signal }],
     ]);
+  });
+
+  test('neutralizes RPC terminal controls while preserving ordinary Unicode text', async () => {
+    const result = await questionTool().execute(
+      'call-rpc-controls',
+      { options: [], question: 'Provide Unicode context' },
+      signal,
+      onUpdate,
+      {
+        hasUI: true,
+        ui: {
+          custom: async () => undefined,
+          input: async () => 'line\n安全🙂\x1b[31mRED',
+        },
+      } as unknown as ExtensionContext,
+    );
+
+    expect(result.content[0]?.text).toBe('User answered: line 安全🙂 [31mRED');
+    expect(result.details).toMatchObject({
+      answer: 'line 安全🙂 [31mRED',
+      custom: true,
+      submitted: true,
+    });
+    expect(JSON.stringify(result)).not.toContain('\\u001b');
   });
 
   test('keeps colliding RPC fallback labels mapped to their exact option index', async () => {

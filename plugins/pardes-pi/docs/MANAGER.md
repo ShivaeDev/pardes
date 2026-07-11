@@ -96,11 +96,12 @@ paths:
 2. When a report, external observation, blocker, or attention needs user
    judgment, do not acknowledge the active cursor first. Surface the issue with
    `question({ question, options })`; pass `options: []` for pure free-form
-   feedback. Custom input is always available alongside concrete options.
+   feedback. Custom input is always available alongside concrete options and is
+   limited to 4,000 characters.
 
 When `question` opens, it binds the exact currently delivered cursor, if one
 exists. A submitted non-blank answer consumes only that cursor; cancellation,
-blank input, or failure preserves it. A queued suffix or attention delivered
+blank input, oversized input, or failure preserves it. A queued suffix or attention delivered
 after a cursor-free question opened is never consumed by that question. Surface
 correctness bugs immediately.
 Do not poll or repeat handled work after a duplicate notification. External

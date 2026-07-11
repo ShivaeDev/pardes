@@ -23,11 +23,13 @@ export type { DashboardPalette } from './palette.ts';
 export type { ManagerPresentation } from './pi-dashboard.ts';
 export { makeManagerPresentation } from './pi-dashboard.ts';
 export {
+  QUESTION_ANSWER_MAX_CHARS,
   QUESTION_CUSTOM_LABEL,
   QUESTION_OPTION_DESCRIPTION_MAX_CHARS,
   QUESTION_OPTION_LABEL_MAX_CHARS,
   QUESTION_OPTIONS_MAX_ITEMS,
   QUESTION_PROMPT_MAX_CHARS,
+  sanitizeQuestionAnswer,
   sanitizeQuestionOptionLabel,
   selectPardesQuestionOption,
 } from './question-dialog.ts';

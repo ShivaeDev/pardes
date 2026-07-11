@@ -150,7 +150,7 @@ function auditPathProjection(status: AgentStatus): {
   const provenance = auditProvenance(status);
   if (provenance?.status === 'available')
     return {
-      label: 'worker feature paths (first-parent non-merge)',
+      label: 'worker-branch non-merge candidate paths',
       paths: provenance.firstParentNonMergePaths,
     };
   if (provenance?.status === 'unavailable' && provenance.reason === 'dirty_worktree')
@@ -161,17 +161,19 @@ function auditPathProjection(status: AgentStatus): {
 function auditProvenanceLines(status: AgentStatus): ReadonlyArray<string> {
   const provenance = auditProvenance(status);
   if (provenance === undefined)
-    return ['worker feature provenance: unavailable · reason:not_captured_or_unsupported_adapter'];
+    return [
+      'worker-branch non-merge candidate provenance: unavailable · reason:not_captured_or_unsupported_adapter',
+    ];
   if (provenance.status === 'unavailable')
     return [
-      `worker feature provenance: unavailable · reason:${provenance.reason}${provenance.observedBranch === undefined ? '' : ` · observed branch:${structuralValue(provenance.observedBranch)}`} · bounds:first ${provenance.bounds.maxFirstParentCommits} first-parent commits/${provenance.bounds.maxPaths} paths/category`,
+      `worker-branch non-merge candidate provenance: unavailable · reason:${provenance.reason}${provenance.observedBranch === undefined ? '' : ` · observed branch:${structuralValue(provenance.observedBranch)}`} · bounds:first ${provenance.bounds.maxFirstParentCommits} first-parent commits/${provenance.bounds.maxPaths} paths/category`,
       'merge context: unavailable · exact conflict-resolution ownership is never inferred from parent diffs',
     ];
   const latest = provenance.latestDelta;
   return [
-    `worker feature change set: ${plural(provenance.firstParentNonMergeCommitCount, 'first-parent non-merge commit')} · ${plural(provenance.firstParentNonMergePaths.length, 'path')} · cooperative branch evidence`,
+    `worker-branch non-merge change candidates: ${plural(provenance.firstParentNonMergeCommitCount, 'commit')} · ${plural(provenance.firstParentNonMergePaths.length, 'path')} · cooperative first-parent evidence`,
     `merge context: ${plural(provenance.mergeCommitCount, 'merge commit')} · ${plural(provenance.mergePaths.length, 'first-parent-diff path')} · exact conflict-resolution ownership not inferred`,
-    `total branch-point delta: ${plural(provenance.totalBranchCommitCount, 'commit')} · ${plural(provenance.totalBranchDeltaPaths.length, 'path')} · ${structuralValue(provenance.branchPointSha)}..${structuralValue(provenance.headSha)}`,
+    `total branch-point delta: ${plural(provenance.totalBranchCommitCount, 'first-parent commit')} · ${plural(provenance.totalBranchDeltaPaths.length, 'path')} · ${structuralValue(provenance.branchPointSha)}..${structuralValue(provenance.headSha)}`,
     latest === undefined
       ? 'latest delta: none · branch still at immutable baseline'
       : `latest delta: ${latest.kind} commit:${structuralValue(latest.commitSha)} · ${plural(latest.changedPaths.length, 'path')}`,

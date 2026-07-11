@@ -223,17 +223,17 @@ export function handoffAuditSuffix(audit: HandoffAuditOutcome | undefined): stri
   const provenance = audit.gitAudit.provenance;
   const dirtySuffix = audit.gitAudit.dirty ? ' Worktree is dirty.' : '';
   if (provenance === undefined)
-    return `Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: ${counted(audit.changedPaths.length, 'path')}.${dirtySuffix}`;
+    return `Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: ${counted(audit.changedPaths.length, 'path')}.${dirtySuffix}`;
   if (provenance.status === 'unavailable') {
     if (provenance.reason === 'dirty_worktree')
-      return `Git audit: worker feature change set unavailable (dirty worktree). Dirty paths: ${counted(provenance.dirtyPaths.length, 'path')}. Merge context and total branch-point delta were not attributed.${dirtySuffix}`;
-    return `Git audit: worker feature change set unavailable (${provenance.reason}). Total audited change set: ${counted(audit.changedPaths.length, 'path')}. Merge context was not attributed.${dirtySuffix}`;
+      return `Git audit: worker-branch non-merge change candidates unavailable (dirty worktree). Total audited change set: ${counted(audit.changedPaths.length, 'path')}; ${counted(provenance.dirtyPaths.length, 'dirty path')}. Merge context and total branch-point delta were not attributed.${dirtySuffix}`;
+    return `Git audit: worker-branch non-merge change candidates unavailable (${provenance.reason}). Total audited change set: ${counted(audit.changedPaths.length, 'path')}. Merge context was not attributed.${dirtySuffix}`;
   }
   const latest = provenance.latestDelta;
   return [
-    `Git audit — worker feature change set: ${counted(provenance.firstParentNonMergePaths.length, 'path')}/${counted(provenance.firstParentNonMergeCommitCount, 'first-parent non-merge commit')}.`,
+    `Git audit — worker-branch non-merge change candidates: ${counted(provenance.firstParentNonMergePaths.length, 'path')}/${counted(provenance.firstParentNonMergeCommitCount, 'commit')}.`,
     `Merge context: ${counted(provenance.mergePaths.length, 'first-parent-diff path')}/${counted(provenance.mergeCommitCount, 'merge commit')}; exact conflict-resolution ownership not inferred.`,
-    `Total branch-point delta: ${counted(provenance.totalBranchDeltaPaths.length, 'path')}/${counted(provenance.totalBranchCommitCount, 'commit')} ${provenance.branchPointSha}..${provenance.headSha}.`,
+    `Total branch-point delta: ${counted(provenance.totalBranchDeltaPaths.length, 'path')}/${counted(provenance.totalBranchCommitCount, 'first-parent commit')} ${provenance.branchPointSha}..${provenance.headSha}.`,
     latest === undefined
       ? 'Latest delta: none; branch remains at its immutable baseline.'
       : `Latest delta: ${latest.kind} ${latest.commitSha}; ${counted(latest.changedPaths.length, 'path')}.`,

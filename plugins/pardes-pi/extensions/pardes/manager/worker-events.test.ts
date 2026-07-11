@@ -301,7 +301,7 @@ describe('manager handoff-audit policy', () => {
       {
         audit: successfulHandoffAudit('completion', laterAt, inspection()),
         expected:
-          'Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: 0 paths.',
+          'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 0 paths.',
       },
       {
         audit: successfulHandoffAudit(
@@ -310,7 +310,7 @@ describe('manager handoff-audit policy', () => {
           inspection({ changedPaths: ['one.ts'] }),
         ),
         expected:
-          'Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: 1 path.',
+          'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 1 path.',
       },
       {
         audit: successfulHandoffAudit(
@@ -319,7 +319,25 @@ describe('manager handoff-audit policy', () => {
           inspection({ changedPaths: ['one.ts', 'two.ts'], dirty: true }),
         ),
         expected:
-          'Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: 2 paths. Worktree is dirty.',
+          'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 2 paths. Worktree is dirty.',
+      },
+      {
+        audit: successfulHandoffAudit(
+          'completion',
+          laterAt,
+          inspection({
+            changedPaths: ['committed.ts', 'dirty.ts'],
+            dirty: true,
+            provenance: {
+              bounds: { maxFirstParentCommits: 200, maxPaths: 512 },
+              dirtyPaths: ['dirty.ts'],
+              reason: 'dirty_worktree',
+              status: 'unavailable',
+            },
+          }),
+        ),
+        expected:
+          'Git audit: worker-branch non-merge change candidates unavailable (dirty worktree). Total audited change set: 2 paths; 1 dirty path. Merge context and total branch-point delta were not attributed. Worktree is dirty.',
       },
       {
         audit: failedHandoffAudit('completion', laterAt, new Error('inspection unavailable')),
@@ -388,21 +406,22 @@ describe('manager handoff-audit policy', () => {
 
     const noMergeText = handoffAuditSuffix(noMerge);
     expect(noMergeText).toMatch(
-      /^Git audit — worker feature change set: 2 paths\/2 first-parent non-merge commits\./,
+      /^Git audit — worker-branch non-merge change candidates: 2 paths\/2 commits\./,
     );
     expect(noMergeText).toContain('Merge context: 0 first-parent-diff paths/0 merge commits');
     expect(noMergeText).toContain(
-      `Total branch-point delta: 2 paths/2 commits ${baselineSha}..${headSha}`,
+      `Total branch-point delta: 2 paths/2 first-parent commits ${baselineSha}..${headSha}`,
     );
     expect(noMergeText).toContain(`Latest delta: first_parent_non_merge ${headSha}; 1 path.`);
 
     const mergeText = handoffAuditSuffix(mergeHeavy);
     expect(mergeText).toMatch(
-      /^Git audit — worker feature change set: 1 path\/1 first-parent non-merge commit\./,
+      /^Git audit — worker-branch non-merge change candidates: 1 path\/1 commit\./,
     );
     expect(mergeText).toContain('Merge context: 2 first-parent-diff paths/2 merge commits');
     expect(mergeText).toContain('exact conflict-resolution ownership not inferred');
     expect(mergeText).toContain(`Latest delta: merge_commit ${headSha}; 1 path.`);
+    expect(`${noMergeText} ${mergeText}`).not.toMatch(/worker feature|worker-authored|authored by/);
   });
 
   test('degrades bounded provenance explicitly and keeps completion attention bounded', () => {
@@ -432,9 +451,11 @@ describe('manager handoff-audit policy', () => {
     );
 
     expect(suffix).toBe(
-      'Git audit: worker feature change set unavailable (bounds_exceeded). Total audited change set: 513 paths. Merge context was not attributed.',
+      'Git audit: worker-branch non-merge change candidates unavailable (bounds_exceeded). Total audited change set: 513 paths. Merge context was not attributed.',
     );
-    expect(projected?.summary).toContain('worker feature change set unavailable (bounds_exceeded)');
+    expect(projected?.summary).toContain(
+      'worker-branch non-merge change candidates unavailable (bounds_exceeded)',
+    );
     expect(projected?.summary).toContain('Total audited change set: 513 paths');
     expect(projected?.summary.length).toBeLessThanOrEqual(900);
     expect(projected?.summary).toContain('durable report available');
@@ -564,7 +585,7 @@ describe('worker-event summary policy', () => {
           reportPreviewChars: { omittedChars: 0, originalChars: 5, shownChars: 5 },
           reportPreviewTruncated: false,
           summary:
-            'agent-one: Done. Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: 2 paths. Worktree is dirty.',
+            'agent-one: Done. Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 2 paths. Worktree is dirty.',
           type: 'agent_report_completed',
         },
         persistence: persistedReport,

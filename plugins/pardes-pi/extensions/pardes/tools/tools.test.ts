@@ -1931,20 +1931,21 @@ describe('Pardes model-visible tools', () => {
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain(
-      'worker feature change set: 2 first-parent non-merge commits · 6 paths · cooperative branch evidence',
+      'worker-branch non-merge change candidates: 2 commits · 6 paths · cooperative first-parent evidence',
     );
     expect(text).toContain(
       'merge context: 1 merge commit · 1 first-parent-diff path · exact conflict-resolution ownership not inferred',
     );
     expect(text).toContain(
-      `total branch-point delta: 3 commits · 7 paths · ${baselineSha}..${headSha}`,
+      `total branch-point delta: 3 first-parent commits · 7 paths · ${baselineSha}..${headSha}`,
     );
     expect(text).toContain(`latest delta: merge_commit commit:${headSha} · 1 path`);
     expect(text).toContain(
-      'worker feature paths (first-parent non-merge): 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
+      'worker-branch non-merge candidate paths: 6 paths · complete first-N rows follow · omitted:see suffix row if present; otherwise 0',
     );
     for (const path of authoredPaths.slice(0, 3)) expect(text).toContain(`↳ ${path}`);
-    expect(text).toContain('… +3 more worker feature paths (first-parent non-merge) omitted');
+    expect(text).toContain('… +3 more worker-branch non-merge candidate paths omitted');
+    expect(text).not.toMatch(/worker feature|worker-authored|authored by/);
     expect(text).not.toContain('src/authored-d.ts');
     expect(text).not.toContain('src/main-only.ts');
     expect(text.length).toBeLessThanOrEqual(CONTROL_PLANE_MAX_TEXT_LENGTH);
@@ -1994,7 +1995,7 @@ describe('Pardes model-visible tools', () => {
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain(
-      'worker feature provenance: unavailable · reason:dirty_worktree · bounds:first 200 first-parent commits/512 paths/category',
+      'worker-branch non-merge candidate provenance: unavailable · reason:dirty_worktree · bounds:first 200 first-parent commits/512 paths/category',
     );
     expect(text).toContain('dirty paths: 5 paths');
     for (const path of dirtyPaths.slice(0, 4)) expect(text).toContain(`↳ ${path}`);

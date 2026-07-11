@@ -4344,7 +4344,8 @@ describe('manager controller', () => {
         fixture.ctx,
       ),
     );
-    const worktree = requiredValue(agent.worktree).path;
+    const worktreeLease = requiredValue(agent.worktree);
+    const worktree = worktreeLease.path;
     for (const [path, contents, message] of [
       ['feature-a.txt', 'feature a\n', 'feature a'],
       ['main-a.txt', 'main a\n', 'main context a'],
@@ -4363,6 +4364,9 @@ describe('manager controller', () => {
     git(repo, 'commit', '-m', 'main context b');
     git(worktree, 'merge', '--no-edit', 'main');
     const headSha = git(worktree, 'rev-parse', 'HEAD');
+    expect(
+      Number(git(worktree, 'rev-list', '--count', `${worktreeLease.branchPointSha}..${headSha}`)),
+    ).toBe(6);
 
     await Effect.runPromise(
       workers.emit({
@@ -4397,12 +4401,10 @@ describe('manager controller', () => {
       'main-b.txt',
     ]);
     const summary = requiredValue(controller.snapshot()?.inbox.at(-1)).summary;
-    expect(summary).toContain(
-      'worker feature change set: 2 paths/2 first-parent non-merge commits',
-    );
+    expect(summary).toContain('worker-branch non-merge change candidates: 2 paths/2 commits');
     expect(summary).toContain('Merge context: 2 first-parent-diff paths/2 merge commits');
     expect(summary).toContain('exact conflict-resolution ownership not inferred');
-    expect(summary).toContain('Total branch-point delta: 4 paths/4 commits');
+    expect(summary).toContain('Total branch-point delta: 4 paths/4 first-parent commits');
     expect(summary).toContain(`Latest delta: merge_commit ${headSha}; 1 path.`);
     expect(summary.length).toBeLessThanOrEqual(900);
   });
@@ -4454,10 +4456,131 @@ describe('manager controller', () => {
       trigger: 'completion',
     });
     const summary = requiredValue(controller.snapshot()?.inbox.at(-1)).summary;
-    expect(summary).toContain('worker feature change set unavailable (bounds_exceeded)');
+    expect(summary).toContain(
+      'worker-branch non-merge change candidates unavailable (bounds_exceeded)',
+    );
     expect(summary).toContain('Total audited change set: 2 paths');
     expect(summary).toContain('durable report available');
     expect(summary.length).toBeLessThanOrEqual(900);
+  });
+
+  test('persists over-bound dirty completion with committed and dirty safety paths intact', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceMaxPaths: 1 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retain dirty completion safety data', title: 'Dirty bounded provenance' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Commit one path and leave two dirty paths.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    writeFileSync(join(worktree, 'committed.txt'), 'committed\n');
+    git(worktree, 'add', 'committed.txt');
+    git(worktree, 'commit', '-m', 'committed fixture');
+    writeFileSync(join(worktree, 'dirty-a.txt'), 'dirty a\n');
+    writeFileSync(join(worktree, 'dirty-b.txt'), 'dirty b\n');
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Dirty bounded fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['committed.txt', 'dirty-a.txt', 'dirty-b.txt']);
+    expect(persisted.latestReport?.status).toBe('completed');
+    expect(persisted.gitAudit).toMatchObject({
+      dirty: true,
+      provenance: {
+        bounds: { maxPaths: 1 },
+        dirtyPaths: [],
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    const attention = requiredValue(controller.snapshot()?.inbox.at(-1));
+    expect(attention.type).toBe('agent_report_completed');
+    expect(attention.summary).toContain(
+      'worker-branch non-merge change candidates unavailable (bounds_exceeded)',
+    );
+    expect(attention.summary).toContain('Total audited change set: 3 paths');
+    expect(attention.summary).toContain('Worktree is dirty');
+  });
+
+  test('retains total paths when completion provenance exceeds the first-parent commit bound', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    const controller = new ManagerController(fixture.pi, {
+      makeWorkers: workers.makeWorkers,
+      worktrees: makeManagedWorktreeService({ provenanceMaxFirstParentCommits: 1 }),
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Retain total paths after graph bounds', title: 'Commit bounded provenance' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Create two commits beyond the fixture graph bound.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    const worktree = requiredValue(agent.worktree).path;
+    for (const path of ['first.txt', 'second.txt']) {
+      writeFileSync(join(worktree, path), `${path}\n`);
+      git(worktree, 'add', path);
+      git(worktree, 'commit', '-m', `${path} fixture`);
+    }
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        status: 'completed',
+        summary: 'Commit-bounded fixture complete.',
+        type: 'report',
+      }),
+    );
+
+    const persisted = requiredValue(controller.snapshot()?.agents[agent.id]);
+    expect(persisted.changedPaths).toEqual(['first.txt', 'second.txt']);
+    expect(persisted.gitAudit).toMatchObject({
+      provenance: {
+        bounds: { maxFirstParentCommits: 1 },
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+      status: 'succeeded',
+      trigger: 'completion',
+    });
+    expect(requiredValue(controller.snapshot()?.inbox.at(-1)).summary).toContain(
+      'Total audited change set: 2 paths',
+    );
   });
 
   test('persists a completion audit failure, clears stale paths, and combines bounded report fallback warnings', async () => {
@@ -4955,7 +5078,7 @@ describe('manager controller', () => {
     );
     expect(controller.snapshot()?.inbox.at(-1)?.summary).not.toContain('durable-summary-tail');
     expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain(
-      'Git audit — worker feature change set: 1 path/1 first-parent non-merge commit.',
+      'Git audit — worker-branch non-merge change candidates: 1 path/1 commit.',
     );
     expect(controller.snapshot()?.inbox.at(-1)?.summary).toContain(
       'Merge context: 0 first-parent-diff paths/0 merge commits',
@@ -5076,7 +5199,7 @@ describe('manager controller', () => {
     expect(
       readFileSync(join(activationStateDir(fixture.entries), 'events.jsonl'), 'utf8'),
     ).toContain(
-      'Git audit: worker feature change set unavailable (provenance not captured). Total audited change set: 1 path.',
+      'Git audit: worker-branch non-merge change candidates unavailable (provenance not captured). Total audited change set: 1 path.',
     );
     await Effect.runPromise(
       workers.emit({

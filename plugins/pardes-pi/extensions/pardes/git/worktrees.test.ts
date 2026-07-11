@@ -292,7 +292,7 @@ describe('managed worktree service', () => {
     });
   });
 
-  test('refuses stable provenance for dirty worktrees while returning complete dirty paths', async () => {
+  test('refuses stable provenance for dirty worktrees while retaining total safety-audit paths', async () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
@@ -310,13 +310,48 @@ describe('managed worktree service', () => {
     );
 
     expect(inspection).toMatchObject({
-      changedPaths: ['dirty.txt'],
+      changedPaths: ['dirty.txt', 'worker.txt'],
       dirty: true,
       provenance: { dirtyPaths: ['dirty.txt'], reason: 'dirty_worktree', status: 'unavailable' },
     });
   });
 
-  test('returns dirty refusal before committed-range output can exceed the audit circuit breaker', async () => {
+  test('degrades over-bound dirty provenance without dropping the routine safety-audit path set', async () => {
+    const primary = fixtureRepository();
+    const repo = await Effect.runPromise(discoverRepository(primary));
+    const branchPointSha = git(primary, 'rev-parse', 'HEAD');
+    const service = makeManagedWorktreeService({ provenanceMaxPaths: 1 });
+    const lease = await Effect.runPromise(
+      service.create({
+        agentId: 'agent-dirty-path-bound',
+        branchPointSha,
+        managerId: 'manager-1',
+        repo,
+      }),
+    );
+    writeFileSync(join(lease.path, 'committed.txt'), 'committed\n');
+    git(lease.path, 'add', 'committed.txt');
+    git(lease.path, 'commit', '-m', 'committed fixture');
+    writeFileSync(join(lease.path, 'dirty-a.txt'), 'dirty a\n');
+    writeFileSync(join(lease.path, 'dirty-b.txt'), 'dirty b\n');
+
+    expect(
+      await Effect.runPromise(
+        inspectProvenance(service, owner(repo, 'manager-1', 'agent-dirty-path-bound'), lease),
+      ),
+    ).toMatchObject({
+      changedPaths: ['committed.txt', 'dirty-a.txt', 'dirty-b.txt'],
+      dirty: true,
+      provenance: {
+        bounds: { maxPaths: 1 },
+        dirtyPaths: [],
+        reason: 'bounds_exceeded',
+        status: 'unavailable',
+      },
+    });
+  });
+
+  test('returns dirty refusal while the routine total-path diff remains outside the provenance circuit breaker', async () => {
     const primary = fixtureRepository();
     const repo = await Effect.runPromise(discoverRepository(primary));
     const branchPointSha = git(primary, 'rev-parse', 'HEAD');
@@ -523,6 +558,7 @@ describe('managed worktree service', () => {
         inspectProvenance(service, owner(repo, 'manager-1', 'agent-commit-bounds'), lease),
       ),
     ).toMatchObject({
+      changedPaths: ['first.txt', 'second.txt'],
       provenance: {
         bounds: { maxFirstParentCommits: 1 },
         dirtyPaths: [],

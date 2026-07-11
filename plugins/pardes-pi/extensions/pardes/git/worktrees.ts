@@ -659,11 +659,6 @@ export function makeManagedWorktreeService(
       headSha,
       path: lease.path,
     };
-    if (includeProvenance && dirtyPaths.length > 0)
-      return {
-        ...baseInspection,
-        provenance: provenanceUnavailable('dirty_worktree', dirtyPaths),
-      };
     const range = `${lease.branchPointSha}..${headSha}`;
     if (!includeProvenance) {
       const committed = yield* git(lease.path, ['diff', '--name-status', '-z', range]);
@@ -683,6 +678,20 @@ export function makeManagedWorktreeService(
       ...projectionInspection,
       provenance: provenanceUnavailable(reason, paths, observedBranch),
     });
+    // Preserve the established routine safety-audit path set before any richer
+    // graph attribution can degrade. This total diff is evidence, not ownership.
+    const committed = yield* git(lease.path, ['diff', '--name-status', '-z', range]);
+    const totalBranchDeltaPaths = parseCommittedChangedPaths(committed.stdout);
+    projectionInspection = {
+      ...baseInspection,
+      changedPaths: [...new Set([...dirtyPaths, ...totalBranchDeltaPaths])].sort(),
+    };
+    if (dirtyPaths.length > 0)
+      return unavailable(
+        dirtyPaths.length > provenanceBounds.maxPaths ? 'bounds_exceeded' : 'dirty_worktree',
+        dirtyPaths.length > provenanceBounds.maxPaths ? [] : dirtyPaths,
+      );
+
     if (!(yield* isRegisteredWorktreePath(owner.repo, lease.path, provenanceGitOptions)))
       return unavailable('worktree_not_registered');
     const branchResult = yield* git(
@@ -693,6 +702,9 @@ export function makeManagedWorktreeService(
     if (Exit.isFailure(branchResult)) return unavailable('branch_mismatch');
     const observedBranch = branchResult.value.stdout.trim();
     if (observedBranch !== lease.branch) return unavailable('branch_mismatch', [], observedBranch);
+    if (totalBranchDeltaPaths.length > provenanceBounds.maxPaths)
+      return unavailable('bounds_exceeded');
+
     const ancestor = yield* git(
       lease.path,
       ['merge-base', '--is-ancestor', lease.branchPointSha, headSha],
@@ -716,15 +728,6 @@ export function makeManagedWorktreeService(
       return unavailable('bounds_exceeded');
     if (firstParentCommits.some(({ parentCount }) => parentCount < 1 || parentCount > 2))
       return unavailable('unsupported_graph');
-    const committed = yield* git(
-      lease.path,
-      ['diff', '--name-status', '-z', range],
-      provenanceGitOptions,
-    );
-    const totalBranchDeltaPaths = parseCommittedChangedPaths(committed.stdout);
-    projectionInspection = { ...baseInspection, changedPaths: totalBranchDeltaPaths };
-    if (totalBranchDeltaPaths.length > provenanceBounds.maxPaths)
-      return unavailable('bounds_exceeded');
     const totalBranchCommitCount = firstParentCommits.length;
     const mergeCommitCount = firstParentCommits.filter(
       ({ parentCount }) => parentCount === 2,

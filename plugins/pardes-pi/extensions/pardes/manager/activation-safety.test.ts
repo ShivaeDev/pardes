@@ -47,6 +47,12 @@ function fixturePluginSource(): string {
     join(root, 'worker-runtime', 'child-tool-call-preview.ts'),
     'export const previewVersion = 1;\n',
   );
+  mkdirSync(join(root, 'feedback'));
+  for (const name of ['cli.ts', 'errors.ts', 'index.ts', 'schemas.ts', 'store.ts', 'tool.ts'])
+    writeFileSync(
+      join(root, 'feedback', name),
+      `export const ${name.replace('.ts', '')}Version = 1;\n`,
+    );
   return root;
 }
 
@@ -64,6 +70,12 @@ describe('loaded child-runtime activation safety', () => {
       'worker-runtime/child-extension.ts',
       'worker-runtime/child-profile.ts',
       'worker-runtime/child-tool-call-preview.ts',
+      'feedback/cli.ts',
+      'feedback/errors.ts',
+      'feedback/index.ts',
+      'feedback/schemas.ts',
+      'feedback/store.ts',
+      'feedback/tool.ts',
     ]);
   });
 
@@ -93,7 +105,7 @@ describe('loaded child-runtime activation safety', () => {
     expect(materialized).toMatchObject({
       lifecycle: 'allowed',
       reason: 'pinned_snapshot_ready',
-      snapshot: { inputFileCount: 3, state: 'ready' },
+      snapshot: { inputFileCount: CHILD_RUNTIME_INPUTS.length, state: 'ready' },
       status: 'aligned',
     });
     const initiallyReady = await Effect.runPromise(safety.requireReady('agent_spawn'));

@@ -91,7 +91,7 @@ refresh same-tier numeric counts.
 The manager-visible tools are grouped by purpose:
 
 ```text
-question
+question · feedback
 pardes_status · inbox_get · inbox_acknowledge
 workstream_create · workstream_list · workstream_get · workstream_complete
 report_get
@@ -180,6 +180,38 @@ publication. Pardes never merges autonomously.
 
 Structured state is written beneath `~/.pi/agent/pardes/`. Override that root
 for development or tests with `PARDES_PI_STATE_DIR`.
+
+## Frustration feedback
+
+The model-facing `feedback({ text })` tool is available to managers, writing
+workers, and advisory verifiers. It is deliberately general: if anything is
+frustrating, confusing, broken, annoying, or wasteful, write it here. The tool
+accepts only free-form text. Pardes adds bounded
+provenance (time, id, role and available session/manager/agent/workstream,
+repository, verifier, and version identities); it never automatically captures
+logs, files, environment values, or secrets.
+
+Each submission is an immutable atomic JSON record in the owner-only global
+registry; existing registry directories and artifacts are tightened when read.
+Addressed state is stored separately so triage never rewrites the submission.
+The installed package exposes a human CLI:
+
+```bash
+pardes-feedback help
+pardes-feedback list --addressed no
+pardes-feedback show <feedback-id>
+pardes-feedback watch --cursor triage
+pardes-feedback address <feedback-id>
+```
+
+From a source checkout, use `bun run feedback -- <command>`. Watch cursors use
+one durable initialization boundary, a recoverable cross-process scan lock, and
+atomic per-entry receipts written only after output succeeds. Concurrent scans
+do not duplicate output; a crash between output and receipt deliberately replays
+the entry after restart for at-least-once delivery. A cursor consumes every
+observed entry, including filter nonmatches, so use a distinct cursor name when
+changing filters or triage purpose. CLI rendering treats feedback text as
+untrusted and escapes terminal controls.
 
 ## Development validation
 

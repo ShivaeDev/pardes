@@ -6,6 +6,7 @@ import { stripVTControlCharacters } from 'node:util';
 import type { ExtensionAPI, Theme, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, test } from 'vitest';
+import { FEEDBACK_PROMPT_GUIDANCE, FEEDBACK_TOOL_DESCRIPTION } from '../feedback/index.ts';
 import { REPORT_DETAILS_MAX_CHARS, REPORT_SUMMARY_MAX_CHARS } from '../reporting/index.ts';
 import { requiredValue, runGitFixture } from '../test-support.ts';
 import pardesWorker, {
@@ -50,25 +51,36 @@ function createFixture(parent = tmpdir()) {
 function installLargeOutputGit(root: string): string {
   const bin = join(root, 'bin');
   mkdirSync(bin);
+  const rows = (prefix: string, body: string, suffix = '') =>
+    Array.from(
+      { length: 7_000 },
+      (_, index) => `${prefix}${String(index).padStart(4, '0')}-${body}${suffix}\n`,
+    ).join('');
+  writeFileSync(join(bin, 'status.out'), rows('?? status/', 's'.repeat(170)));
+  writeFileSync(join(bin, 'diff.out'), rows('src/', 'p'.repeat(170), '.ts'));
+  writeFileSync(
+    join(bin, 'pathological.out'),
+    Buffer.alloc(GIT_INSPECTION_STDOUT_MAX_BYTES + 1, 'x'),
+  );
   const executable = join(bin, 'git');
   writeFileSync(
     executable,
-    `#!/usr/bin/env node
-const command = process.argv[2];
-if (command === 'rev-parse') {
-  process.stdout.write('${'c'.repeat(40)}\\n');
-} else if (command === 'status' && process.env.PARDES_TEST_GIT_PATHOLOGICAL === 'true') {
-  process.stdout.write('x'.repeat(${16 * 1_024 * 1_024 + 1}));
-} else if (command === 'status') {
-  for (let index = 0; index < 7_000; index += 1)
-    process.stdout.write(\`?? status/\${String(index).padStart(4, '0')}-\${'s'.repeat(170)}\\n\`);
-} else if (command === 'diff') {
-  for (let index = 0; index < 7_000; index += 1)
-    process.stdout.write(\`src/\${String(index).padStart(4, '0')}-\${'p'.repeat(170)}.ts\\n\`);
-} else {
-  process.stderr.write('unexpected fake Git command');
-  process.exitCode = 1;
-}
+    `#!/bin/sh
+set -eu
+fixture_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+command="\${1:-}"
+if [ "$command" = "rev-parse" ]; then
+  printf '%s\\n' '${'c'.repeat(40)}'
+elif [ "$command" = "status" ] && [ "\${PARDES_TEST_GIT_PATHOLOGICAL:-}" = "true" ]; then
+  exec /bin/cat "$fixture_dir/pathological.out"
+elif [ "$command" = "status" ]; then
+  exec /bin/cat "$fixture_dir/status.out"
+elif [ "$command" = "diff" ]; then
+  exec /bin/cat "$fixture_dir/diff.out"
+else
+  printf '%s' 'unexpected fake Git command' >&2
+  exit 1
+fi
 `,
   );
   chmodSync(executable, 0o755);
@@ -243,11 +255,16 @@ describe('verifier child profile', () => {
         },
       } as unknown as ExtensionAPI);
       expect(tools.map((tool) => tool.name)).toEqual([
+        'feedback',
         'verification_evidence',
         'report_to_manager',
         'ask_manager',
       ]);
       expect(tools.map((tool) => tool.name)).not.toContain('verification_diff');
+      const feedback = requiredValue(tools.find((tool) => tool.name === 'feedback'));
+      expect(feedback.description).toBe(FEEDBACK_TOOL_DESCRIPTION);
+      expect(feedback.promptGuidelines).toEqual([FEEDBACK_PROMPT_GUIDANCE]);
+      expect(feedback.promptSnippet).toBe(FEEDBACK_TOOL_DESCRIPTION);
       const evidence = requiredValue(tools.find((tool) => tool.name === 'verification_evidence'));
       expect(evidence.renderShell).toBe('self');
       expect(typeof evidence.renderCall).toBe('function');
@@ -315,6 +332,8 @@ describe('verifier child profile', () => {
     }
   });
 
+  // This intentionally transports more than 18 MiB across several child processes,
+  // including the breaker boundary, so allow for legitimate shared CI runner load.
   test('streams large status and changed-path output with complete-row omission metadata', async () => {
     const { root, worktree } = createFixture();
     const previous = {
@@ -378,7 +397,7 @@ describe('verifier child profile', () => {
       if (previous.pathological === undefined) delete process.env.PARDES_TEST_GIT_PATHOLOGICAL;
       else process.env.PARDES_TEST_GIT_PATHOLOGICAL = previous.pathological;
     }
-  });
+  }, 20_000);
 
   test('executes fixed bounded captured-head evidence', async () => {
     const { worktree } = createFixture();
@@ -474,6 +493,7 @@ describe('worker child reporting tool rendering', () => {
       } as unknown as Theme;
       const argsByTool = {
         ask_manager: { context: 'private context', question: 'private question' },
+        feedback: { text: 'private frustration' },
         report_to_manager: {
           details: 'private details',
           status: 'progress',
@@ -481,7 +501,11 @@ describe('worker child reporting tool rendering', () => {
         },
       } as const;
 
-      expect(tools.map((tool) => tool.name)).toEqual(['report_to_manager', 'ask_manager']);
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'feedback',
+        'report_to_manager',
+        'ask_manager',
+      ]);
       const reportParameters = requiredValue(
         tools.find((tool) => tool.name === 'report_to_manager'),
       ).parameters as unknown as ToolParametersPreview;

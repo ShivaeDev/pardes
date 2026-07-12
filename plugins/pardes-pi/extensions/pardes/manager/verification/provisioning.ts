@@ -276,12 +276,16 @@ export function makeVerificationProvisioner(
           childProfile: verifierChildProfile(worktree.branchPointSha, inspected.headSha),
           cwd: reviewCheckout.path,
           lifecycleGeneration: 1,
+          managerId: namespace.managerId,
           model,
+          repositoryKey: namespace.repo.key,
           sessionDir,
           sessionName: `Verifier · ${source.workstreamId} · ${verificationId}`,
           task: verifierPrompt(task, 1, inspected.headSha, worktree.branchPointSha),
           thinkingLevel,
+          verificationId,
           workerExtensionPath,
+          workstreamId: source.workstreamId,
         })
         .pipe(Effect.exit);
       if (Exit.isFailure(runtimeResult)) {
@@ -668,7 +672,9 @@ export function makeVerificationProvisioner(
           childProfile: verifierChildProfile(worktree.branchPointSha, inspected.headSha),
           cwd: reviewCheckout.path,
           lifecycleGeneration: attempt,
+          managerId: namespace.managerId,
           model: verification.model,
+          repositoryKey: namespace.repo.key,
           sessionDir: verifierAgent.sessionDir,
           sessionFile: verifierAgent.sessionFile,
           sessionName: `Verifier · ${verification.workstreamId} · ${verificationId}`,
@@ -679,7 +685,9 @@ export function makeVerificationProvisioner(
             worktree.branchPointSha,
           ),
           thinkingLevel: verification.thinkingLevel,
+          verificationId,
           workerExtensionPath,
+          workstreamId: verification.workstreamId,
         })
         .pipe(Effect.exit);
       if (Exit.isFailure(runtimeResult)) {

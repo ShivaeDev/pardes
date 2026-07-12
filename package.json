@@ -7,10 +7,14 @@
   "keywords": [
     "pi-package"
   ],
+  "bin": {
+    "pardes-feedback": "./plugins/pardes-pi/scripts/pardes-feedback.ts"
+  },
   "scripts": {
     "ci": "biome ci .",
     "format": "biome format --write .",
     "format:check": "biome format .",
+    "feedback": "bun plugins/pardes-pi/scripts/pardes-feedback.ts",
     "lint": "biome check --error-on-warnings .",
     "lint:fix": "biome check --error-on-warnings --write .",
     "references:effect": "bash plugins/pardes-pi/scripts/sync-effect-reference.sh",

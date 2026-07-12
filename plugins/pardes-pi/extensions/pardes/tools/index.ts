@@ -6,6 +6,7 @@ import {
   registerInboxGetTool,
   registerPardesStatusTool,
 } from './control-plane.ts';
+import { registerManagerFeedbackTool } from './feedback.ts';
 import { registerHostedDrilldownTools } from './hosted-drilldown.ts';
 import { registerPullRequestTools } from './pull-requests.ts';
 import type { ReportDeliveryCoordinator } from './report-delivery.ts';
@@ -42,6 +43,7 @@ export function registerWorkstreamTools(
   pi: ExtensionAPI,
   manager: ManagerController,
 ): ReportDeliveryCoordinator {
+  registerManagerFeedbackTool(pi, manager);
   registerPardesStatusTool(pi, manager);
   registerWorkstreamDomainTools(pi, manager);
   const reportDelivery = registerReportTools(pi, manager);

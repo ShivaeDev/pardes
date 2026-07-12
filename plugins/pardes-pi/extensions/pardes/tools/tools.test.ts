@@ -224,6 +224,7 @@ describe('Pardes model-visible tools', () => {
 
     expect([...tools.keys()]).toEqual([
       'question',
+      'feedback',
       'pardes_status',
       'workstream_create',
       'workstream_list',

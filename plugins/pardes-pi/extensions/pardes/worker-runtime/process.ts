@@ -19,6 +19,10 @@ export const DEFAULT_WORKER_EXTENSION = fileURLToPath(
 
 export interface WorkerProcessInput {
   readonly agentId: string;
+  readonly managerId?: string;
+  readonly repositoryKey?: string;
+  readonly workstreamId?: string;
+  readonly verificationId?: string;
   readonly cwd: string;
   readonly sessionDir: string;
   readonly sessionFile?: string;
@@ -106,6 +110,11 @@ export function spawnWorkerProcess<Input extends WorkerProcessInput>(
   const env = gitEnvironmentForExplicitCwd({
     ...process.env,
     ...options.env,
+    PARDES_FEEDBACK_AGENT_ID: input.agentId,
+    PARDES_FEEDBACK_MANAGER_ID: input.managerId,
+    PARDES_FEEDBACK_REPOSITORY_KEY: input.repositoryKey,
+    PARDES_FEEDBACK_VERIFICATION_ID: input.verificationId,
+    PARDES_FEEDBACK_WORKSTREAM_ID: input.workstreamId,
     PARDES_WORKTREE_ROOT: input.cwd,
     ...childProfileEnvironment(input.childProfile),
   });

@@ -132,6 +132,12 @@ function fixturePluginSource(): string {
     join(root, 'worker-runtime', 'child-tool-call-preview.ts'),
     'export const loadedPreview = true;\n',
   );
+  mkdirSync(join(root, 'feedback'));
+  for (const name of ['cli.ts', 'errors.ts', 'index.ts', 'schemas.ts', 'store.ts', 'tool.ts'])
+    writeFileSync(
+      join(root, 'feedback', name),
+      `export const ${name.replace('.ts', '')}Version = 1;\n`,
+    );
   return root;
 }
 

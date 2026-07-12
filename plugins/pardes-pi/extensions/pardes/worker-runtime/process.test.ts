@@ -78,6 +78,7 @@ describe('worker process', () => {
       'grep',
       'find',
       'ls',
+      'feedback',
       'verification_evidence',
       'report_to_manager',
       'ask_manager',
@@ -205,22 +206,35 @@ process.stdout.write(JSON.stringify({
   agentProfile: process.env.PARDES_AGENT_PROFILE,
   verificationBaseline: process.env.PARDES_VERIFICATION_BASELINE_SHA,
   verificationReviewed: process.env.PARDES_VERIFICATION_REVIEWED_SHA,
+  feedbackAgentId: process.env.PARDES_FEEDBACK_AGENT_ID,
+  feedbackManagerId: process.env.PARDES_FEEDBACK_MANAGER_ID,
+  feedbackRepositoryKey: process.env.PARDES_FEEDBACK_REPOSITORY_KEY,
+  feedbackVerificationId: process.env.PARDES_FEEDBACK_VERIFICATION_ID,
+  feedbackWorkstreamId: process.env.PARDES_FEEDBACK_WORKSTREAM_ID,
 }) + "\\n");
 setInterval(() => {}, 1000);
 `,
     );
     const scope = await Effect.runPromise(Scope.make());
     const child = await Effect.runPromise(
-      spawnWorkerProcess(workerInput(root), {
-        args: () => [script],
-        command: process.execPath,
-        env: {
-          PARDES_PROCESS_FIXTURE: 'present',
-          PARDES_VERIFICATION_BASELINE_SHA: 'leaked-baseline',
-          PARDES_VERIFICATION_REVIEWED_SHA: 'leaked-reviewed-head',
-          PARDES_WORKTREE_ROOT: '/tmp/incorrect-root',
+      spawnWorkerProcess(
+        workerInput(root, {
+          managerId: 'manager-process-fixture',
+          repositoryKey: 'repo-process-fixture',
+          verificationId: 'verify-process-fixture',
+          workstreamId: 'stream-process-fixture',
+        }),
+        {
+          args: () => [script],
+          command: process.execPath,
+          env: {
+            PARDES_PROCESS_FIXTURE: 'present',
+            PARDES_VERIFICATION_BASELINE_SHA: 'leaked-baseline',
+            PARDES_VERIFICATION_REVIEWED_SHA: 'leaked-reviewed-head',
+            PARDES_WORKTREE_ROOT: '/tmp/incorrect-root',
+          },
         },
-      }).pipe(Scope.provide(scope)),
+      ).pipe(Scope.provide(scope)),
     );
     try {
       expect(child.stdin.writable).toBe(true);
@@ -232,6 +246,11 @@ setInterval(() => {}, 1000);
       expect(JSON.parse(line) as unknown).toEqual({
         agentProfile: 'worker',
         cwd: realpathSync(root),
+        feedbackAgentId: 'agent-process-fixture',
+        feedbackManagerId: 'manager-process-fixture',
+        feedbackRepositoryKey: 'repo-process-fixture',
+        feedbackVerificationId: 'verify-process-fixture',
+        feedbackWorkstreamId: 'stream-process-fixture',
         fixture: 'present',
         inheritedPath: process.env.PATH,
         worktreeRoot: root,

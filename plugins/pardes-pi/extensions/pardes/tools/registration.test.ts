@@ -2,6 +2,7 @@ import { stripVTControlCharacters } from 'node:util';
 import type { ExtensionAPI, Theme, ToolDefinition } from '@earendil-works/pi-coding-agent';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import { describe, expect, test } from 'vitest';
+import { FEEDBACK_PROMPT_GUIDANCE, FEEDBACK_TOOL_DESCRIPTION } from '../feedback/index.ts';
 import type { ManagerController } from '../manager/index.ts';
 import {
   DEFAULT_PARDES_RENDERER_CONFIG,
@@ -109,7 +110,13 @@ describe('Pardes interactive tool-call previews', () => {
     registerWorkstreamTools(pi, manager);
     registerAgentTools(pi, manager);
 
-    expect(tools).toHaveLength(25);
+    expect(tools).toHaveLength(26);
+    expect(tools.map((tool) => tool.name)).toContain('feedback');
+    const feedback = requiredValue(tools.find((tool) => tool.name === 'feedback'));
+    expect((feedback.parameters as unknown as { required: string[] }).required).toEqual(['text']);
+    expect(feedback.description).toBe(FEEDBACK_TOOL_DESCRIPTION);
+    expect(feedback.promptGuidelines).toEqual([FEEDBACK_PROMPT_GUIDANCE]);
+    expect(feedback.promptSnippet).toBe(FEEDBACK_TOOL_DESCRIPTION);
     for (const tool of tools) {
       expect(tool.executionMode, tool.name).toBe('sequential');
       expect(typeof tool.renderCall, tool.name).toBe('function');
@@ -128,6 +135,7 @@ describe('Pardes interactive tool-call previews', () => {
           reportId: 'report-123',
           sourceAgentId: 'agent-123',
           task: 'private task',
+          text: 'private frustration',
           title: 'title',
           verificationId: 'verify-123',
           workstreamId: 'ws-123',

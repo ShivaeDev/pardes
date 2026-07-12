@@ -566,12 +566,15 @@ export function makeAgentAttachmentLifecycleCoordinator(
           agentId,
           cwd: lease.path,
           lifecycleGeneration: agent.lifecycleGeneration,
+          managerId: state.managerId,
           model,
+          repositoryKey: state.repo.key,
           sessionDir,
           sessionName: agentSessionName(input.workstreamId, agentId, input.title),
           task: input.task,
           thinkingLevel,
           workerExtensionPath,
+          workstreamId: input.workstreamId,
         })
         .pipe(Effect.exit);
       if (Exit.isFailure(runtimeResult)) {
@@ -714,13 +717,16 @@ export function makeAgentAttachmentLifecycleCoordinator(
           agentId,
           cwd: agent.worktree.path,
           lifecycleGeneration,
+          managerId: namespace.managerId,
           model: agent.model,
+          repositoryKey: namespace.repo.key,
           sessionDir: agent.sessionDir,
           sessionFile: agent.sessionFile,
           sessionName: agentSessionName(agent.workstreamId, agentId, agent.title),
           task: message,
           thinkingLevel: agent.thinkingLevel,
           workerExtensionPath,
+          workstreamId: agent.workstreamId,
         })
         .pipe(Effect.exit);
       if (Exit.isFailure(runtimeResult)) {

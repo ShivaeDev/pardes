@@ -108,6 +108,10 @@ Durable manager state lives beneath:
 
 ```text
 ~/.pi/agent/pardes/
+├── feedback/
+│   ├── submissions/       # one immutable atomic JSON record per submission
+│   ├── triage/            # separate addressed-state records
+│   └── watch-cursors/     # durable per-entry CLI watch receipts
 └── projects/
     └── <repo-key>/
         └── managers/
@@ -308,7 +312,7 @@ The manager coordinates work rather than editing source. Its model-visible tools
 are grouped by purpose:
 
 ```text
-question
+question · feedback
 pardes_status · inbox_get · inbox_acknowledge
 workstream_create · workstream_list · workstream_get · workstream_complete
 report_get
@@ -324,8 +328,9 @@ is opt-in.
 
 ### Writing worker
 
-A writing worker receives ordinary coding tools rooted in one managed worktree.
-The extension rejects file-tool paths outside the assigned worktree. Bash is not
+A writing worker receives ordinary coding tools rooted in one managed worktree,
+plus the global `feedback` frustration channel. The extension rejects file-tool
+paths outside the assigned worktree. Bash is not
 a complete security boundary, so completion, publication, and cleanup paths
 also audit changed files and Git state.
 
@@ -333,8 +338,8 @@ also audit changed files and Git state.
 
 An advisory verifier runs in a fresh detached scratch checkout pinned to the
 reviewed worker SHA. It has path-rooted read tools, Bash for efficient
-inspection, fixed-argv captured-head evidence, structured reporting, and no
-`edit` or `write` UI affordances.
+inspection, fixed-argv captured-head evidence, structured reporting, the global
+`feedback` frustration channel, and no `edit` or `write` UI affordances.
 
 Verifier Bash can mutate disposable scratch files and same-user filesystem
 access is not isolation. Verifier commits are never publication sources.
@@ -379,6 +384,25 @@ watcher-failure transitions. Completed-report handoff can conservatively
 synchronize an existing review gate after a fresh audit. Terminal merge
 observation can stop an idle owner and complete its workstream mechanically.
 Merges remain user-controlled.
+
+## Frustration feedback
+
+Managers, writing workers, and advisory verifiers have one first-class
+`feedback({ text })` tool. Its intentionally minimal schema has one required
+free-form text field. If anything is frustrating, confusing, broken, annoying,
+or wasteful, write it here. Each submission is a
+separate immutable atomic JSON record in global Pardes state. Pardes adds only
+bounded explicit provenance and never automatically captures logs, file
+contents, environment values, or secrets. Registry directories and artifacts
+are owner-only, including tightened existing entries. Human addressed-state
+triage remains in a separate durable record. The `pardes-feedback` CLI lists,
+filters, shows, watches, and marks entries addressed. Watch uses one durable
+initialization boundary, a recoverable cross-process scan lock, and output-before-
+receipt at-least-once delivery: ordinary concurrent scans do not duplicate, while
+a crash between output and receipt safely replays after restart. Filters apply at
+observation time and every observed entry advances that cursor, including
+nonmatches; changing filters requires a distinct cursor. Terminal output treats
+authored text as untrusted data.
 
 ## External feedback and trust
 

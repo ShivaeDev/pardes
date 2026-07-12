@@ -29,13 +29,18 @@ import {
   type PluginActivationStatus,
   PUBLISHED_REVIEW_FEEDBACK_ROUTING_GUIDANCE,
   type PullRequestRecord,
+  renderInboxWakeMessage,
   USER_JUDGMENT_HANDOFF_PATH,
   USER_JUDGMENT_INBOX_PATH,
   type VerificationRecord,
   type Workstream,
 } from '../manager/index.ts';
 import type { ManagerPresentation } from '../presentation/index.ts';
-import { REPORT_EXCERPT_MAX_CHARS, REPORT_HANDOFF_NOTE_MAX_CHARS } from '../reporting/index.ts';
+import {
+  type CanonicalReport,
+  REPORT_EXCERPT_MAX_CHARS,
+  REPORT_HANDOFF_NOTE_MAX_CHARS,
+} from '../reporting/index.ts';
 import {
   STORAGE_EVENT_SCAN_MAX_BYTES,
   STORAGE_REPORT_SCAN_MAX_ENTRIES,
@@ -147,6 +152,29 @@ const ctx = { isIdle: () => true } as ExtensionContext;
 const signal = new AbortController().signal;
 const onUpdate = (_update: unknown) => {};
 const createdAt = '2026-06-01T00:00:00.000Z';
+
+function ownedWakeMessage(cursor: string) {
+  const event: ManagerEvent = {
+    createdAt,
+    id: cursor,
+    reportId: 'report-in-wake',
+    summary: 'Canonical report is ready for manager retrieval.',
+    type: 'agent_report_completed',
+  };
+  const outbound = renderInboxWakeMessage({
+    inbox: [event],
+    wake: {
+      createdAt,
+      cursor,
+      pendingCount: 1,
+      token: 'wake-1234567890abcdef',
+    },
+  });
+  return {
+    outbound,
+    runtime: { ...outbound, role: 'custom' as const, timestamp: 1 },
+  };
+}
 
 function worker(): AgentRecord {
   return {
@@ -2729,6 +2757,94 @@ describe('Pardes model-visible tools', () => {
     expect(delivery.isActive).toBe(false);
   });
 
+  test('holds wake coordination for delayed reads and releases on failure or cancellation', async () => {
+    let rejectRead: ((error: Error) => void) | undefined;
+    const manager = {
+      getReport: () =>
+        Effect.tryPromise(
+          () =>
+            new Promise<never>((_resolve, reject) => {
+              rejectRead = reject;
+            }),
+        ),
+    } as unknown as ManagerController;
+    const { emit, pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const released: ExtensionContext[] = [];
+    delivery.onOwnedWakeRelease((releaseCtx) => released.push(releaseCtx));
+    const failedWake = ownedWakeMessage('event-failed-read');
+    expect(delivery.registerOwnedWake(failedWake.outbound, ctx)).toBe(true);
+    emit('message_start', { message: failedWake.runtime });
+    emit('message_end', { message: failedWake.runtime });
+    const pending = requiredValue(tools.get('report_get')).execute(
+      'call-failed-read',
+      { reportId: 'report-failed-read' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!rejectRead) await Promise.resolve();
+
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
+    rejectRead(new Error('delayed read failed'));
+    const result = await pending;
+
+    expect(result.content[0]?.text).toContain('Error:');
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
+    expect(released).toEqual([ctx]);
+    emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] });
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
+
+    let resolveCanceled: ((value: CanonicalReport) => void) | undefined;
+    const canceledManager = {
+      getReport: () =>
+        Effect.promise(
+          () =>
+            new Promise<CanonicalReport>((resolve) => {
+              resolveCanceled = resolve;
+            }),
+        ),
+    } as unknown as ManagerController;
+    const canceledRegistry = registry();
+    const canceledDelivery = registerWorkstreamTools(canceledRegistry.pi, canceledManager);
+    const canceledReleases: ExtensionContext[] = [];
+    canceledDelivery.onOwnedWakeRelease((releaseCtx) => canceledReleases.push(releaseCtx));
+    const canceledWake = ownedWakeMessage('event-canceled-read');
+    expect(canceledDelivery.registerOwnedWake(canceledWake.outbound, ctx)).toBe(true);
+    canceledRegistry.emit('message_start', { message: canceledWake.runtime });
+    canceledRegistry.emit('message_end', { message: canceledWake.runtime });
+    const abort = new AbortController();
+    const canceledPending = requiredValue(canceledRegistry.tools.get('report_get')).execute(
+      'call-canceled-read',
+      { reportId: 'report-canceled-read' },
+      abort.signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolveCanceled) await Promise.resolve();
+    expect(canceledDelivery.isHoldingOwnedWakes).toBe(true);
+
+    abort.abort();
+    const canceled = await canceledPending;
+    expect(canceled.content[0]?.text).toContain('retrieval was canceled');
+    expect(canceledDelivery.isHoldingOwnedWakes).toBe(true);
+    expect(canceledReleases).toEqual([ctx]);
+    canceledRegistry.emit('agent_end', {
+      messages: [{ role: 'assistant', stopReason: 'stop' }],
+    });
+    expect(canceledDelivery.isHoldingOwnedWakes).toBe(false);
+    resolveCanceled({
+      agentId: 'agent-one',
+      content: 'late canceled body',
+      field: 'details',
+      reportId: 'report-canceled-read',
+      status: 'completed',
+      totalChars: 18,
+    });
+    await Promise.resolve();
+    expect(canceledDelivery.activeReportId).toBeUndefined();
+  });
+
   test('keeps an old delayed read stale across restart while a fresh retrieval enters compaction', async () => {
     const resolvers = new Map<string, () => void>();
     let active = true;
@@ -2777,8 +2893,10 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     while (!resolvers.has('report-old')) await Promise.resolve();
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
 
     await command('stop', commandCtx);
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
     await command('start', commandCtx);
     const freshPending = reportGet.execute(
       'call-fresh',
@@ -2788,6 +2906,7 @@ describe('Pardes model-visible tools', () => {
       ctx,
     );
     while (!resolvers.has('report-fresh')) await Promise.resolve();
+    expect(delivery.isHoldingOwnedWakes).toBe(true);
     requiredValue(resolvers.get('report-fresh'))();
     const fresh = await freshPending;
     delivery.observeCompactionStart();
@@ -2798,6 +2917,85 @@ describe('Pardes model-visible tools', () => {
     expect(old.content[0]?.text).toContain('canceled by a manager lifecycle change');
     expect(delivery.activeReportId).toBe('report-fresh');
     delivery.clear();
+  });
+
+  test('starts report_get inside an exact wake turn and dispatches parts only after wake settlement', async () => {
+    const content = 'wake-owned report body\n'.repeat(4_000);
+    let resolveRead: ((value: CanonicalReport) => void) | undefined;
+    let reads = 0;
+    const manager = {
+      getReport: () => {
+        reads += 1;
+        return Effect.promise(
+          () =>
+            new Promise<CanonicalReport>((resolve) => {
+              resolveRead = resolve;
+            }),
+        );
+      },
+    } as unknown as ManagerController;
+    const { emit, messages, pi, tools } = registry();
+    const delivery = registerWorkstreamTools(pi, manager);
+    const reportGet = requiredValue(tools.get('report_get'));
+    const wake = ownedWakeMessage('event-report-ready');
+
+    expect(delivery.registerOwnedWake(wake.outbound, ctx)).toBe(true);
+    expect(delivery.acquirePermit()).toBeUndefined();
+    emit('message_start', { message: wake.runtime });
+    emit('message_end', { message: wake.runtime });
+    const pending = reportGet.execute(
+      'call-in-wake',
+      { reportId: 'report-in-wake' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    while (!resolveRead) await Promise.resolve();
+
+    const duplicate = await reportGet.execute(
+      'call-in-wake-duplicate',
+      { reportId: 'report-in-wake' },
+      signal,
+      onUpdate,
+      ctx,
+    );
+    expect(duplicate.content[0]?.text).toContain('another owned conversation transition');
+    expect(reads).toBe(1);
+    expect(messages).toEqual([]);
+
+    resolveRead({
+      agentId: 'agent-one',
+      content,
+      field: 'details',
+      reportId: 'report-in-wake',
+      status: 'completed',
+      totalChars: content.length,
+    });
+    const started = await pending;
+    const metadata = started.details as { readonly deliveryId: string; readonly parts: number };
+    expect(metadata.parts).toBeGreaterThan(1);
+    expect(messages).toEqual([]);
+
+    emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] });
+    expect(messages).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let part = 1; part <= metadata.parts; part += 1) {
+      const dispatched = requiredValue(messages[part - 1]);
+      expect(dispatched.message).toMatchObject({
+        details: {
+          deliveryId: metadata.deliveryId,
+          part,
+          parts: metadata.parts,
+          reportId: 'report-in-wake',
+        },
+      });
+      const message = { ...(dispatched.message as object), role: 'custom' as const };
+      emit('message_start', { message });
+      emit('message_end', { message });
+      emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] });
+      if (part < metadata.parts) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(delivery.isHoldingOwnedWakes).toBe(false);
   });
 
   test('automatically serializes every oversized canonical report part without model pagination calls', async () => {

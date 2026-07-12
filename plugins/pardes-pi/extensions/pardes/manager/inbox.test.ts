@@ -8,6 +8,7 @@ import {
   MANAGER_INBOX_WAKE_MAX_ROW_CHARS,
   MANAGER_INBOX_WAKE_MAX_ROWS,
   makeInboxWake,
+  managerInboxWakeMessageIdentity,
   projectInboxAttention,
   renderInboxWakeMessage,
   retainCurrentInboxWake,
@@ -44,6 +45,29 @@ function render(inbox: ReadonlyArray<ManagerEvent>) {
 }
 
 describe('manager inbox notification projection', () => {
+  test('identifies only complete bounded renderer output and changes identity with wake content', () => {
+    const inbox = [event('event-1')];
+    const outbound = render(inbox);
+    const message = { ...outbound, role: 'custom' as const, timestamp: 0 };
+    const identity = managerInboxWakeMessageIdentity(outbound);
+
+    expect(identity).toMatch(/^[a-f0-9]{64}$/);
+    expect(managerInboxWakeMessageIdentity(message)).toBe(identity);
+    expect(managerInboxWakeMessageIdentity({ ...message, role: 'user' })).toBeUndefined();
+    expect(
+      managerInboxWakeMessageIdentity({
+        ...message,
+        details: { ...message.details, wakeToken: 'wake-0000000000000000' },
+      }),
+    ).not.toBe(identity);
+    for (const details of [
+      { type: 'manager_inbox_wake' },
+      { ...message.details, cursor: undefined },
+      { ...message.details, extra: true },
+    ])
+      expect(managerInboxWakeMessageIdentity({ ...message, details })).toBeUndefined();
+  });
+
   test('creates a stable wake token through at most one inspectable durable inbox batch', () => {
     const inbox = Array.from({ length: MANAGER_INBOX_WAKE_MAX_ROWS + 2 }, (_, index) =>
       event(`event-${index + 1}`),

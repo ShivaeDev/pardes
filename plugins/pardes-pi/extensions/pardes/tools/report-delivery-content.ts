@@ -2,6 +2,9 @@ import type { CanonicalReport, CanonicalReportMetadata } from '../reporting/inde
 
 export const REPORT_DELIVERY_MESSAGE_TYPE = 'pardes-canonical-report-delivery';
 export const REPORT_DELIVERY_DETAIL_TYPE = 'canonical_report_delivery_part';
+export const REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE = 'pardes-report-delivery-outcome';
+export const REPORT_DELIVERY_CANCELLED_DETAIL_TYPE = 'canonical_report_delivery_cancelled';
+export const REPORT_DELIVERY_OUTCOME_MAX_BYTES = 1_024;
 /** Leave headroom beneath Pi's documented 50 KiB model-facing tool-output limit. */
 export const REPORT_DELIVERY_PART_MAX_BYTES = 48 * 1_024;
 const REPORT_DELIVERY_CONTENT_MAX_BYTES = 44 * 1_024;
@@ -39,6 +42,47 @@ export interface DeliveryMessageDetails {
   readonly parts: number;
   readonly reportId: string;
   readonly type: typeof REPORT_DELIVERY_DETAIL_TYPE;
+}
+
+export type ReportDeliveryCancellationReason =
+  | 'agent_aborted'
+  | 'agent_error'
+  | 'compaction_timeout'
+  | 'delivery_marker_mismatch'
+  | 'manager_lifecycle_change'
+  | 'manager_stopped'
+  | 'owned_wake_timeout'
+  | 'session_reload'
+  | 'session_shutdown'
+  | 'settlement_mismatch'
+  | 'unrelated_input';
+
+export interface ReportDeliveryCancellation {
+  readonly deliveryId: string;
+  readonly nextPart: number;
+  readonly parts: number;
+  readonly reason: ReportDeliveryCancellationReason;
+  readonly reportId: string;
+}
+
+export function renderReportDeliveryCancellation(cancellation: ReportDeliveryCancellation) {
+  const content = [
+    '[Pardes canonical report delivery cancelled]',
+    `deliveryId: ${cancellation.deliveryId} · reportId: ${cancellation.reportId} · incompleteAtPart: ${cancellation.nextPart}/${cancellation.parts} · reason: ${cancellation.reason}`,
+    `The canonical body is incomplete. Resume explicitly with one report_get({ reportId: ${JSON.stringify(cancellation.reportId)} }) call after the unrelated work or lifecycle transition settles; automatic continuation for the cancelled identity has stopped.`,
+  ].join('\n');
+  if (Buffer.byteLength(content, 'utf8') > REPORT_DELIVERY_OUTCOME_MAX_BYTES)
+    throw new Error('Canonical report cancellation outcome exceeded its structural bound.');
+  return {
+    content,
+    customType: REPORT_DELIVERY_OUTCOME_MESSAGE_TYPE,
+    details: {
+      ...cancellation,
+      resumable: true,
+      type: REPORT_DELIVERY_CANCELLED_DETAIL_TYPE,
+    },
+    display: true,
+  } as const;
 }
 
 export interface ReportDeliveryCustomMessage {

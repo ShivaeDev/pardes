@@ -61,6 +61,7 @@ import {
 import {
   type AgentRecord,
   type InboxHandoff,
+  type InboxWake,
   initialManagerState,
   type ManagerActivation,
   ManagerActivationSchema,
@@ -87,6 +88,7 @@ import {
 import {
   type InboxWakeRelease,
   inboxThroughCursor,
+  type ManagerInboxWakeMessage,
   makeInboxWake,
   projectInboxAttention,
   renderInboxWakeMessage,
@@ -294,6 +296,13 @@ export interface AgentReloadResult {
   readonly worktree: 'preserved';
 }
 
+export interface ManagerInboxWakeHold {
+  /** Transient owned-delivery hold; durable inbox state remains the retry authority. */
+  readonly isHoldingOwnedWakes: boolean;
+  /** Register the exact cursor message immediately before its irreversible Pi injection. */
+  readonly registerOwnedWake: (message: ManagerInboxWakeMessage, ctx: ExtensionContext) => boolean;
+}
+
 export interface ManagerControllerOptions {
   readonly worktrees?: ManagedWorktreeShape;
   readonly browserHandoff?: BrowserHandoffShape;
@@ -309,6 +318,7 @@ export interface ManagerControllerOptions {
   readonly presentation?: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
   readonly compactionSafetyScheduler?: ManagerCompactionSafetyScheduler;
   readonly activationSafety?: PluginActivationSafetyShape;
+  readonly inboxWakeHold?: ManagerInboxWakeHold;
 }
 
 function invalidManagedState(reason: string): InvalidManagedStateError {
@@ -374,6 +384,7 @@ export class ManagerController {
   private readonly worktreeBootstrap: WorktreeBootstrapShape;
   private readonly presentation: Pick<ManagerPresentation, 'updateDashboard' | 'clearDashboard'>;
   private readonly activationSafety: PluginActivationSafetyShape;
+  private readonly inboxWakeHold: ManagerInboxWakeHold | undefined;
   private readonly liveRuntimes = new Map<string, WorkerRuntimeSnapshot>();
   private readonly ignoredWorkerEvents = new Set<string>();
   private readonly lifecycleGate = Semaphore.makeUnsafe(1);
@@ -414,6 +425,7 @@ export class ManagerController {
     this.presentation = options.presentation ?? makeManagerPresentation();
     this.compactionSafetyScheduler =
       options.compactionSafetyScheduler ?? defaultManagerCompactionSafetyScheduler;
+    this.inboxWakeHold = options.inboxWakeHold;
     this.activationSafety = options.activationSafety ?? makeProcessLoadedPluginActivationSafety();
     const onEvent = (event: WorkerSupervisorEvent) =>
       this.active?.workerEvents.handle(event) ?? Effect.void;
@@ -856,6 +868,7 @@ export class ManagerController {
     const state = this.active?.state;
     if (
       this.compactionSafety ||
+      this.inboxWakeHold?.isHoldingOwnedWakes ||
       !state ||
       state.inbox.length === 0 ||
       retainCurrentInboxWake(state.inbox, state.inboxWake) ||
@@ -884,6 +897,7 @@ export class ManagerController {
     const active = this.active;
     if (
       this.compactionSafety ||
+      this.inboxWakeHold?.isHoldingOwnedWakes ||
       !active ||
       !ctx ||
       active.state.inbox.length === 0 ||
@@ -908,6 +922,22 @@ export class ManagerController {
     const coveredCount =
       inboxThroughCursor(release.inbox, release.wake.cursor)?.length ?? release.wake.pendingCount;
     const queuedSuffixCount = Math.max(0, release.inbox.length - coveredCount);
+    const message = renderInboxWakeMessage(release);
+    const hold = this.inboxWakeHold;
+    if (hold?.isHoldingOwnedWakes) {
+      yield* this.rollbackInboxWakeReservation(active, release.wake, ctx);
+      return false;
+    }
+    if (hold && !hold.registerOwnedWake(message, ctx)) {
+      yield* this.rollbackInboxWakeReservation(active, release.wake, ctx);
+      return false;
+    }
+    // Registration and Pi injection are one synchronous final boundary. A
+    // report_get lease cannot appear between these two operations.
+    this.pi.sendMessage(message, {
+      deliverAs: 'followUp',
+      triggerTurn: true,
+    });
     yield* this.appendEventSafely(
       active.store,
       makeEvent(
@@ -916,11 +946,30 @@ export class ManagerController {
         timestamp,
       ),
     );
-    this.pi.sendMessage(renderInboxWakeMessage(release), {
-      deliverAs: 'followUp',
-      triggerTurn: true,
-    });
     return true;
+  });
+
+  private readonly rollbackInboxWakeReservation = Effect.fnUntraced(function* (
+    this: ManagerController,
+    active: PullRequestPublicationNamespace,
+    wake: InboxWake,
+    ctx: ExtensionContext,
+  ) {
+    yield* active.store.mutate<boolean, never>((state) => {
+      if (
+        state.inboxWake?.cursor !== wake.cursor ||
+        state.inboxWake.token !== wake.token ||
+        state.inboxHandoff
+      )
+        return Effect.succeed([false, state] as const);
+      const { inboxWake: _inboxWake, ...withoutReservation } = state;
+      return Effect.succeed([true, withoutReservation] as const);
+    });
+    if (this.active !== active) return;
+    yield* this.refreshActiveState(active, ctx);
+    // A lease-release callback may already have observed the unsent cursor and
+    // returned. Re-evaluate only after refresh makes reservation removal visible.
+    this.scheduleInboxWakeAfterIdle(ctx);
   });
 
   private readonly refreshActiveState = Effect.fnUntraced(function* (

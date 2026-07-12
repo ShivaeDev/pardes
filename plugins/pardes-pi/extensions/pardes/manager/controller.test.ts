@@ -4619,6 +4619,179 @@ describe('manager controller', () => {
     ]);
   });
 
+  test('defers cursor minting behind an owned delivery hold and restores one durable wake without duplication', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    let held = true;
+    const registeredWakes: unknown[] = [];
+    const inboxWakeHold = {
+      get isHoldingOwnedWakes() {
+        return held;
+      },
+      registerOwnedWake(message: unknown) {
+        registeredWakes.push(message);
+        return true;
+      },
+    };
+    const controller = new ManagerController(fixture.pi, {
+      inboxWakeHold,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        {
+          objective: 'Hold one durable inbox wake during report delivery',
+          title: 'Owned wake hold',
+        },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        {
+          task: 'Emit durable attention while delivery owns the conversation.',
+          workstreamId: workstream.id,
+        },
+        fixture.ctx,
+      ),
+    );
+
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        question: 'Preserve this durable row across the transient hold?',
+        type: 'question',
+      }),
+    );
+    const cursor = controller.snapshot()?.inbox[0]?.id;
+    controller.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await sleep(20);
+
+    expect(controller.snapshot()?.inbox).toHaveLength(1);
+    expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    expect(registeredWakes).toEqual([]);
+    expect(fixture.messages).toEqual([]);
+    await Effect.runPromise(controller.shutdown(fixture.ctx));
+
+    held = false;
+    const restored = new ManagerController(fixture.pi, {
+      inboxWakeHold,
+      makeWorkers: stubWorkers().makeWorkers,
+    });
+    await Effect.runPromise(restored.restore(fixture.ctx));
+    restored.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await eventually(() => fixture.messages.length === 1);
+
+    expect(restored.snapshot()?.inbox.map(({ id }) => id)).toEqual([cursor]);
+    expect(restored.snapshot()?.inboxWake?.cursor).toBe(cursor);
+    expect(registeredWakes).toHaveLength(1);
+    expect(registeredWakes[0]).toEqual(fixture.messages[0]?.message);
+    expect(registeredWakes[0]).toMatchObject({
+      details: {
+        cursor: restored.snapshot()?.inboxWake?.cursor,
+        wakeToken: restored.snapshot()?.inboxWake?.token,
+      },
+    });
+    expect(fixture.messages[0]?.message).toMatchObject({
+      customType: 'pardes-worker-event',
+      details: { cursor, pendingCount: 1, queuedSuffixCount: 0, type: 'manager_inbox_wake' },
+    });
+    restored.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await sleep(20);
+    expect(fixture.messages).toHaveLength(1);
+    await Effect.runPromise(restored.shutdown(fixture.ctx));
+  });
+
+  test('rolls back a persisted cursor when a report lease wins the final send boundary', async () => {
+    const repo = fixtureRepository();
+    const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
+    temporaryDirectories.push(stateRoot);
+    process.env.PARDES_PI_STATE_DIR = stateRoot;
+    const fixture = harness(repo);
+    const workers = stubWorkers();
+    let mode: 'held' | 'race' | 'open' = 'held';
+    let boundaryReads = 0;
+    let acceptRegistration = true;
+    let replayEarlyRetry = false;
+    let controller: ManagerController;
+    const registrations: unknown[] = [];
+    const inboxWakeHold = {
+      get isHoldingOwnedWakes() {
+        if (mode === 'held') return true;
+        if (mode === 'open') return false;
+        boundaryReads += 1;
+        return boundaryReads > 1;
+      },
+      registerOwnedWake(message: unknown) {
+        registrations.push(message);
+        const accepted = acceptRegistration;
+        if (!accepted && replayEarlyRetry) {
+          // Model read failure, AbortSignal cancellation, and agent_end racing
+          // ahead of rollback. Every retry still sees the unsent durable cursor
+          // and is intentionally consumed without creating duplicate timers.
+          acceptRegistration = true;
+          for (const _edge of ['read_failure', 'abort', 'agent_end'])
+            controller.scheduleInboxWakeAfterIdle(fixture.ctx);
+        }
+        return accepted;
+      },
+    };
+    controller = new ManagerController(fixture.pi, {
+      inboxWakeHold,
+      makeWorkers: workers.makeWorkers,
+    });
+    await Effect.runPromise(controller.activate(fixture.ctx));
+    const workstream = await Effect.runPromise(
+      controller.createWorkstream(
+        { objective: 'Serialize report read and wake send', title: 'Final wake boundary' },
+        fixture.ctx,
+      ),
+    );
+    const agent = await Effect.runPromise(
+      controller.spawnAgent(
+        { task: 'Produce one durable wake race.', workstreamId: workstream.id },
+        fixture.ctx,
+      ),
+    );
+    await Effect.runPromise(
+      workers.emit({
+        agentId: agent.id,
+        question: 'Race the delayed report read?',
+        type: 'question',
+      }),
+    );
+    const cursor = controller.snapshot()?.inbox[0]?.id;
+
+    mode = 'race';
+    boundaryReads = 0;
+    expect(await Effect.runPromise(controller.releaseInboxWake(fixture.ctx))).toBe(false);
+    expect(boundaryReads).toBe(3);
+    expect(controller.snapshot()).not.toHaveProperty('inboxWake');
+    expect(registrations).toEqual([]);
+    expect(fixture.messages).toEqual([]);
+
+    // Model the opposite ordering: rollback completed under the current hold,
+    // then lease release hands retry back after the hold clears. The first
+    // registration rejects and consumes an early retry before its own rollback;
+    // rollback completion must create the remaining retry edge.
+    mode = 'open';
+    acceptRegistration = false;
+    replayEarlyRetry = true;
+    controller.scheduleInboxWakeAfterIdle(fixture.ctx);
+    await eventually(() => fixture.messages.length === 1);
+
+    expect(controller.snapshot()?.inboxWake?.cursor).toBe(cursor);
+    expect(registrations).toHaveLength(2);
+    expect(registrations[0]).toEqual(registrations[1]);
+    expect(fixture.messages).toHaveLength(1);
+    expect(fixture.messages[0]?.message).toEqual(registrations[1]);
+  });
+
   test('buffers a busy-period attention burst durably and releases one bounded cursor wake after manager idle', async () => {
     const repo = fixtureRepository();
     const stateRoot = mkdtempSync(join(tmpdir(), 'pardes-state-'));
